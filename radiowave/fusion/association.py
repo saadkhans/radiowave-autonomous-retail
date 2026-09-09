@@ -205,13 +205,14 @@ class AssociationScorer:
         vision_owner: dict[str, str],
     ) -> tuple[float, int]:
         """1.0 if interaction evidence at the departure point was assigned to this person,
-        0.1 if it was assigned to someone else, 0.5 when there is no evidence."""
+        0.1 if it was assigned to someone else, 0.5 when there is no (confident) evidence."""
         if not self._vision_enabled or item.movement_start_at is None:
             return 0.5, 0
         relevant = [
             v
             for v in vision
             if v.kind in _INTERACTION_KINDS
+            and v.confidence >= self._cfg.vision_min_confidence
             and abs(_seconds(v.timestamp, item.movement_start_at)) <= self._cfg.vision_window_s
             and item.rest_position is not None
             and v.coordinate.horizontal_distance_to(item.rest_position)

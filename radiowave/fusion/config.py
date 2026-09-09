@@ -115,6 +115,12 @@ class AssociationConfig(FrozenModel):
     item_moving_speed_m_s: float = Field(default=0.2)
     fixture_proximity_m: float = Field(default=1.0)
     vision_match_radius_m: float = Field(default=0.7)
+    vision_min_confidence: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description="Vision evidence below this confidence is ignored entirely",
+    )
     vision_window_s: float = Field(default=2.0)
     ledger_alpha: float = Field(default=0.3, gt=0.0, le=1.0)
     prune_score: float = Field(default=0.02)

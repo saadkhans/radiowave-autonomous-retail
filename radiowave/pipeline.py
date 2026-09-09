@@ -60,6 +60,7 @@ class PipelineResult(ContractModel):
     sessions: list[ShopperSession] = Field(default_factory=list)
     observations_accepted: int = 0
     observations_dropped: int = 0
+    observations_out_of_order: int = 0
     steps: int = 0
 
     def committed(self, event_type: str | None = None) -> list[RetailEvent]:
@@ -102,6 +103,9 @@ class FoundationPipeline:
         self._next_step: datetime | None = None
         self._sequence = 0
         self._scheduled: list[tuple[datetime, int, EntryKind, dict[str, Any]]] = []
+        self._last_timestamp: datetime | None = None
+        self._twin_recorded = False
+        self.observations_out_of_order = 0
 
     # ------------------------------------------------------------------ recording
     def schedule_entry(self, timestamp: datetime, kind: EntryKind, payload: dict[str, Any]) -> None:
@@ -153,9 +157,23 @@ class FoundationPipeline:
         Observations must arrive in timestamp order; this is the single entry point
         used by batch runs, paced replay and step-by-step replay alike.
         """
+        if self._last_timestamp is not None and observation.timestamp < self._last_timestamp:
+            # Fusion time never moves backwards; late samples are dropped, not replayed.
+            self.observations_out_of_order += 1
+            return False
+        self._last_timestamp = observation.timestamp
         self._advance_to(observation.timestamp)
         if not self.dedup.accept(observation):
             return False
+        if not self._twin_recorded:
+            # The recording carries the twin it was produced against, so a replay never
+            # has to guess which store the coordinates, zones and home fixtures refer to.
+            self._record(
+                observation.timestamp,
+                EntryKind.STORE_TWIN,
+                self.registry.store.model_dump(mode="json"),
+            )
+            self._twin_recorded = True
         self._flush_scheduled(observation.timestamp)
         self._record(
             observation.timestamp,
@@ -235,6 +253,7 @@ class FoundationPipeline:
             sessions=list(self.fusion.sessions.values()),
             observations_accepted=self.dedup.accepted,
             observations_dropped=self.dedup.dropped,
+            observations_out_of_order=self.observations_out_of_order,
             steps=self._steps,
         )
 

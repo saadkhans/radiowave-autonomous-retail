@@ -25,7 +25,6 @@ from radiowave.replay.reader import ReplayPlayer, observations_from, open_replay
 from radiowave.replay.recorder import InMemoryRecorder, JsonlRecorder, ParquetRecorder
 from radiowave.simulator.library import SCENARIOS, load_scenario
 from radiowave.simulator.runner import run_scenario
-from radiowave.simulator.stores import build_lab_store
 
 
 def _print_summary(result: PipelineResult, out: Callable[[str], None] = print) -> None:
@@ -90,15 +89,20 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _store_for(entries: list[RecordedEntry], scenario_id: str | None) -> Store:
-    if scenario_id is None:
-        for entry in entries:
-            if entry.scenario_id in SCENARIOS:
-                scenario_id = entry.scenario_id
-                break
-    if scenario_id is not None and scenario_id in SCENARIOS:
-        return load_scenario(scenario_id).store
-    return build_lab_store()
+def _store_for(entries: list[RecordedEntry], args: argparse.Namespace) -> Store:
+    """The twin a recording was produced against; never silently substituted."""
+    if args.store is not None:
+        return Store.model_validate_json(Path(args.store).read_text(encoding="utf-8"))
+    if args.scenario is not None:
+        return load_scenario(args.scenario).store
+    for entry in entries:
+        if entry.kind == EntryKind.STORE_TWIN:
+            return Store.model_validate(entry.payload)
+    msg = (
+        "recording carries no STORE_TWIN entry; pass --store <store.json> or "
+        "--scenario <id> so replay uses the original digital twin"
+    )
+    raise SystemExit(msg)
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
@@ -107,7 +111,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
     if not entries:
         print("recording is empty", file=sys.stderr)
         return 1
-    store = _store_for(entries, args.scenario)
+    store = _store_for(entries, args)
     scenario_id = args.scenario or entries[0].scenario_id
     vision_enabled = any(
         e.kind == EntryKind.OBSERVATION
@@ -166,7 +170,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="0 = as fast as possible, 1 = real time, 10 = 10x (default 0)",
     )
     rep.add_argument("--step", action="store_true", help="release observations one by one")
-    rep.add_argument("--scenario", help="scenario id whose store twin to use")
+    rep.add_argument("--scenario", help="built-in scenario id whose store twin to use")
+    rep.add_argument("--store", help="path to a Store JSON twin to replay against")
     rep.set_defaults(func=cmd_replay)
     return parser
 

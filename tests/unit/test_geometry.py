@@ -49,7 +49,10 @@ def test_frame_mismatch_is_rejected() -> None:
     with pytest.raises(ValueError, match="frame"):
         transform.to_world(SensorCoordinate(x=1, y=1, frame_id="b"))
     with pytest.raises(ValueError, match="frame"):
-        transform.to_sensor(WorldCoordinate(x=1, y=1, frame_id="other"))
+        WorldCoordinate(x=1, y=1, frame_id="other")  # world coordinates are store-frame only
+    foreign = RigidTransform("a", "not-store", transform.rotation, transform.translation)
+    with pytest.raises(ValueError, match="frame"):
+        foreign.to_sensor(WorldCoordinate(x=1, y=1))
 
 
 def test_inverse_and_compose_give_identity() -> None:

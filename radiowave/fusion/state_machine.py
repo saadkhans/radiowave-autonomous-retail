@@ -64,7 +64,10 @@ class ItemStateMachine:
         carrier_position: WorldCoordinate | None,
         nearest_person_m: float | None = None,
     ) -> Transition | None:
-        """Advance one item by at most one transition. Stale items never transition.
+        """Advance one item by at most one transition.
+
+        Stale items never transition, and every evaluation must be backed by at
+        least one localized read that arrived since the previous evaluation.
 
         ``nearest_person_m`` is the distance to the closest tracked person (None if
         nobody is tracked); a resting item with someone within ``hold_radius_m``
@@ -76,6 +79,9 @@ class ItemStateMachine:
             return None
         if item.is_stale(now, self._item_cfg.stale_after_s):
             return None
+        if not item.has_fresh_evidence():
+            return None  # a cached position is never new evidence for any transition
+        item.localized_at_last_evaluation = item.localized_count
         if item.state in (ItemState.ON_FIXTURE, ItemState.MISPLACED, ItemState.UNKNOWN):
             return self._from_rest(item, now)
         if item.state == ItemState.INTERACTION_CANDIDATE:
@@ -96,9 +102,6 @@ class ItemStateMachine:
     # ------------------------------------------------------------------
     def _from_rest(self, item: ItemTrackState, now: datetime) -> Transition | None:
         displacement = item.displacement_from_rest()
-        if item.observation_count == item.reads_at_last_evaluation:
-            return None  # no new read since the last step: a cached position is not new evidence
-        item.reads_at_last_evaluation = item.observation_count
         if displacement > self._cfg.movement_threshold_m:
             item.reads_beyond_threshold += 1
         else:

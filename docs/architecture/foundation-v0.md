@@ -114,7 +114,9 @@ candidates there is nothing to disambiguate and margin is 1.0. Physical events
 * While an item has no fresh reads (stale) it is neither scored nor attributed; a cached
   position is never treated as new evidence.
 * A JSONL or Parquet recording replays to the identical committed events, carts
-  and item states (`tests/integration/test_pipeline_replay.py`).
+  and item states (`tests/integration/test_pipeline_replay.py`). Every recording
+  starts with a `STORE_TWIN` entry so replay uses the original twin.
+* Observations older than the pipeline clock are dropped and counted, never applied.
 
 ## Known limitations (Foundation v0)
 
@@ -127,7 +129,9 @@ candidates there is nothing to disambiguate and margin is 1.0. Physical events
   (WAIT then REVIEW) unless vision evidence resolves it.
 * Person tracking merges by proximity gating; crossing shoppers in a dense crowd
   are out of scope until real radar characterization data exists.
-* Sessions are created on first sight, not strictly at the entry boundary.
+* Sessions are created on first sight, not strictly at the entry boundary. Entering
+  the exit boundary ends the session; a track that steps back in gets a new session
+  and exited sessions never receive further attribution.
 * A shopper whose track ends (left radar coverage) is dropped from every candidate
   ledger; if they were the true carrier the item is later attributed to whoever remains.
 * No persistence, streaming or services: everything runs in-process on synthetic data.

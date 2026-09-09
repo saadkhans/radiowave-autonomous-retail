@@ -6,7 +6,8 @@
         "RETAIL_EVENT",
         "DECISION",
         "CART_EVENT",
-        "GROUND_TRUTH"
+        "GROUND_TRUTH",
+        "STORE_TWIN"
       ],
       "title": "EntryKind",
       "type": "string"

@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Protocol
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from radiowave.contracts._base import FrozenModel, UnitInterval, UtcDatetime
 from radiowave.contracts.geometry import SensorCoordinate
@@ -39,6 +39,13 @@ class NativeRfidRead(FrozenModel):
     estimate_sigma_m: float | None = Field(
         default=None, ge=0.0, description="1-sigma accuracy of the estimate"
     )
+
+    @model_validator(mode="after")
+    def _estimate_needs_accuracy(self) -> NativeRfidRead:
+        if self.estimate is not None and self.estimate_sigma_m is None:
+            msg = "a location estimate must state its accuracy (estimate_sigma_m)"
+            raise ValueError(msg)
+        return self
 
 
 class RfidSource(Protocol):

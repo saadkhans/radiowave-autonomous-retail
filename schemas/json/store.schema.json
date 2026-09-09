@@ -292,7 +292,7 @@
     },
     "WorldCoordinate": {
       "additionalProperties": false,
-      "description": "Point in the shared store frame (meters).",
+      "description": "Point in the shared store frame (meters). ``frame_id`` is always the store frame.",
       "properties": {
         "frame_id": {
           "default": "store",

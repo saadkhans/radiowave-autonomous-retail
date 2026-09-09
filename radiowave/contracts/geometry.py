@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from radiowave.contracts._base import FrozenModel, NonNegativeFloat
 
@@ -69,9 +69,17 @@ class _Point(FrozenModel):
 
 
 class WorldCoordinate(_Point):
-    """Point in the shared store frame (meters)."""
+    """Point in the shared store frame (meters). ``frame_id`` is always the store frame."""
 
     frame_id: str = STORE_FRAME_ID
+
+    @field_validator("frame_id")
+    @classmethod
+    def _store_frame_only(cls, value: str) -> str:
+        if value != STORE_FRAME_ID:
+            msg = f"WorldCoordinate must be in frame {STORE_FRAME_ID!r}, got {value!r}"
+            raise ValueError(msg)
+        return value
 
     def displaced(self, delta: Vector3D) -> WorldCoordinate:
         return WorldCoordinate(

@@ -257,15 +257,24 @@ class ItemTrackState:
     last_seen_at: datetime | None = None
     carrier_track_id: str | None = None
     observation_count: int = 0
+    last_localized_at: datetime | None = None
+    localized_count: int = 0
     reads_beyond_threshold: int = 0
-    reads_at_last_evaluation: int = 0
+    localized_at_last_evaluation: int = 0
     at_rest_since: datetime | None = None
     attribution_unresolved: bool = False
     carry_announced: bool = False
     history: deque[TrackPoint] = field(default_factory=deque)
 
     def is_stale(self, now: datetime, stale_after_s: float) -> bool:
-        return self.last_seen_at is None or _seconds(now, self.last_seen_at) > stale_after_s
+        """True when no *localized* read arrived within ``stale_after_s``."""
+        return (
+            self.last_localized_at is None or _seconds(now, self.last_localized_at) > stale_after_s
+        )
+
+    def has_fresh_evidence(self) -> bool:
+        """True once at least one localized read arrived since the last evaluation."""
+        return self.localized_count != self.localized_at_last_evaluation
 
     def displacement_from_rest(self) -> float:
         if self.position is None or self.rest_position is None:
@@ -359,17 +368,19 @@ class ItemTrackManager:
         track = self.register(observation.epc, None, None)
         if track.last_seen_at is not None and observation.timestamp < track.last_seen_at:
             return track
-        gap = (
-            _seconds(observation.timestamp, track.last_seen_at)
-            if track.last_seen_at is not None
-            else None
-        )
         track.last_seen_at = observation.timestamp
         track.observation_count += 1
         if observation.zone_id is not None:
             track.zone_id = observation.zone_id
         if observation.coordinate is None:
-            return track
+            return track  # zone-only read: identity evidence, not location evidence
+        gap = (
+            _seconds(observation.timestamp, track.last_localized_at)
+            if track.last_localized_at is not None
+            else None
+        )
+        track.last_localized_at = observation.timestamp
+        track.localized_count += 1
         if track.position is None or (gap is not None and gap > cfg.reset_after_s):
             track.position = observation.coordinate
         else:
@@ -382,7 +393,7 @@ class ItemTrackManager:
         track.history.append(TrackPoint(timestamp=observation.timestamp, coordinate=track.position))
         while len(track.history) > cfg.history_length:
             track.history.popleft()
-        if track.rest_position is None and track.observation_count >= cfg.rest_init_reads:
+        if track.rest_position is None and track.localized_count >= cfg.rest_init_reads:
             # Only the rest position is known here; the fusion engine classifies it
             # (ON_FIXTURE vs MISPLACED) against the twin, so state stays UNKNOWN.
             track.rest_position = track.position

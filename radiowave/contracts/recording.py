@@ -32,6 +32,7 @@ class EntryKind(StrEnum):
     DECISION = "DECISION"
     CART_EVENT = "CART_EVENT"
     GROUND_TRUTH = "GROUND_TRUTH"
+    STORE_TWIN = "STORE_TWIN"
 
 
 class RecordedEntry(ContractModel):

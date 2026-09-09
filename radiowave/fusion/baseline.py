@@ -75,6 +75,8 @@ class BaselineFusionEngine:
         self.ledger = CandidateLedger(self.config.association)
         self.transitions: list[Transition] = []
         self.sessions: dict[str, ShopperSession] = {}
+        self.session_history: list[ShopperSession] = []
+        self._session_counter: dict[str, int] = {}
         self._vision: deque[VisionEvidence] = deque(maxlen=_VISION_BUFFER)
         self._handoff_since: dict[EPC, tuple[str, datetime]] = {}
         self._committed_ids: set[str] = set()
@@ -198,8 +200,13 @@ class BaselineFusionEngine:
                 considered.add(active.track_id)
         for person_id in sorted(considered):
             person = self.persons.get(person_id)
-            if person is None or person.state == PersonTrackState.ENDED:
-                self.ledger.drop(item.epc, person_id)  # a departed shopper cannot block others
+            if (
+                person is None
+                or person.state == PersonTrackState.ENDED
+                or not self._in_store(person)
+            ):
+                # Departed or exited shoppers cannot be candidates nor block others.
+                self.ledger.drop(item.epc, person_id)
                 continue
             pair = self.ledger.pair(item.epc, person_id)
             evidence = self.scorer.score(
@@ -221,6 +228,11 @@ class BaselineFusionEngine:
     ) -> list[RetailEvent]:
         to = transition.to_state
         frm = transition.from_state
+        if frm == ItemState.INTERACTION_CANDIDATE and to != ItemState.CARRIED:
+            # Abandoned interaction (jitter/timeout): its evidence must not seed the next one.
+            self.ledger.reset(item.epc)
+            self._handoff_since.pop(item.epc, None)
+            return []
         if frm != ItemState.CARRIED:
             return []
         if to == ItemState.ON_FIXTURE:
@@ -375,18 +387,24 @@ class BaselineFusionEngine:
         ]
 
     # ------------------------------------------------------------------ sessions
+    def _in_store(self, person: PersonState) -> bool:
+        """A shopper with an ACTIVE session; exited sessions receive no attribution."""
+        session = self.sessions.get(person.track_id)
+        return session is not None and session.state == SessionState.ACTIVE
+
     def _update_sessions(self, now: datetime) -> None:
         for person in self.persons.all:
             session = self.sessions.get(person.track_id)
             if session is None:
-                session = ShopperSession(
-                    session_id=f"S-{person.track_id}",
-                    person_track_id=person.track_id,
-                    entered_at=person.created_at,
-                    entry_boundary_id=self._boundary_id(person, entry=True),
-                )
-                self.sessions[person.track_id] = session
-                person.session_id = session.session_id
+                session = self._open_session(person, person.created_at)
+            if session.state == SessionState.EXITED:
+                # A track that steps back out of the exit boundary starts a fresh session;
+                # the exited one keeps its cart for settlement.
+                if person.state == PersonTrackState.ACTIVE and not self.registry.in_exit_boundary(
+                    person.position
+                ):
+                    self._open_session(person, now)
+                continue
             if session.state != SessionState.ACTIVE:
                 continue
             if person.state == PersonTrackState.ACTIVE and self.registry.in_exit_boundary(
@@ -398,6 +416,23 @@ class BaselineFusionEngine:
             elif person.state == PersonTrackState.ENDED:
                 session.state = SessionState.ABANDONED
                 session.exited_at = now
+
+    def _open_session(self, person: PersonState, entered_at: datetime) -> ShopperSession:
+        self._session_counter[person.track_id] = self._session_counter.get(person.track_id, 0) + 1
+        ordinal = self._session_counter[person.track_id]
+        suffix = "" if ordinal == 1 else f"-{ordinal}"
+        session = ShopperSession(
+            session_id=f"S-{person.track_id}{suffix}",
+            person_track_id=person.track_id,
+            entered_at=entered_at,
+            entry_boundary_id=self._boundary_id(person, entry=True),
+        )
+        previous = self.sessions.get(person.track_id)
+        if previous is not None:
+            self.session_history.append(previous)
+        self.sessions[person.track_id] = session
+        person.session_id = session.session_id
+        return session
 
     def _boundary_id(self, person: PersonState, entry: bool) -> str | None:
         kind = BoundaryKind.ENTRY if entry else BoundaryKind.EXIT

@@ -58,10 +58,9 @@ class ObservationNormalizer:
         transform = self._registry.transform(read.sensor_id)
         coordinate = None
         uncertainty = None
-        if read.estimate is not None:
+        if read.estimate is not None and read.estimate_sigma_m is not None:
             coordinate = transform.to_world(read.estimate)
-            sigma = read.estimate_sigma_m if read.estimate_sigma_m is not None else 0.0
-            uncertainty = SpatialUncertainty.isotropic(sigma)
+            uncertainty = SpatialUncertainty.isotropic(read.estimate_sigma_m)
         zone = self._registry.zone_at(
             sensor.pose.position, kinds={ZoneKind.FIXTURE, ZoneKind.SALES_FLOOR, ZoneKind.EXIT}
         )
