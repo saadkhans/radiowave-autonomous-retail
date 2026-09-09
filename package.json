@@ -1,0 +1,11 @@
+{
+  "name": "radiowave-autonomous-retail",
+  "private": true,
+  "scripts": {
+    "lint": "python -m ruff check .",
+    "typecheck": "python -m mypy radiowave adapters",
+    "test": "python -m pytest",
+    "build": "python -m compileall radiowave adapters",
+    "security:secrets": "gitleaks detect --source . --no-banner"
+  }
+}
