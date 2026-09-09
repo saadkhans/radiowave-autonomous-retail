@@ -28,6 +28,10 @@ class PersonTrackingConfig(FrozenModel):
         "a second native track from sensor X",
     )
     velocity_window_s: float = Field(default=0.6)
+    prediction_horizon_s: float = Field(
+        default=1.0,
+        description="Maximum dead-reckoning horizon when a LOST track's position is needed",
+    )
     history_length: int = Field(
         default=600, ge=2, description="Points kept per track (~30 s at 20 Hz)"
     )
@@ -56,8 +60,11 @@ class StateMachineConfig(FrozenModel):
     movement_threshold_m: float = Field(
         default=0.75, description="Displacement from rest to become INTERACTION_CANDIDATE"
     )
-    movement_confirm_points: int = Field(
-        default=4, ge=1, description="Consecutive smoothed points beyond threshold required"
+    movement_confirm_steps: int = Field(
+        default=4,
+        ge=1,
+        description="Consecutive fusion steps (PipelineConfig.step_interval_s apart) with the "
+        "smoothed estimate beyond the threshold before INTERACTION_CANDIDATE",
     )
     carry_displacement_m: float = Field(
         default=1.5, description="Displacement from rest to become CARRIED"

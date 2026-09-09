@@ -147,6 +147,7 @@ class BaselineFusionEngine:
     def _step_item(self, item: ItemTrackState, now: datetime) -> list[RetailEvent]:
         events: list[RetailEvent] = []
         if item.state == ItemState.UNKNOWN and item.rest_position is not None:
+            # First classification of a freshly seen item against the twin.
             item.state = self.state_machine.classify_rest(item, item.rest_position)
             item.rest_state = item.state
             item.state_since = now
@@ -167,11 +168,16 @@ class BaselineFusionEngine:
         return events
 
     def _nearest_person_m(self, item: ItemTrackState, now: datetime) -> float | None:
-        """Distance from the item to the closest ACTIVE or LOST (predicted) person track."""
+        """Distance from the item to the closest ACTIVE or LOST person track.
+
+        LOST tracks are dead-reckoned for at most ``prediction_horizon_s`` so a
+        long-gone shopper cannot hold or release a rest decision from a ghost position.
+        """
         if item.position is None:
             return None
+        horizon = self.config.person.prediction_horizon_s
         distances = [
-            item.position.horizontal_distance_to(person.predicted_position(now))
+            item.position.horizontal_distance_to(person.predicted_position(now, horizon))
             for person in self.persons.all
             if person.state != PersonTrackState.ENDED
         ]
@@ -191,6 +197,7 @@ class BaselineFusionEngine:
         for person_id in sorted(considered):
             person = self.persons.get(person_id)
             if person is None or person.state == PersonTrackState.ENDED:
+                self.ledger.drop(item.epc, person_id)  # a departed shopper cannot block others
                 continue
             pair = self.ledger.pair(item.epc, person_id)
             evidence = self.scorer.score(

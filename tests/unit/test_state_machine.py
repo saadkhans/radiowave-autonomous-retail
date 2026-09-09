@@ -10,7 +10,7 @@ from tests.conftest import at
 
 SM = StateMachineConfig(
     movement_threshold_m=0.6,
-    movement_confirm_points=3,
+    movement_confirm_steps=3,
     carry_displacement_m=1.5,
     carry_min_duration_s=1.0,
     rest_window_s=2.0,
@@ -65,6 +65,13 @@ class Harness:
     @property
     def states(self) -> list[tuple[ItemState, ItemState]]:
         return [(tr.from_state, tr.to_state) for tr in self.transitions]
+
+
+def test_initial_rest_away_from_home_is_misplaced(registry: StoreRegistry) -> None:
+    h = Harness(registry)
+    h.feed(1.0, 8.0, 6.5)  # shirt whose home is F1 first seen on F2
+    assert h.track.state == ItemState.MISPLACED
+    assert h.track.rest_state == ItemState.MISPLACED
 
 
 def test_small_displacement_is_jitter_not_pick(registry: StoreRegistry) -> None:

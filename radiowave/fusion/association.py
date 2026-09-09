@@ -271,6 +271,10 @@ class CandidateLedger:
         if pair and pair.score < self._cfg.prune_score and distance > self._cfg.prune_distance_m:
             del pairs[person_id]
 
+    def drop(self, epc: EPC, person_id: str) -> None:
+        """Forget a shopper that can no longer be a candidate (track ended)."""
+        self._pairs.get(epc, {}).pop(person_id, None)
+
     def reset(self, epc: EPC) -> None:
         self._pairs.pop(epc, None)
 

@@ -130,8 +130,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
             answer = sys.stdin.readline()
             if answer.strip().lower() == "q":
                 break
-            pipeline.ingest(observation)
-        result = pipeline.result()
+            pipeline.ingest(observation)  # steps fusion across every boundary it crosses
+        result = pipeline.finish()
     else:
         pacer = ReplayPacer(rate=args.rate) if args.rate > 0 else None
         player = ReplayPlayer(source, pacer)

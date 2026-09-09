@@ -55,7 +55,6 @@ class PersonState:
     confidence: float
     state: PersonTrackState = PersonTrackState.ACTIVE
     observation_count: int = 0
-    lost_at: datetime | None = None
     sensor_last_update: dict[str, datetime] = field(default_factory=dict)
     history: deque[TrackPoint] = field(default_factory=deque)
     session_id: str | None = None
@@ -67,8 +66,13 @@ class PersonState:
         best = min(self.history, key=lambda p: abs(_seconds(p.timestamp, when)))
         return best.coordinate
 
-    def predicted_position(self, when: datetime) -> WorldCoordinate:
+    def predicted_position(
+        self, when: datetime, max_horizon_s: float | None = None
+    ) -> WorldCoordinate:
+        """Constant-velocity extrapolation, optionally capped at ``max_horizon_s``."""
         dt = max(0.0, _seconds(when, self.updated_at))
+        if max_horizon_s is not None:
+            dt = min(dt, max_horizon_s)
         return self.position.displaced(self.velocity.as_vector().scale(dt))
 
     def snapshot(self) -> PersonTrack:
@@ -172,7 +176,6 @@ class PersonTrackManager:
         if observation.timestamp < track.updated_at:
             return  # out-of-order sample; keep the newer state
         track.state = PersonTrackState.ACTIVE
-        track.lost_at = None
         track.position = observation.coordinate
         track.uncertainty = observation.uncertainty
         track.confidence = observation.confidence
@@ -209,7 +212,6 @@ class PersonTrackManager:
             silent_for = _seconds(now, track.updated_at)
             if track.state == PersonTrackState.ACTIVE and silent_for > cfg.lost_after_s:
                 track.state = PersonTrackState.LOST
-                track.lost_at = now
             if track.state == PersonTrackState.LOST and silent_for > cfg.end_after_s:
                 track.state = PersonTrackState.ENDED
                 for key, mapped in list(self._native_map.items()):
@@ -233,7 +235,7 @@ class ItemTrackState:
     last_seen_at: datetime | None = None
     carrier_track_id: str | None = None
     observation_count: int = 0
-    reads_beyond_threshold: int = 0
+    steps_beyond_threshold: int = 0
     at_rest_since: datetime | None = None
     attribution_unresolved: bool = False
     carry_announced: bool = False
@@ -358,9 +360,9 @@ class ItemTrackManager:
         while len(track.history) > cfg.history_length:
             track.history.popleft()
         if track.rest_position is None and track.observation_count >= cfg.rest_init_reads:
+            # Only the rest position is known here; the fusion engine classifies it
+            # (ON_FIXTURE vs MISPLACED) against the twin, so state stays UNKNOWN.
             track.rest_position = track.position
-            track.state = track.rest_state
-            track.state_since = observation.timestamp
         return track
 
 

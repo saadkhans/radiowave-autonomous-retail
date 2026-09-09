@@ -193,6 +193,20 @@ def test_scenario_12v_vision_evidence_resolves_the_ambiguity() -> None:
     assert "vision" in pick.candidates[0].evidence.weights
 
 
+def test_scenario_13_departed_companion_no_longer_blocks_attribution() -> None:
+    r = run("13")
+    a, b = shoppers(r)
+    departed = next(t for t in r.person_tracks if t.track_id == b)
+    assert departed.state == PersonTrackState.ENDED
+    assert r.decisions_of(Decision.WAIT)  # ambiguous while both were present
+    assert committed(r)[0] == (PICK, EPC_SHIRT_A, a, None)
+    pick = r.committed_events[0]
+    assert [c.person_track_id for c in pick.candidates] == [a]  # B dropped from the ledger
+    assert r.cart_state.epcs_in(a) == {EPC_SHIRT_A}
+    assert b not in r.cart_state.carts
+    assert r.review_events == []
+
+
 @pytest.mark.parametrize("scenario_id", ["01", "05", "12"])
 def test_no_vendor_identifier_becomes_canonical_identity(scenario_id: str) -> None:
     r = run(scenario_id)

@@ -89,33 +89,48 @@ class FoundationPipeline:
         self._committed: list[RetailEvent] = []
         self._review: list[RetailEvent] = []
         self._steps = 0
+        self._next_step: datetime | None = None
 
     # ------------------------------------------------------------------
     def run(self, *streams: Iterable[AnyObservation]) -> PipelineResult:
-        """Consume one or more timestamp-ordered observation streams to completion."""
-        merged = heapq.merge(*(list(s) for s in streams), key=_order_key)
-        step = timedelta(seconds=self.config.step_interval_s)
-        next_step: datetime | None = None
-        last_timestamp: datetime | None = None
+        """Consume one or more timestamp-ordered observation streams to completion.
+
+        Streams are merged lazily so a paced replay source is consumed at its own rate.
+        """
+        merged = streams[0] if len(streams) == 1 else heapq.merge(*streams, key=_order_key)
         for observation in merged:
-            if next_step is None:
-                next_step = observation.timestamp + step
-            while next_step is not None and observation.timestamp >= next_step:
-                self._step(next_step)
-                next_step = next_step + step
             self.ingest(observation)
-            last_timestamp = observation.timestamp
-        if last_timestamp is not None and next_step is not None:
-            self._step(next_step)
-        return self.result()
+        return self.finish()
 
     def ingest(self, observation: SensorObservation) -> bool:
+        """Feed one observation, stepping fusion for every step boundary it crosses.
+
+        Observations must arrive in timestamp order; this is the single entry point
+        used by batch runs, paced replay and step-by-step replay alike.
+        """
+        self._advance_to(observation.timestamp)
         if not self.dedup.accept(observation):
             return False
         if self.recorder is not None:
             self.recorder.record_observation(observation, self.scenario_id)
         self.fusion.ingest(observation)
         return True
+
+    def finish(self) -> PipelineResult:
+        """Run one final fusion step after the last observation and return the result."""
+        if self._next_step is not None:
+            self._step(self._next_step)
+            self._next_step = None
+        return self.result()
+
+    def _advance_to(self, timestamp: datetime) -> None:
+        step = timedelta(seconds=self.config.step_interval_s)
+        if self._next_step is None:
+            self._next_step = timestamp + step
+            return
+        while timestamp >= self._next_step:
+            self._step(self._next_step)
+            self._next_step = self._next_step + step
 
     def _step(self, now: datetime) -> None:
         self._steps += 1
@@ -155,7 +170,7 @@ class FoundationPipeline:
             committed_events=list(self._committed),
             review_events=list(self._review),
             cart_events=list(self.cart.cart_events),
-            cart_state=self.cart.state,
+            cart_state=self.cart.state.model_copy(deep=True),
             person_tracks=self.fusion.person_tracks(),
             item_tracks=self.fusion.item_tracks(),
             sessions=list(self.fusion.sessions.values()),
@@ -170,4 +185,5 @@ def _order_key(observation: SensorObservation) -> tuple[datetime, str, str]:
 
 
 def merge_streams(*streams: Iterable[AnyObservation]) -> Iterator[AnyObservation]:
-    yield from heapq.merge(*(list(s) for s in streams), key=_order_key)
+    """Lazily merge timestamp-ordered streams into one timestamp-ordered stream."""
+    yield from heapq.merge(*streams, key=_order_key)

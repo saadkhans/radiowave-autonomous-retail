@@ -367,6 +367,42 @@ def scenario_12v_ambiguous_pick_with_vision() -> Scenario:
     )
 
 
+def scenario_13_companion_leaves_store() -> Scenario:
+    left = (3.6, 5.3)
+    right = (4.6, 5.3)
+    return _scenario(
+        "13",
+        "co-located companion leaves the store",
+        "A and B stand at F1 and walk together after A picks shirt A; B exits the store, "
+        "then A walks on alone and must be attributed the item.",
+        34.0,
+        shoppers=[
+            _shopper(
+                "A",
+                (0, ENTRY_POINT),
+                (4, left),
+                (8, left),
+                (13, (7.6, 4.0)),
+                (24, (7.6, 4.0)),
+                (29, F3_APPROACH),
+                (34, F3_APPROACH),
+            ),
+            _shopper(
+                "B",
+                (0.3, ENTRY_POINT),
+                (4.3, right),
+                (8, right),
+                (13, (8.6, 4.0)),
+                (16, EXIT_POINT),
+            ),
+        ],
+        carries=[Carry(epc=EPC_SHIRT_A, carrier_label="A", start_t=6.5)],
+        expected_events=[
+            GroundTruthEvent(t=6.5, event_type=E.PICK, epc=EPC_SHIRT_A, shopper_label="A")
+        ],
+    )
+
+
 SCENARIOS: dict[str, Callable[[], Scenario]] = {
     "01": scenario_01_single_pick,
     "02": scenario_02_putback,
@@ -381,6 +417,7 @@ SCENARIOS: dict[str, Callable[[], Scenario]] = {
     "11": scenario_11_rfid_jitter_no_pickup,
     "12": scenario_12_ambiguous_pick,
     "12v": scenario_12v_ambiguous_pick_with_vision,
+    "13": scenario_13_companion_leaves_store,
 }
 
 

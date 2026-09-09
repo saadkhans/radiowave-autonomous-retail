@@ -62,7 +62,7 @@ scenario ground truth ──> RadarGenerator ──> NativeRadarSample (radar fr
 
 ```text
 ON_FIXTURE / MISPLACED
-   ── smoothed estimate > movement_threshold_m for movement_confirm_points reads ──> INTERACTION_CANDIDATE
+   ── smoothed estimate > movement_threshold_m for movement_confirm_steps fusion steps ──> INTERACTION_CANDIDATE
 INTERACTION_CANDIDATE
    ── displacement > carry_displacement_m or left home zone, for carry_min_duration_s ──> CARRIED
    ── back within threshold, or candidate_timeout_s ──> previous rest state   (jitter, no event)
@@ -126,4 +126,6 @@ candidates there is nothing to disambiguate and margin is 1.0. Physical events
 * Person tracking merges by proximity gating; crossing shoppers in a dense crowd
   are out of scope until real radar characterization data exists.
 * Sessions are created on first sight, not strictly at the entry boundary.
+* A shopper whose track ends (left radar coverage) is dropped from every candidate
+  ledger; if they were the true carrier the item is later attributed to whoever remains.
 * No persistence, streaming or services: everything runs in-process on synthetic data.

@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from collections import OrderedDict
 
-from radiowave.contracts.observations import ItemObservation, SensorObservation
+from radiowave.contracts.observations import (
+    NATIVE_TRACK_KEY,
+    ItemObservation,
+    SensorObservation,
+)
 
 
 class ObservationDeduplicator:
@@ -22,7 +26,10 @@ class ObservationDeduplicator:
 
     @staticmethod
     def content_key(observation: SensorObservation) -> str:
-        subject = observation.epc.value if isinstance(observation, ItemObservation) else ""
+        if isinstance(observation, ItemObservation):
+            subject = observation.epc.value
+        else:
+            subject = str(observation.metadata.get(NATIVE_TRACK_KEY, ""))
         return (
             f"{observation.source_type}|{observation.sensor_id}|"
             f"{observation.timestamp.isoformat()}|{subject}|"

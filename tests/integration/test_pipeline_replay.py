@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+from radiowave.contracts.observations import AnyObservation
 from radiowave.contracts.recording import EntryKind
-from radiowave.pipeline import PipelineResult
+from radiowave.digital_twin.registry import StoreRegistry
+from radiowave.pipeline import FoundationPipeline, PipelineResult
 from radiowave.replay.reader import observations_from, open_replay_source
 from radiowave.replay.recorder import JsonlRecorder, ParquetRecorder
 from radiowave.simulator.library import load_scenario
@@ -48,6 +51,35 @@ def test_different_seed_changes_observations_but_not_the_outcome() -> None:
     assert result.cart_state.epcs_in(result.committed_events[0].shopper_track_id or "") == {
         scenario.carries[0].epc
     }
+
+
+def test_step_by_step_ingest_matches_batch_run() -> None:
+    scenario = load_scenario("06")
+    observations = scenario_observations(scenario)
+    registry = StoreRegistry(scenario.store)
+    stepped = FoundationPipeline(registry, scenario_id=scenario.scenario_id)
+    for observation in observations:
+        stepped.ingest(observation)
+    assert _fingerprint(stepped.finish()) == _fingerprint(run_observations(scenario, observations))
+    assert stepped.result().steps > 0
+
+
+def test_paced_replay_consumes_lazily() -> None:
+    scenario = load_scenario("01")
+    observations = scenario_observations(scenario)
+    seen: list[int] = []
+
+    def counting() -> Iterator[AnyObservation]:
+        for index, observation in enumerate(observations):
+            seen.append(index)
+            yield observation
+
+    pipeline = FoundationPipeline(StoreRegistry(scenario.store), scenario_id="01")
+    stream = counting()
+    pipeline.ingest(next(stream))
+    assert seen == [0]  # nothing beyond the first observation has been pulled yet
+    pipeline.run(stream)
+    assert seen[-1] == len(observations) - 1
 
 
 @pytest.mark.parametrize("fmt", ["jsonl", "parquet"])
