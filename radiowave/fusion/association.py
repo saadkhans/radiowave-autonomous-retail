@@ -234,7 +234,9 @@ def assign_vision_to_nearest(
         best_id: str | None = None
         best_distance = radius_m
         for person in persons:
-            position = person.position_at(evidence.timestamp) or person.position
+            position = person.position_at(evidence.timestamp)
+            if position is None:
+                continue  # track did not exist yet; it cannot own earlier evidence
             distance = position.horizontal_distance_to(evidence.coordinate)
             if distance <= best_distance:
                 best_id, best_distance = person.track_id, distance

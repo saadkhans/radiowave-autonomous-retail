@@ -3,6 +3,10 @@
 The pipeline is deterministic: observations are consumed in (timestamp, id)
 order, fusion is stepped on a fixed simulated interval, and no wall-clock time
 is involved. The same recording therefore always yields the same result.
+
+Recording goes through the :class:`~radiowave.fusion.interfaces.Recorder`
+protocol only (``record(entry)`` / ``close()``); entries are written in
+timestamp order with a monotonic sequence number.
 """
 
 from __future__ import annotations
@@ -10,6 +14,7 @@ from __future__ import annotations
 import heapq
 from collections.abc import Iterable, Iterator
 from datetime import datetime, timedelta
+from typing import Any
 
 from pydantic import Field
 
@@ -20,14 +25,15 @@ from radiowave.contracts._base import ContractModel, FrozenModel
 from radiowave.contracts.confidence import ConfidenceDecision, ConfidenceThresholds, Decision
 from radiowave.contracts.events import CartEvent, RetailEvent
 from radiowave.contracts.observations import AnyObservation, SensorObservation
-from radiowave.contracts.recording import EntryKind
+from radiowave.contracts.recording import EntryKind, RecordedEntry
 from radiowave.contracts.sessions import ShopperSession
+from radiowave.contracts.store import SourceType
 from radiowave.contracts.tracks import ItemTrack, PersonTrack
 from radiowave.digital_twin.registry import StoreRegistry
 from radiowave.fusion.baseline import BaselineFusionEngine
 from radiowave.fusion.config import FusionConfig
+from radiowave.fusion.interfaces import Recorder
 from radiowave.ingestion.deduplication import ObservationDeduplicator
-from radiowave.replay.recorder import InMemoryRecorder
 
 
 class PipelineConfig(FrozenModel):
@@ -44,6 +50,9 @@ class PipelineResult(ContractModel):
     decisions: list[ConfidenceDecision] = Field(default_factory=list)
     committed_events: list[RetailEvent] = Field(default_factory=list)
     review_events: list[RetailEvent] = Field(default_factory=list)
+    pending_events: list[RetailEvent] = Field(
+        default_factory=list, description="Events still in WAIT when the run ended"
+    )
     cart_events: list[CartEvent] = Field(default_factory=list)
     cart_state: CartState = Field(default_factory=CartState)
     person_tracks: list[PersonTrack] = Field(default_factory=list)
@@ -72,7 +81,7 @@ class FoundationPipeline:
         config: PipelineConfig | None = None,
         vision_enabled: bool = False,
         scenario_id: str | None = None,
-        recorder: InMemoryRecorder | None = None,
+        recorder: Recorder | None = None,
     ) -> None:
         self.config = config or PipelineConfig()
         self.registry = registry
@@ -88,10 +97,46 @@ class FoundationPipeline:
         self._decisions: list[ConfidenceDecision] = []
         self._committed: list[RetailEvent] = []
         self._review: list[RetailEvent] = []
+        self._pending: dict[str, RetailEvent] = {}
         self._steps = 0
         self._next_step: datetime | None = None
+        self._sequence = 0
+        self._scheduled: list[tuple[datetime, int, EntryKind, dict[str, Any]]] = []
 
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------ recording
+    def schedule_entry(self, timestamp: datetime, kind: EntryKind, payload: dict[str, Any]) -> None:
+        """Queue a non-observation entry (e.g. ground truth) to be recorded in timestamp order."""
+        heapq.heappush(self._scheduled, (timestamp, len(self._scheduled), kind, payload))
+
+    def _record(
+        self,
+        timestamp: datetime,
+        kind: EntryKind,
+        payload: dict[str, Any],
+        source_type: SourceType | None = None,
+        sensor_id: str | None = None,
+    ) -> None:
+        if self.recorder is None:
+            return
+        self.recorder.record(
+            RecordedEntry(
+                sequence=self._sequence,
+                timestamp=timestamp,
+                kind=kind,
+                source_type=source_type,
+                sensor_id=sensor_id,
+                scenario_id=self.scenario_id,
+                payload=payload,
+            )
+        )
+        self._sequence += 1
+
+    def _flush_scheduled(self, up_to: datetime | None) -> None:
+        while self._scheduled and (up_to is None or self._scheduled[0][0] <= up_to):
+            timestamp, _, kind, payload = heapq.heappop(self._scheduled)
+            self._record(timestamp, kind, payload)
+
+    # ------------------------------------------------------------------ intake
     def run(self, *streams: Iterable[AnyObservation]) -> PipelineResult:
         """Consume one or more timestamp-ordered observation streams to completion.
 
@@ -111,8 +156,14 @@ class FoundationPipeline:
         self._advance_to(observation.timestamp)
         if not self.dedup.accept(observation):
             return False
-        if self.recorder is not None:
-            self.recorder.record_observation(observation, self.scenario_id)
+        self._flush_scheduled(observation.timestamp)
+        self._record(
+            observation.timestamp,
+            EntryKind.OBSERVATION,
+            observation.model_dump(mode="json"),
+            source_type=observation.source_type,
+            sensor_id=observation.sensor_id,
+        )
         self.fusion.ingest(observation)
         return True
 
@@ -121,6 +172,7 @@ class FoundationPipeline:
         if self._next_step is not None:
             self._step(self._next_step)
             self._next_step = None
+        self._flush_scheduled(None)
         return self.result()
 
     def _advance_to(self, timestamp: datetime) -> None:
@@ -132,35 +184,41 @@ class FoundationPipeline:
             self._step(self._next_step)
             self._next_step = self._next_step + step
 
+    # ------------------------------------------------------------------ stepping
     def _step(self, now: datetime) -> None:
         self._steps += 1
+        self._flush_scheduled(now)
+        proposed_now: set[str] = set()
         for event in self.fusion.step(now):
+            proposed_now.add(event.event_id)
             self._proposed.append(event)
-            decision = self.confidence.decide(event, now)
-            self._decisions.append(decision)
-            if self.recorder is not None:
-                self.recorder.record_payload(
-                    EntryKind.RETAIL_EVENT, now, event.model_dump(mode="json"), self.scenario_id
-                )
-                self.recorder.record_payload(
-                    EntryKind.DECISION, now, decision.model_dump(mode="json"), self.scenario_id
-                )
-            if decision.decision == Decision.COMMIT:
-                cart_event = self.cart.apply(event)
-                self._committed.append(event)
-                self.fusion.acknowledge(event, committed=True)
-                self.confidence.forget(event.event_id)
-                if self.recorder is not None:
-                    self.recorder.record_payload(
-                        EntryKind.CART_EVENT,
-                        now,
-                        cart_event.model_dump(mode="json"),
-                        self.scenario_id,
-                    )
-            elif decision.decision == Decision.REVIEW:
-                self._review.append(event)
-                self.fusion.acknowledge(event, committed=False)
-                self.confidence.forget(event.event_id)
+            self._decide(event, now)
+        # One-shot proposals (CARRY, PUTBACK, MISPLACE, EXIT_WITH_ITEM) are not re-proposed by
+        # fusion; keep re-evaluating them while the confidence engine says WAIT so they
+        # eventually COMMIT or expire into REVIEW instead of silently vanishing.
+        for event_id, event in list(self._pending.items()):
+            if event_id not in proposed_now:
+                self._decide(event, now)
+
+    def _decide(self, event: RetailEvent, now: datetime) -> None:
+        decision = self.confidence.decide(event, now)
+        self._decisions.append(decision)
+        self._record(now, EntryKind.RETAIL_EVENT, event.model_dump(mode="json"))
+        self._record(now, EntryKind.DECISION, decision.model_dump(mode="json"))
+        if decision.decision == Decision.COMMIT:
+            cart_event = self.cart.apply(event)
+            self._committed.append(event)
+            self._pending.pop(event.event_id, None)
+            self.fusion.acknowledge(event, committed=True)
+            self.confidence.forget(event.event_id)
+            self._record(now, EntryKind.CART_EVENT, cart_event.model_dump(mode="json"))
+        elif decision.decision == Decision.REVIEW:
+            self._review.append(event)
+            self._pending.pop(event.event_id, None)
+            self.fusion.acknowledge(event, committed=False)
+            self.confidence.forget(event.event_id)
+        else:
+            self._pending[event.event_id] = event
 
     def result(self) -> PipelineResult:
         return PipelineResult(
@@ -169,6 +227,7 @@ class FoundationPipeline:
             decisions=list(self._decisions),
             committed_events=list(self._committed),
             review_events=list(self._review),
+            pending_events=list(self._pending.values()),
             cart_events=list(self.cart.cart_events),
             cart_state=self.cart.state.model_copy(deep=True),
             person_tracks=self.fusion.person_tracks(),

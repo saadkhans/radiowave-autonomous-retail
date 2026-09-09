@@ -60,11 +60,11 @@ class StateMachineConfig(FrozenModel):
     movement_threshold_m: float = Field(
         default=0.75, description="Displacement from rest to become INTERACTION_CANDIDATE"
     )
-    movement_confirm_steps: int = Field(
+    movement_confirm_reads: int = Field(
         default=4,
         ge=1,
-        description="Consecutive fusion steps (PipelineConfig.step_interval_s apart) with the "
-        "smoothed estimate beyond the threshold before INTERACTION_CANDIDATE",
+        description="Consecutive evaluations, each backed by at least one new RFID read, with "
+        "the smoothed estimate beyond the threshold before INTERACTION_CANDIDATE",
     )
     carry_displacement_m: float = Field(
         default=1.5, description="Displacement from rest to become CARRIED"
@@ -104,10 +104,12 @@ class StateMachineConfig(FrozenModel):
 
 class AssociationConfig(FrozenModel):
     candidate_radius_m: float = Field(
-        default=2.5, description="Persons within this distance of the item become candidates"
+        default=2.5,
+        gt=0.0,
+        description="Persons within this distance of the item become candidates",
     )
-    distance_scale_m: float = Field(default=1.5)
-    co_motion_radius_m: float = Field(default=1.3)
+    distance_scale_m: float = Field(default=1.5, gt=0.0)
+    co_motion_radius_m: float = Field(default=1.3, gt=0.0)
     co_motion_window_steps: int = Field(default=12, ge=1)
     moving_speed_m_s: float = Field(default=0.3)
     item_moving_speed_m_s: float = Field(default=0.2)

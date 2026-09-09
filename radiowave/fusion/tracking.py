@@ -114,22 +114,32 @@ class PersonTrackManager:
         return [t.snapshot() for t in self._tracks.values()]
 
     def ingest(self, observation: PersonObservation) -> PersonState:
-        native_id = str(observation.metadata.get(NATIVE_TRACK_KEY, observation.observation_id))
-        key = (observation.sensor_id, native_id)
+        native_hint = observation.metadata.get(NATIVE_TRACK_KEY)
+        key = (observation.sensor_id, str(native_hint)) if native_hint is not None else None
         track = self._resolve(key, observation)
         self._update(track, observation)
         return track
 
-    def _resolve(self, key: tuple[str, str], observation: PersonObservation) -> PersonState:
-        mapped = self._native_map.get(key)
-        if mapped is not None:
-            track = self._tracks[mapped]
-            if track.state != PersonTrackState.ENDED:
-                return track
-            del self._native_map[key]
-        match = self._gate(observation)
+    def _resolve(self, key: tuple[str, str] | None, observation: PersonObservation) -> PersonState:
+        # A native track id is only a continuity hint: a recycled id must still pass the
+        # same spatial gate as a fresh one, otherwise a different shopper far away would
+        # inherit the previous shopper's canonical identity (and cart).
+        if key is not None:
+            mapped = self._native_map.get(key)
+            if mapped is not None:
+                track = self._tracks[mapped]
+                if (
+                    track.state != PersonTrackState.ENDED
+                    and self._gate_radius(track, observation) is not None
+                ):
+                    return track
+                del self._native_map[key]
+        # Without a hint, consecutive samples from one sensor must still continue the
+        # same track, so the same-sensor exclusion does not apply.
+        match = self._gate(observation, allow_same_sensor=key is None)
         if match is not None:
-            self._native_map[key] = match.track_id
+            if key is not None:
+                self._native_map[key] = match.track_id
             return match
         self._counter += 1
         track = PersonState(
@@ -142,11 +152,28 @@ class PersonTrackManager:
             confidence=observation.confidence,
         )
         self._tracks[track.track_id] = track
-        self._native_map[key] = track.track_id
+        if key is not None:
+            self._native_map[key] = track.track_id
         return track
 
-    def _gate(self, observation: PersonObservation) -> PersonState | None:
-        """Find an existing canonical track this new native track most likely belongs to."""
+    def _gate_radius(self, track: PersonState, observation: PersonObservation) -> float | None:
+        """Distance from the track's prediction if it is inside the gate, else None."""
+        cfg = self._config
+        now = observation.timestamp
+        if track.state == PersonTrackState.ACTIVE:
+            radius = cfg.merge_radius_m
+        else:
+            lost_for = _seconds(now, track.updated_at)
+            if lost_for > cfg.reacquire_window_s:
+                return None
+            radius = cfg.reacquire_base_radius_m + cfg.reacquire_growth_m_per_s * lost_for
+        distance = track.predicted_position(now).horizontal_distance_to(observation.coordinate)
+        return distance if distance <= radius else None
+
+    def _gate(
+        self, observation: PersonObservation, allow_same_sensor: bool = False
+    ) -> PersonState | None:
+        """Find an existing canonical track this observation most likely belongs to."""
         cfg = self._config
         now = observation.timestamp
         best: PersonState | None = None
@@ -155,19 +182,14 @@ class PersonTrackManager:
             if track.state == PersonTrackState.ENDED:
                 continue
             last_same_sensor = track.sensor_last_update.get(observation.sensor_id)
-            if last_same_sensor is not None and (
-                _seconds(now, last_same_sensor) < cfg.same_sensor_exclusion_s
+            if (
+                not allow_same_sensor
+                and last_same_sensor is not None
+                and _seconds(now, last_same_sensor) < cfg.same_sensor_exclusion_s
             ):
                 continue  # this sensor already reports a different native track for this person
-            if track.state == PersonTrackState.ACTIVE:
-                radius = cfg.merge_radius_m
-            else:
-                lost_for = _seconds(now, track.updated_at)
-                if lost_for > cfg.reacquire_window_s:
-                    continue
-                radius = cfg.reacquire_base_radius_m + cfg.reacquire_growth_m_per_s * lost_for
-            distance = track.predicted_position(now).horizontal_distance_to(observation.coordinate)
-            if distance <= radius and distance < best_distance:
+            distance = self._gate_radius(track, observation)
+            if distance is not None and distance < best_distance:
                 best, best_distance = track, distance
         return best
 
@@ -235,7 +257,8 @@ class ItemTrackState:
     last_seen_at: datetime | None = None
     carrier_track_id: str | None = None
     observation_count: int = 0
-    steps_beyond_threshold: int = 0
+    reads_beyond_threshold: int = 0
+    reads_at_last_evaluation: int = 0
     at_rest_since: datetime | None = None
     attribution_unresolved: bool = False
     carry_announced: bool = False

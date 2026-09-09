@@ -2,19 +2,16 @@
 
 Replayed recordings, retried transports and overlapping readers all produce
 duplicate observations. Duplicates are recognised by ``observation_id`` first and
-by a content key (sensor, timestamp, subject) second, so a re-issued id with the
-same content is still dropped.
+by the full normalized content second, so a re-issued id with the same content
+is still dropped while observations that differ in any field are kept.
 """
 
 from __future__ import annotations
 
+import json
 from collections import OrderedDict
 
-from radiowave.contracts.observations import (
-    NATIVE_TRACK_KEY,
-    ItemObservation,
-    SensorObservation,
-)
+from radiowave.contracts.observations import SensorObservation
 
 
 class ObservationDeduplicator:
@@ -26,15 +23,9 @@ class ObservationDeduplicator:
 
     @staticmethod
     def content_key(observation: SensorObservation) -> str:
-        if isinstance(observation, ItemObservation):
-            subject = observation.epc.value
-        else:
-            subject = str(observation.metadata.get(NATIVE_TRACK_KEY, ""))
-        return (
-            f"{observation.source_type}|{observation.sensor_id}|"
-            f"{observation.timestamp.isoformat()}|{subject}|"
-            f"{observation.coordinate.model_dump() if observation.coordinate else ''}"
-        )
+        """Every normalized field except the id, so distinct evidence is never collapsed."""
+        payload = observation.model_dump(mode="json", exclude={"observation_id"})
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
     def accept(self, observation: SensorObservation) -> bool:
         """Return True if the observation is new; False (and drop) if seen before."""

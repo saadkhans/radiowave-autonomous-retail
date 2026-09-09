@@ -161,6 +161,8 @@ class BaselineFusionEngine:
         if transition is not None:
             self.transitions.append(transition)
             events.extend(self._events_for_transition(item, transition, now))
+        if item.is_stale(now, self.config.item.stale_after_s):
+            return events  # no fresh reads: never score or attribute against a cached position
         if item.state in (ItemState.INTERACTION_CANDIDATE, ItemState.CARRIED):
             self._score_candidates(item, now)
         if item.state == ItemState.CARRIED:

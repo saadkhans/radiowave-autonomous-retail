@@ -10,7 +10,7 @@ from tests.conftest import at
 
 SM = StateMachineConfig(
     movement_threshold_m=0.6,
-    movement_confirm_steps=3,
+    movement_confirm_reads=3,
     carry_displacement_m=1.5,
     carry_min_duration_s=1.0,
     rest_window_s=2.0,

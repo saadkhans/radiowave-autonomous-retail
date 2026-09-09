@@ -10,8 +10,8 @@ from radiowave.adapters.vision.mock import MockVisionEvidenceProvider
 from radiowave.contracts.observations import AnyObservation
 from radiowave.contracts.recording import EntryKind
 from radiowave.digital_twin.registry import StoreRegistry
+from radiowave.fusion.interfaces import Recorder
 from radiowave.pipeline import FoundationPipeline, PipelineConfig, PipelineResult, merge_streams
-from radiowave.replay.recorder import InMemoryRecorder
 from radiowave.simulator.generators import GeneratorConfig
 from radiowave.simulator.scenario import Scenario
 
@@ -27,36 +27,40 @@ def scenario_observations(
     return list(merge_streams(people.observations(), items.observations(), vision.evidence()))
 
 
-def run_observations(
+def build_pipeline(
     scenario: Scenario,
-    observations: Iterable[AnyObservation],
     pipeline_config: PipelineConfig | None = None,
-    recorder: InMemoryRecorder | None = None,
-) -> PipelineResult:
-    registry = StoreRegistry(scenario.store)
+    recorder: Recorder | None = None,
+) -> FoundationPipeline:
+    """Pipeline for a scenario; ground-truth events are scheduled into the recording."""
     pipeline = FoundationPipeline(
-        registry,
+        StoreRegistry(scenario.store),
         pipeline_config,
         vision_enabled=scenario.vision_enabled,
         scenario_id=scenario.scenario_id,
         recorder=recorder,
     )
-    return pipeline.run(observations)
+    for truth in scenario.expected_events:
+        pipeline.schedule_entry(
+            scenario.at(truth.t), EntryKind.GROUND_TRUTH, truth.model_dump(mode="json")
+        )
+    return pipeline
+
+
+def run_observations(
+    scenario: Scenario,
+    observations: Iterable[AnyObservation],
+    pipeline_config: PipelineConfig | None = None,
+    recorder: Recorder | None = None,
+) -> PipelineResult:
+    return build_pipeline(scenario, pipeline_config, recorder).run(observations)
 
 
 def run_scenario(
     scenario: Scenario,
     pipeline_config: PipelineConfig | None = None,
     generator_config: GeneratorConfig | None = None,
-    recorder: InMemoryRecorder | None = None,
+    recorder: Recorder | None = None,
 ) -> PipelineResult:
-    if recorder is not None:
-        for truth in scenario.expected_events:
-            recorder.record_payload(
-                EntryKind.GROUND_TRUTH,
-                scenario.at(truth.t),
-                truth.model_dump(mode="json"),
-                scenario.scenario_id,
-            )
     observations = scenario_observations(scenario, generator_config)
     return run_observations(scenario, observations, pipeline_config, recorder)

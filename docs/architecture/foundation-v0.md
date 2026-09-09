@@ -62,7 +62,7 @@ scenario ground truth ──> RadarGenerator ──> NativeRadarSample (radar fr
 
 ```text
 ON_FIXTURE / MISPLACED
-   ── smoothed estimate > movement_threshold_m for movement_confirm_steps fusion steps ──> INTERACTION_CANDIDATE
+   ── smoothed estimate > movement_threshold_m on movement_confirm_reads consecutive fresh reads ──> INTERACTION_CANDIDATE
 INTERACTION_CANDIDATE
    ── displacement > carry_displacement_m or left home zone, for carry_min_duration_s ──> CARRIED
    ── back within threshold, or candidate_timeout_s ──> previous rest state   (jitter, no event)
@@ -111,6 +111,8 @@ candidates there is nothing to disambiguate and margin is 1.0. Physical events
 * Generators use `numpy.random.default_rng(seed + modality offset)`; the same
   scenario always produces byte-identical observations.
 * The pipeline steps fusion on simulated time only; no wall clock is read.
+* While an item has no fresh reads (stale) it is neither scored nor attributed; a cached
+  position is never treated as new evidence.
 * A JSONL or Parquet recording replays to the identical committed events, carts
   and item states (`tests/integration/test_pipeline_replay.py`).
 

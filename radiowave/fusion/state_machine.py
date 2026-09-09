@@ -3,7 +3,7 @@
 States and transitions (all thresholds in :class:`StateMachineConfig`)::
 
     ON_FIXTURE / MISPLACED
-        --(displacement > movement_threshold for N fusion steps)--> INTERACTION_CANDIDATE
+        --(displacement > movement_threshold on N consecutive fresh reads)--> INTERACTION_CANDIDATE
     INTERACTION_CANDIDATE
         --(displacement > carry_displacement or left home zone, sustained)--> CARRIED
         --(back at rest / timeout)--> previous rest state          (jitter, no event)
@@ -96,12 +96,15 @@ class ItemStateMachine:
     # ------------------------------------------------------------------
     def _from_rest(self, item: ItemTrackState, now: datetime) -> Transition | None:
         displacement = item.displacement_from_rest()
+        if item.observation_count == item.reads_at_last_evaluation:
+            return None  # no new read since the last step: a cached position is not new evidence
+        item.reads_at_last_evaluation = item.observation_count
         if displacement > self._cfg.movement_threshold_m:
-            item.steps_beyond_threshold += 1
+            item.reads_beyond_threshold += 1
         else:
-            item.steps_beyond_threshold = 0
+            item.reads_beyond_threshold = 0
             return None
-        if item.steps_beyond_threshold < self._cfg.movement_confirm_steps:
+        if item.reads_beyond_threshold < self._cfg.movement_confirm_reads:
             return None
         start = self._movement_start(item)
         return self._apply(
@@ -110,7 +113,7 @@ class ItemStateMachine:
             now,
             reason=(
                 f"smoothed position moved {displacement:.2f} m from rest for "
-                f"{item.steps_beyond_threshold} consecutive fusion steps "
+                f"{item.reads_beyond_threshold} consecutive steps with fresh reads "
                 f"(threshold {self._cfg.movement_threshold_m} m)"
             ),
             measurements={"displacement_m": displacement},
@@ -137,7 +140,7 @@ class ItemStateMachine:
                 measurements={"displacement_m": displacement, "moving_for_s": moving_for},
             )
         if displacement <= cfg.movement_threshold_m:
-            item.steps_beyond_threshold = 0
+            item.reads_beyond_threshold = 0
             return self._apply(
                 item,
                 item.rest_state,
@@ -147,7 +150,7 @@ class ItemStateMachine:
                 clear_movement=True,
             )
         if moving_for > cfg.candidate_timeout_s:
-            item.steps_beyond_threshold = 0
+            item.reads_beyond_threshold = 0
             return self._apply(
                 item,
                 item.rest_state,
@@ -281,7 +284,7 @@ class ItemStateMachine:
         if new_rest:
             item.rest_position = item.position
             item.rest_state = to_state
-            item.steps_beyond_threshold = 0
+            item.reads_beyond_threshold = 0
             item.movement_start_at = None
             item.attribution_unresolved = False
             item.carry_announced = False
