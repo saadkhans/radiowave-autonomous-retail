@@ -1,0 +1,61 @@
+{
+  "$defs": {
+    "SensorHealthStatus": {
+      "enum": [
+        "OK",
+        "DEGRADED",
+        "OFFLINE"
+      ],
+      "title": "SensorHealthStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "last_observation_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Observation At"
+    },
+    "message": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Message"
+    },
+    "sensor_id": {
+      "minLength": 1,
+      "title": "Sensor Id",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/SensorHealthStatus"
+    },
+    "timestamp": {
+      "format": "date-time",
+      "title": "Timestamp",
+      "type": "string"
+    }
+  },
+  "required": [
+    "sensor_id",
+    "timestamp",
+    "status"
+  ],
+  "title": "SensorHealth",
+  "type": "object"
+}

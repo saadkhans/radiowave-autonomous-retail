@@ -37,3 +37,9 @@ build/
 dist/
 coverage/
 .coverage
+
+# Python packaging metadata
+*.egg-info/
+
+# No Node dependencies in Foundation v0; pnpm is only a script runner
+pnpm-lock.yaml

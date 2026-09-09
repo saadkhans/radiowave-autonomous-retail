@@ -1,0 +1,160 @@
+{
+  "$defs": {
+    "SpatialUncertainty": {
+      "additionalProperties": false,
+      "description": "One-sigma positional uncertainty per axis, in meters.",
+      "properties": {
+        "sigma_x": {
+          "minimum": 0.0,
+          "title": "Sigma X",
+          "type": "number"
+        },
+        "sigma_y": {
+          "minimum": 0.0,
+          "title": "Sigma Y",
+          "type": "number"
+        },
+        "sigma_z": {
+          "default": 0.0,
+          "minimum": 0.0,
+          "title": "Sigma Z",
+          "type": "number"
+        }
+      },
+      "required": [
+        "sigma_x",
+        "sigma_y"
+      ],
+      "title": "SpatialUncertainty",
+      "type": "object"
+    },
+    "Velocity": {
+      "additionalProperties": false,
+      "description": "Velocity in meters/second, expressed in the store frame unless stated otherwise.",
+      "properties": {
+        "vx": {
+          "default": 0.0,
+          "title": "Vx",
+          "type": "number"
+        },
+        "vy": {
+          "default": 0.0,
+          "title": "Vy",
+          "type": "number"
+        },
+        "vz": {
+          "default": 0.0,
+          "title": "Vz",
+          "type": "number"
+        }
+      },
+      "title": "Velocity",
+      "type": "object"
+    },
+    "WorldCoordinate": {
+      "additionalProperties": false,
+      "description": "Point in the shared store frame (meters).",
+      "properties": {
+        "frame_id": {
+          "default": "store",
+          "title": "Frame Id",
+          "type": "string"
+        },
+        "x": {
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "title": "Y",
+          "type": "number"
+        },
+        "z": {
+          "default": 0.0,
+          "title": "Z",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "title": "WorldCoordinate",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Anonymous body/person point from a people-tracking sensor (mmWave in v0).\n\nNo biometric or identifying information is ever attached.",
+  "properties": {
+    "confidence": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "coordinate": {
+      "$ref": "#/$defs/WorldCoordinate"
+    },
+    "metadata": {
+      "additionalProperties": true,
+      "title": "Metadata",
+      "type": "object"
+    },
+    "observation_id": {
+      "minLength": 1,
+      "title": "Observation Id",
+      "type": "string"
+    },
+    "scenario_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Scenario Id"
+    },
+    "sensor_id": {
+      "minLength": 1,
+      "title": "Sensor Id",
+      "type": "string"
+    },
+    "source_type": {
+      "const": "MMWAVE",
+      "default": "MMWAVE",
+      "title": "Source Type",
+      "type": "string"
+    },
+    "timestamp": {
+      "format": "date-time",
+      "title": "Timestamp",
+      "type": "string"
+    },
+    "uncertainty": {
+      "$ref": "#/$defs/SpatialUncertainty"
+    },
+    "velocity": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Velocity"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "observation_id",
+    "sensor_id",
+    "timestamp",
+    "confidence",
+    "coordinate",
+    "uncertainty"
+  ],
+  "title": "PersonObservation",
+  "type": "object"
+}

@@ -1,0 +1,142 @@
+// Transport-neutral mirror of the Foundation v0 canonical contracts.
+//
+// The Pydantic models in `radiowave/contracts` are the source of truth; the
+// JSON Schemas in `schemas/json` are generated from them. This .proto is a
+// hand-maintained mirror kept so a future streaming layer (any broker) can
+// carry the same shapes without leaking vendor structures. It is NOT compiled
+// or imported in Foundation v0.
+//
+// Units: meters, meters/second, radians. Timestamps: UTC, RFC 3339.
+
+syntax = "proto3";
+
+package radiowave.v0;
+
+message WorldCoordinate {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+  string frame_id = 4;  // always "store" for world coordinates
+}
+
+message Velocity {
+  double vx = 1;
+  double vy = 2;
+  double vz = 3;
+}
+
+message SpatialUncertainty {
+  double sigma_x = 1;
+  double sigma_y = 2;
+  double sigma_z = 3;
+}
+
+enum SourceType {
+  SOURCE_TYPE_UNSPECIFIED = 0;
+  MMWAVE = 1;
+  RFID = 2;
+  VISION = 3;
+}
+
+// Fields common to every normalized observation.
+message ObservationHeader {
+  string observation_id = 1;
+  string sensor_id = 2;  // our sensor id, never a vendor device id
+  string timestamp = 3;  // RFC 3339 UTC
+  SourceType source_type = 4;
+  double confidence = 5;  // [0, 1]
+  WorldCoordinate coordinate = 6;
+  SpatialUncertainty uncertainty = 7;
+  string scenario_id = 8;
+  map<string, string> metadata = 9;  // retained native fields; never business identity
+}
+
+message PersonObservation {
+  ObservationHeader header = 1;
+  Velocity velocity = 2;
+}
+
+message ItemObservation {
+  ObservationHeader header = 1;
+  string epc = 2;  // uppercase hex, one physical unit
+  string zone_id = 3;
+  double rssi_dbm = 4;
+  double phase_rad = 5;
+  double read_rate_hz = 6;
+}
+
+enum VisionEvidenceKind {
+  VISION_EVIDENCE_KIND_UNSPECIFIED = 0;
+  PERSON_AT_FIXTURE = 1;
+  REACH_INTO_FIXTURE = 2;
+  ITEM_IN_HAND = 3;
+  ITEM_PLACED = 4;
+}
+
+message VisionEvidence {
+  ObservationHeader header = 1;
+  VisionEvidenceKind kind = 2;
+  string fixture_id = 3;
+  string zone_id = 4;
+}
+
+enum RetailEventType {
+  RETAIL_EVENT_TYPE_UNSPECIFIED = 0;
+  PICK = 1;
+  CARRY = 2;
+  PUTBACK = 3;
+  MISPLACE = 4;
+  HANDOFF = 5;
+  EXIT_WITH_ITEM = 6;
+}
+
+message AssociationEvidence {
+  double distance_score = 1;
+  double distance_trend_score = 2;
+  double velocity_score = 3;
+  double temporal_score = 4;
+  double co_motion_score = 5;
+  double zone_score = 6;
+  double vision_score = 7;
+  double combined = 8;
+  map<string, double> weights = 9;
+  map<string, double> features = 10;
+}
+
+message CandidateScore {
+  string person_track_id = 1;
+  double score = 2;
+  AssociationEvidence evidence = 3;
+}
+
+message RetailEvent {
+  string event_id = 1;
+  RetailEventType event_type = 2;
+  string timestamp = 3;
+  string epc = 4;
+  string shopper_track_id = 5;
+  string counterpart_track_id = 6;
+  string fixture_id = 7;
+  string zone_id = 8;
+  double confidence = 9;
+  repeated CandidateScore candidates = 10;
+  string reason = 11;
+  string scenario_id = 12;
+}
+
+enum Decision {
+  DECISION_UNSPECIFIED = 0;
+  COMMIT = 1;
+  WAIT = 2;
+  REVIEW = 3;
+}
+
+message ConfidenceDecision {
+  string event_id = 1;
+  Decision decision = 2;
+  double confidence = 3;
+  double margin = 4;
+  string evaluated_at = 5;
+  double waited_seconds = 6;
+  string reason = 7;
+}

@@ -1,0 +1,94 @@
+{
+  "$defs": {
+    "CartEventType": {
+      "enum": [
+        "ADD",
+        "REMOVE",
+        "TRANSFER",
+        "UNRESOLVED",
+        "EXIT_HOLD",
+        "NOOP",
+        "NOOP_DUPLICATE"
+      ],
+      "title": "CartEventType",
+      "type": "string"
+    },
+    "EPC": {
+      "additionalProperties": false,
+      "description": "Electronic Product Code of exactly one physical merchandise unit.\n\nStored as uppercase hexadecimal (EPC binary encoding, 32-256 bits).",
+      "properties": {
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "EPC",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Result of applying one RetailEvent to the cart engine.",
+  "properties": {
+    "cart_event_id": {
+      "minLength": 1,
+      "title": "Cart Event Id",
+      "type": "string"
+    },
+    "cart_event_type": {
+      "$ref": "#/$defs/CartEventType"
+    },
+    "cart_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Cart Id"
+    },
+    "epc": {
+      "$ref": "#/$defs/EPC"
+    },
+    "from_cart_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "From Cart Id"
+    },
+    "note": {
+      "default": "",
+      "title": "Note",
+      "type": "string"
+    },
+    "source_event_id": {
+      "title": "Source Event Id",
+      "type": "string"
+    },
+    "timestamp": {
+      "format": "date-time",
+      "title": "Timestamp",
+      "type": "string"
+    }
+  },
+  "required": [
+    "cart_event_id",
+    "cart_event_type",
+    "timestamp",
+    "epc",
+    "source_event_id"
+  ],
+  "title": "CartEvent",
+  "type": "object"
+}

@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "radiowave-autonomous-retail"
 version = "0.1.0"
@@ -19,6 +23,12 @@ dev = [
   "mypy>=1.11,<2",
 ]
 
+[project.scripts]
+radiowave = "radiowave.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["radiowave*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
@@ -26,8 +36,21 @@ addopts = "-q"
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "SIM", "RUF"]
+ignore = ["RUF012"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
 warn_unused_ignores = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["pyarrow", "pyarrow.*", "scipy", "scipy.*", "polars"]
+ignore_missing_imports = true

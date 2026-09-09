@@ -1,0 +1,58 @@
+{
+  "$defs": {
+    "Decision": {
+      "enum": [
+        "COMMIT",
+        "WAIT",
+        "REVIEW"
+      ],
+      "title": "Decision",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "confidence": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "decision": {
+      "$ref": "#/$defs/Decision"
+    },
+    "evaluated_at": {
+      "format": "date-time",
+      "title": "Evaluated At",
+      "type": "string"
+    },
+    "event_id": {
+      "title": "Event Id",
+      "type": "string"
+    },
+    "margin": {
+      "title": "Margin",
+      "type": "number"
+    },
+    "reason": {
+      "default": "",
+      "title": "Reason",
+      "type": "string"
+    },
+    "waited_seconds": {
+      "default": 0.0,
+      "minimum": 0.0,
+      "title": "Waited Seconds",
+      "type": "number"
+    }
+  },
+  "required": [
+    "event_id",
+    "decision",
+    "confidence",
+    "margin",
+    "evaluated_at"
+  ],
+  "title": "ConfidenceDecision",
+  "type": "object"
+}

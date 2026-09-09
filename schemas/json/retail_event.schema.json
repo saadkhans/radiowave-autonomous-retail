@@ -1,0 +1,247 @@
+{
+  "$defs": {
+    "AssociationEvidence": {
+      "additionalProperties": false,
+      "description": "Explainable per-feature scores for one shopper-item pairing.\n\nAll scores are in [0, 1]; ``combined`` is the weighted mean using ``weights``.\n``features`` carries the raw measurements the scores were derived from.",
+      "properties": {
+        "co_motion_score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Co Motion Score",
+          "type": "number"
+        },
+        "combined": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Combined",
+          "type": "number"
+        },
+        "distance_score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Distance Score",
+          "type": "number"
+        },
+        "distance_trend_score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Distance Trend Score",
+          "type": "number"
+        },
+        "features": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Features",
+          "type": "object"
+        },
+        "temporal_score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Temporal Score",
+          "type": "number"
+        },
+        "velocity_score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Velocity Score",
+          "type": "number"
+        },
+        "vision_score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Vision Score",
+          "type": "number"
+        },
+        "weights": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Weights",
+          "type": "object"
+        },
+        "zone_score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Zone Score",
+          "type": "number"
+        }
+      },
+      "required": [
+        "distance_score",
+        "distance_trend_score",
+        "velocity_score",
+        "temporal_score",
+        "co_motion_score",
+        "zone_score",
+        "vision_score",
+        "combined"
+      ],
+      "title": "AssociationEvidence",
+      "type": "object"
+    },
+    "CandidateScore": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "$ref": "#/$defs/AssociationEvidence"
+        },
+        "person_track_id": {
+          "title": "Person Track Id",
+          "type": "string"
+        },
+        "score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Score",
+          "type": "number"
+        }
+      },
+      "required": [
+        "person_track_id",
+        "score",
+        "evidence"
+      ],
+      "title": "CandidateScore",
+      "type": "object"
+    },
+    "EPC": {
+      "additionalProperties": false,
+      "description": "Electronic Product Code of exactly one physical merchandise unit.\n\nStored as uppercase hexadecimal (EPC binary encoding, 32-256 bits).",
+      "properties": {
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "EPC",
+      "type": "object"
+    },
+    "RetailEventType": {
+      "enum": [
+        "PICK",
+        "CARRY",
+        "PUTBACK",
+        "MISPLACE",
+        "HANDOFF",
+        "EXIT_WITH_ITEM"
+      ],
+      "title": "RetailEventType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A shopper-item event proposed by fusion, with its full evidence.",
+  "properties": {
+    "candidates": {
+      "description": "Ranked shopper candidates with evidence",
+      "items": {
+        "$ref": "#/$defs/CandidateScore"
+      },
+      "title": "Candidates",
+      "type": "array"
+    },
+    "confidence": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "counterpart_track_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Receiving shopper for HANDOFF",
+      "title": "Counterpart Track Id"
+    },
+    "epc": {
+      "$ref": "#/$defs/EPC"
+    },
+    "event_id": {
+      "minLength": 1,
+      "title": "Event Id",
+      "type": "string"
+    },
+    "event_type": {
+      "$ref": "#/$defs/RetailEventType"
+    },
+    "fixture_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Fixture Id"
+    },
+    "reason": {
+      "default": "",
+      "description": "Human-readable transition explanation",
+      "title": "Reason",
+      "type": "string"
+    },
+    "scenario_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Scenario Id"
+    },
+    "shopper_track_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Best-supported shopper for this event, if any",
+      "title": "Shopper Track Id"
+    },
+    "timestamp": {
+      "format": "date-time",
+      "title": "Timestamp",
+      "type": "string"
+    },
+    "zone_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Zone Id"
+    }
+  },
+  "required": [
+    "event_id",
+    "event_type",
+    "timestamp",
+    "epc",
+    "confidence"
+  ],
+  "title": "RetailEvent",
+  "type": "object"
+}
