@@ -20,4 +20,26 @@ Experimental vendor-neutral autonomous retail R&D platform focused on radio-firs
 
 ## Status
 
-Foundation bootstrap in progress.
+Foundation v0: hardware-independent core implemented on synthetic data.
+
+- Typed contracts (`radiowave/contracts`), digital twin, normalization, deduplication
+- Mock mmWave / RFID / vision adapters behind vendor-neutral native-sample contracts
+- Explainable baseline fusion: canonical tracks, item state machine, ranked candidate ledger
+- Confidence engine (COMMIT / WAIT / REVIEW), EPC-level idempotent cart
+- JSONL and Parquet recorder/replay, deterministic scenario simulator, CLI
+- 12 scenario tests plus unit and replay-determinism tests
+
+Not in scope yet: real sensor SDKs, production CV, payment/settlement, autonomous charging.
+
+## Quick start
+
+```bash
+uv venv .venv --python 3.12 && uv pip install -e ".[dev]"   # or: pip install -e ".[dev]"
+pnpm run test
+python -m radiowave.cli scenarios
+python -m radiowave.cli simulate --scenario 05 --out data/synthetic/scenario-05.jsonl
+python -m radiowave.cli replay data/synthetic/scenario-05.jsonl
+```
+
+See `docs/development/local-development.md` for the full command reference and
+`docs/architecture/foundation-v0.md` for the module map and design notes.
