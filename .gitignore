@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+
+# Env/secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# IDE/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local data and captures
+data/raw/
+data/captures/
+data/private/
+*.mp4
+*.mov
+*.avi
+*.pcap
+*.pcapng
+
+# Build/test
+build/
+dist/
+coverage/
+.coverage
