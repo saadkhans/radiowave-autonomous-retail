@@ -273,6 +273,8 @@ class ItemTrackState:
     observation_count: int = 0
     last_localized_at: datetime | None = None
     localized_count: int = 0
+    localized_since_reset: int = 0
+    continuity_lost: bool = False
     zone_history: deque[tuple[datetime, str | None]] = field(
         default_factory=lambda: deque(maxlen=16)
     )
@@ -404,7 +406,9 @@ class ItemTrackManager:
         )
         track.last_localized_at = observation.timestamp
         track.localized_count += 1
-        if track.position is None or (gap is not None and gap > cfg.reset_after_s):
+        if gap is not None and gap > cfg.reset_after_s:
+            self._break_continuity(track)
+        if track.position is None:
             track.position = observation.coordinate
         else:
             a = cfg.smoothing_alpha
@@ -416,11 +420,32 @@ class ItemTrackManager:
         track.history.append(TrackPoint(timestamp=observation.timestamp, coordinate=track.position))
         while len(track.history) > cfg.history_length:
             track.history.popleft()
-        if track.rest_position is None and track.localized_count >= cfg.rest_init_reads:
+        track.localized_since_reset += 1
+        if track.rest_position is None and track.localized_since_reset >= cfg.rest_init_reads:
             # Only the rest position is known here; the fusion engine classifies it
             # (ON_FIXTURE vs MISPLACED) against the twin, so state stays UNKNOWN.
             track.rest_position = track.position
         return track
+
+    @staticmethod
+    def _break_continuity(track: ItemTrackState) -> None:
+        """Localization was lost for too long: whatever happened meanwhile was unobserved.
+
+        The smoother, history and movement counters restart. An item that was at rest
+        re-initializes its rest position from fresh reads (the engine re-classifies it),
+        so a relocation during the blackout is never mistaken for an observed PICK.
+        A CARRIED item stays CARRIED with its committed carrier.
+        """
+        track.position = None
+        track.history.clear()
+        track.reads_beyond_threshold = 0
+        track.localized_since_reset = 0
+        track.at_rest_since = None
+        track.continuity_lost = True
+        if track.state not in (ItemState.CARRIED, ItemState.EXITED):
+            track.rest_position = None
+            track.movement_start_at = None
+            track.state = ItemState.UNKNOWN
 
 
 __all__ = ["ItemTrackManager", "ItemTrackState", "PersonState", "PersonTrackManager"]

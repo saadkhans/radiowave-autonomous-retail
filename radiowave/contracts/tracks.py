@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from itertools import pairwise
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from radiowave.contracts._base import ContractModel, FrozenModel, UnitInterval, UtcDatetime
 from radiowave.contracts.geometry import SpatialUncertainty, Velocity, WorldCoordinate
@@ -105,6 +106,27 @@ class CandidateScore(FrozenModel):
     evidence: AssociationEvidence
 
 
+def validate_ranking(candidates: list[CandidateScore]) -> list[CandidateScore]:
+    """A ranking lists each shopper once, in descending score order."""
+    ids = [c.person_track_id for c in candidates]
+    if len(ids) != len(set(ids)):
+        msg = "candidate ranking lists a shopper more than once"
+        raise ValueError(msg)
+    scores = [c.score for c in candidates]
+    if any(later > earlier for earlier, later in pairwise(scores)):
+        msg = "candidate ranking must be sorted by descending score"
+        raise ValueError(msg)
+    return candidates
+
+
+def ranking_margin(candidates: list[CandidateScore]) -> float:
+    """Best minus runner-up score of a ranking; 1.0 with fewer than two candidates."""
+    if len(candidates) < 2:
+        return 1.0
+    ordered = sorted((c.score for c in candidates), reverse=True)
+    return ordered[0] - ordered[1]
+
+
 class InteractionCandidate(ContractModel):
     """Current ranked shopper candidates for one moving item."""
 
@@ -113,6 +135,11 @@ class InteractionCandidate(ContractModel):
     movement_start_at: UtcDatetime | None = None
     candidates: list[CandidateScore] = Field(default_factory=list)
 
+    @field_validator("candidates")
+    @classmethod
+    def _ranked(cls, candidates: list[CandidateScore]) -> list[CandidateScore]:
+        return validate_ranking(candidates)
+
     @property
     def top(self) -> CandidateScore | None:
         return self.candidates[0] if self.candidates else None
@@ -120,6 +147,4 @@ class InteractionCandidate(ContractModel):
     @property
     def margin(self) -> float:
         """Score gap between best and second-best candidate (1.0 if fewer than two)."""
-        if len(self.candidates) < 2:
-            return 1.0
-        return self.candidates[0].score - self.candidates[1].score
+        return ranking_margin(self.candidates)

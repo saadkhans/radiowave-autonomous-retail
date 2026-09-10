@@ -21,15 +21,17 @@ class PersonTrackingConfig(FrozenModel):
         description="A new native track within this distance of an existing canonical track "
         "(observed by a different sensor) is the same person",
     )
-    lost_after_s: float = Field(default=1.0, description="No observation for this long -> LOST")
+    lost_after_s: float = Field(
+        default=1.0, ge=0.0, description="No observation for this long -> LOST"
+    )
     reacquire_window_s: float = Field(
-        default=6.0, description="A LOST track may be re-acquired within this window"
+        default=6.0, ge=0.0, description="A LOST track may be re-acquired within this window"
     )
     reacquire_base_radius_m: float = Field(default=0.8)
     reacquire_growth_m_per_s: float = Field(
         default=1.2, description="Re-acquisition gate grows by this much per second lost"
     )
-    end_after_s: float = Field(default=8.0, description="LOST for this long -> ENDED")
+    end_after_s: float = Field(default=8.0, ge=0.0, description="LOST for this long -> ENDED")
     same_sensor_exclusion_s: float = Field(
         default=0.3,
         description="A canonical track updated by sensor X within this window cannot absorb "
@@ -57,10 +59,14 @@ class ItemTrackingConfig(FrozenModel):
         default=0.25, gt=0.0, le=1.0, description="EMA factor on RFID location estimates"
     )
     stale_after_s: float = Field(
-        default=1.5, description="No reads for this long -> position is stale, no motion inference"
+        default=1.5,
+        ge=0.0,
+        description="No reads for this long -> position is stale, no motion inference",
     )
     reset_after_s: float = Field(
-        default=3.0, description="After a gap this long the smoother restarts on the next read"
+        default=3.0,
+        ge=0.0,
+        description="After a gap this long the smoother restarts on the next read",
     )
     velocity_window_s: float = Field(
         default=1.5, description="Window for the half-mean velocity estimate"

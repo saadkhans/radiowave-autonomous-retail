@@ -116,6 +116,9 @@ candidates there is nothing to disambiguate and margin is 1.0. Physical events
   the blackout. Exit detection also accepts zone-only reads from an exit portal.
 * A pending WAIT proposal whose episode has ended (item put back, re-picked, exited) is
   dropped rather than decided late.
+* A localization gap longer than `reset_after_s` breaks motion continuity: a resting item
+  re-initializes where it reappears (no PICK is inferred from the jump) and a carried item
+  keeps its committed carrier. LOST shoppers are never re-scored from item-only updates.
 * A JSONL or Parquet recording replays to the identical committed events, carts
   and item states (`tests/integration/test_pipeline_replay.py`). Every recording
   starts with `STORE_TWIN` and `PIPELINE_CONFIG` entries so replay uses the original

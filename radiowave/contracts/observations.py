@@ -14,7 +14,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from radiowave.contracts._base import ContractModel, UnitInterval, UtcDatetime
 from radiowave.contracts.geometry import SpatialUncertainty, Velocity, WorldCoordinate
@@ -24,6 +24,24 @@ from radiowave.contracts.store import EPC, SourceType
 NATIVE_TRACK_KEY = "native_track_id"
 NATIVE_ANTENNA_KEY = "native_antenna"
 NATIVE_POSITION_KEY = "native_position"
+
+
+def _require_json(value: Any, path: str) -> None:
+    if value is None or isinstance(value, bool | int | float | str):
+        return
+    if isinstance(value, list):
+        for index, element in enumerate(value):
+            _require_json(element, f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, element in value.items():
+            if not isinstance(key, str):
+                msg = f"{path}: keys must be strings"
+                raise ValueError(msg)
+            _require_json(element, f"{path}.{key}")
+        return
+    msg = f"{path}: {type(value).__name__} is not a JSON value"
+    raise ValueError(msg)
 
 
 class SensorObservation(ContractModel):
@@ -37,7 +55,17 @@ class SensorObservation(ContractModel):
     coordinate: WorldCoordinate | None = None
     uncertainty: SpatialUncertainty | None = None
     scenario_id: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Retained native fields; JSON-compatible values only so every observation "
+        "is recordable",
+    )
+
+    @field_validator("metadata")
+    @classmethod
+    def _json_only(cls, value: dict[str, Any]) -> dict[str, Any]:
+        _require_json(value, "metadata")
+        return value
 
     @model_validator(mode="after")
     def _location_is_qualified(self) -> SensorObservation:

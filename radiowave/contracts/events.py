@@ -11,11 +11,11 @@ import hashlib
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from radiowave.contracts._base import ContractModel, UnitInterval, UtcDatetime
 from radiowave.contracts.store import EPC
-from radiowave.contracts.tracks import CandidateScore
+from radiowave.contracts.tracks import CandidateScore, ranking_margin, validate_ranking
 
 
 class RetailEventType(StrEnum):
@@ -49,12 +49,15 @@ class RetailEvent(ContractModel):
     reason: str = Field(default="", description="Human-readable transition explanation")
     scenario_id: str | None = None
 
+    @field_validator("candidates")
+    @classmethod
+    def _ranked(cls, candidates: list[CandidateScore]) -> list[CandidateScore]:
+        return validate_ranking(candidates)
+
     @property
     def margin(self) -> float:
         """Gap between best and runner-up candidate; 1.0 when there is nothing to disambiguate."""
-        if len(self.candidates) < 2:
-            return 1.0
-        return self.candidates[0].score - self.candidates[1].score
+        return ranking_margin(self.candidates)
 
 
 def make_event_id(

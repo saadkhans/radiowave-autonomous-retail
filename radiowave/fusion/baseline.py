@@ -188,6 +188,12 @@ class BaselineFusionEngine:
 
     def _step_item(self, item: ItemTrackState, now: datetime) -> list[RetailEvent]:
         events: list[RetailEvent] = []
+        if item.continuity_lost:
+            # Evidence gathered before the blackout describes an episode that is over.
+            item.continuity_lost = False
+            if item.carrier_track_id is None:
+                self.ledger.reset(item.epc)
+            self._handoff_since.pop(item.epc, None)
         if item.state == ItemState.UNKNOWN and item.rest_position is not None:
             # First classification of a freshly seen item against the twin.
             item.state = self.state_machine.classify_rest(item, item.rest_position)
@@ -260,6 +266,13 @@ class BaselineFusionEngine:
                 continue
             if person.state == PersonTrackState.ENDED:
                 continue  # carrier's track ended: keep its last evidence, do not re-score
+            if person.state == PersonTrackState.LOST:
+                expired = _seconds(now, person.updated_at) > self.config.person.reacquire_window_s
+                if expired and person_id != item.carrier_track_id:
+                    self.ledger.drop(item.epc, person_id)  # a ghost cannot win attribution
+                # A LOST shopper produced no sample; their evidence is frozen, not re-scored
+                # against fresh item reads from a stale position.
+                continue
             pair = self.ledger.pair(item.epc, person_id)
             if not pair.has_new_evidence(item, person, self._vision_count):
                 continue  # an elapsed fusion tick is not an observation; the EMA must not move

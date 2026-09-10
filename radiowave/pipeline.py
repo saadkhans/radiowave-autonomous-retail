@@ -196,6 +196,13 @@ class FoundationPipeline:
         self.fusion.ingest(observation)
         return True
 
+    def _lost_at_an_exit(self, track_id: str) -> bool:
+        """The shopper's track stopped inside an exit boundary (not merely anywhere)."""
+        person = self.fusion.persons.get(track_id)
+        if person is None or person.state == PersonTrackState.ACTIVE:
+            return False
+        return self.registry.in_exit_boundary(person.position)
+
     def _sensor_matches(self, observation: SensorObservation) -> bool:
         """The observation's sensor must exist in the twin with the same modality."""
         try:
@@ -218,10 +225,7 @@ class FoundationPipeline:
         # a cart that holds an exit candidate line is frozen at the end only when that
         # shopper is no longer observed, never while they are still inside the store.
         self.cart.close_carts_with_exit_candidates(
-            shopper_gone=lambda track_id: (
-                (person := self.fusion.persons.get(track_id)) is None
-                or person.state != PersonTrackState.ACTIVE
-            )
+            shopper_gone=self._lost_at_an_exit,
         )
         return self.result()
 

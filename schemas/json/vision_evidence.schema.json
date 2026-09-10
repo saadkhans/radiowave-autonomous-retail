@@ -98,6 +98,7 @@
     },
     "metadata": {
       "additionalProperties": true,
+      "description": "Retained native fields; JSON-compatible values only so every observation is recordable",
       "title": "Metadata",
       "type": "object"
     },

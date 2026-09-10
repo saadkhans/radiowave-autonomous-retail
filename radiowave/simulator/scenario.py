@@ -159,6 +159,18 @@ class Scenario(ContractModel):
             if truth.epc not in {p.epc for p in self.placements}:
                 msg = f"ground-truth event references unplaced EPC {truth.epc}"
                 raise ValueError(msg)
+            if truth.event_type == RetailEventType.HANDOFF and truth.counterpart_label is None:
+                msg = "a HANDOFF ground-truth event needs a counterpart_label"
+                raise ValueError(msg)
+        by_epc: dict[str, list[Carry]] = {}
+        for carry in self.carries:
+            by_epc.setdefault(carry.epc, []).append(carry)
+        for epc, carries in by_epc.items():
+            ordered = sorted(carries, key=lambda c: c.start_t)
+            for earlier, later in pairwise(ordered):
+                if earlier.end_t is None or later.start_t < earlier.end_t:
+                    msg = f"carries of {epc} overlap; one physical unit has one carrier at a time"
+                    raise ValueError(msg)
         placed = [p.epc for p in self.placements]
         epcs = set(placed)
         if len(placed) != len(epcs):

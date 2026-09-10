@@ -199,6 +199,7 @@
         "reset_after_s": {
           "default": 3.0,
           "description": "After a gap this long the smoother restarts on the next read",
+          "minimum": 0.0,
           "title": "Reset After S",
           "type": "number"
         },
@@ -220,6 +221,7 @@
         "stale_after_s": {
           "default": 1.5,
           "description": "No reads for this long -> position is stale, no motion inference",
+          "minimum": 0.0,
           "title": "Stale After S",
           "type": "number"
         },
@@ -239,6 +241,7 @@
         "end_after_s": {
           "default": 8.0,
           "description": "LOST for this long -> ENDED",
+          "minimum": 0.0,
           "title": "End After S",
           "type": "number"
         },
@@ -252,6 +255,7 @@
         "lost_after_s": {
           "default": 1.0,
           "description": "No observation for this long -> LOST",
+          "minimum": 0.0,
           "title": "Lost After S",
           "type": "number"
         },
@@ -289,6 +293,7 @@
         "reacquire_window_s": {
           "default": 6.0,
           "description": "A LOST track may be re-acquired within this window",
+          "minimum": 0.0,
           "title": "Reacquire Window S",
           "type": "number"
         },
