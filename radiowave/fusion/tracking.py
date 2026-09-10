@@ -434,7 +434,9 @@ class ItemTrackManager:
         The smoother, history and movement counters restart. An item that was at rest
         re-initializes its rest position from fresh reads (the engine re-classifies it),
         so a relocation during the blackout is never mistaken for an observed PICK.
-        A CARRIED item stays CARRIED with its committed carrier.
+        A carried item survives a blackout only because of its committed carrier; an
+        uncommitted carry (no ``carrier_track_id`` yet) is an episode that is over, just
+        like any other state.
         """
         track.position = None
         track.history.clear()
@@ -442,10 +444,16 @@ class ItemTrackManager:
         track.localized_since_reset = 0
         track.at_rest_since = None
         track.continuity_lost = True
-        if track.state not in (ItemState.CARRIED, ItemState.EXITED):
+        if track.state not in (ItemState.CARRIED, ItemState.EXITED) or (
+            track.state == ItemState.CARRIED and track.carrier_track_id is None
+        ):
             track.rest_position = None
             track.movement_start_at = None
             track.state = ItemState.UNKNOWN
+            # A fresh episode after a blackout must not inherit a REVIEWed episode's
+            # suppression, nor skip its own CARRY announcement.
+            track.attribution_unresolved = False
+            track.carry_announced = False
 
 
 __all__ = ["ItemTrackManager", "ItemTrackState", "PersonState", "PersonTrackManager"]

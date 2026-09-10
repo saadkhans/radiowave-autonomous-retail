@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -164,7 +165,10 @@ class AssociationScorer:
     def _distance_trend(
         self, pair: PairState, distance: float, now: datetime, item_moving: bool
     ) -> float:
-        pair.distance_history.append((now, distance))
+        if pair.distance_history and pair.distance_history[-1][0] == now:
+            pair.distance_history[-1] = (now, distance)
+        else:
+            pair.distance_history.append((now, distance))
         while _seconds(now, pair.distance_history[0][0]) > self._cfg.co_motion_window_s:
             pair.distance_history.popleft()
         if not item_moving or len(pair.distance_history) < 2:
@@ -202,7 +206,10 @@ class AssociationScorer:
         now: datetime,
     ) -> float:
         together = distance <= self._cfg.co_motion_radius_m and item_moving and person_moving
-        pair.co_motion.append((now, together))
+        if pair.co_motion and pair.co_motion[-1][0] == now:
+            pair.co_motion[-1] = (now, together)
+        else:
+            pair.co_motion.append((now, together))
         while _seconds(now, pair.co_motion[0][0]) > self._cfg.co_motion_window_s:
             pair.co_motion.popleft()
         return sum(1 for _, flag in pair.co_motion if flag) / len(pair.co_motion)
@@ -237,22 +244,36 @@ class AssociationScorer:
         0.1 if it was assigned to someone else, 0.5 when there is no (confident) evidence."""
         if not self._vision_enabled or item.movement_start_at is None:
             return 0.5, 0
-        relevant = [
-            v
-            for v in vision
-            if v.kind in _INTERACTION_KINDS
-            and v.confidence >= self._cfg.vision_min_confidence
-            and abs(_seconds(v.timestamp, item.movement_start_at)) <= self._cfg.vision_window_s
-            and item.rest_position is not None
-            and v.coordinate.horizontal_distance_to(item.rest_position)
-            <= self._cfg.candidate_radius_m
-        ]
+        relevant = relevant_vision(vision, item, self._cfg)
         if not relevant:
             return 0.5, 0
         hits = sum(1 for v in relevant if vision_owner.get(v.observation_id) == person.track_id)
         if hits:
             return 1.0, hits
         return 0.1, 0
+
+
+def relevant_vision(
+    vision: list[VisionEvidence], item: ItemTrackState, cfg: AssociationConfig
+) -> list[VisionEvidence]:
+    """Vision samples that could actually influence ``item``'s association scoring.
+
+    Interaction-kind evidence, confident enough, timed near the item's departure and
+    located at its departure point. Used both to score ``vision``
+    (:meth:`AssociationScorer._vision`) and to decide whether a vision sample is *new
+    evidence* for a given item (the fusion engine's ``_score_candidates``) -- a vision
+    sample nowhere near this item must not trigger a re-score.
+    """
+    if item.movement_start_at is None or item.rest_position is None:
+        return []
+    return [
+        v
+        for v in vision
+        if v.kind in _INTERACTION_KINDS
+        and v.confidence >= cfg.vision_min_confidence
+        and abs(_seconds(v.timestamp, item.movement_start_at)) <= cfg.vision_window_s
+        and v.coordinate.horizontal_distance_to(item.rest_position) <= cfg.candidate_radius_m
+    ]
 
 
 def assign_vision_to_nearest(
@@ -311,13 +332,23 @@ class CandidateLedger:
         self._pairs.pop(epc, None)
 
     def ranking(
-        self, epc: EPC, now: datetime, movement_start_at: datetime | None
+        self,
+        epc: EPC,
+        now: datetime,
+        movement_start_at: datetime | None,
+        include: Callable[[str], bool] | None = None,
     ) -> InteractionCandidate:
+        """Ranked candidates for ``epc``.
+
+        ``include``, when given, filters out candidates whose person id fails the
+        predicate (e.g. a LOST shopper's frozen score) without touching the ledger:
+        the underlying :class:`PairState` is kept so re-acquisition restores it.
+        """
         pairs = self._pairs.get(epc, {})
         candidates = [
             CandidateScore(person_track_id=pid, score=_clamp(p.score), evidence=p.evidence)
             for pid, p in pairs.items()
-            if p.evidence is not None
+            if p.evidence is not None and (include is None or include(pid))
         ]
         candidates.sort(key=lambda c: (-c.score, c.person_track_id))
         return InteractionCandidate(

@@ -14,6 +14,7 @@ No ML, no vendor logic, no raw sensor coordinates.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from datetime import datetime
 
 from radiowave.contracts.events import RetailEvent, RetailEventType, make_event_id
@@ -38,6 +39,7 @@ from radiowave.fusion.association import (
     AssociationScorer,
     CandidateLedger,
     assign_vision_to_nearest,
+    relevant_vision,
 )
 from radiowave.fusion.config import FusionConfig
 from radiowave.fusion.state_machine import ItemStateMachine, Transition
@@ -66,6 +68,7 @@ class BaselineFusionEngine:
         self.config = config or FusionConfig()
         self.registry = registry
         self.scenario_id = scenario_id
+        self._vision_enabled = vision_enabled
         self.persons = PersonTrackManager(self.config.person)
         self.items = ItemTrackManager(self.config.item)
         self.state_machine = ItemStateMachine(self.config.state_machine, self.config.item, registry)
@@ -78,7 +81,6 @@ class BaselineFusionEngine:
         self.session_history: list[ShopperSession] = []  # exited/abandoned, in order
         self._session_counter: dict[str, int] = {}
         self._vision: deque[VisionEvidence] = deque(maxlen=_VISION_BUFFER)
-        self._vision_count = 0
         self._handoff_since: dict[EPC, tuple[str, datetime]] = {}
         self._committed_ids: set[str] = set()
         self._rejected_ids: set[str] = set()
@@ -99,7 +101,22 @@ class BaselineFusionEngine:
                     track.home_fixture_id = self.registry.home_fixture_id(track.epc)
         elif isinstance(observation, VisionEvidence):
             self._vision.append(observation)
-            self._vision_count += 1
+
+    def _rankable(self, item: ItemTrackState) -> Callable[[str], bool]:
+        """A person id may lead attribution only while its evidence is current.
+
+        A LOST or unknown shopper's ledger score is frozen (see ``_score_candidates``)
+        and must not lead a ranking, except the item's own committed carrier, whose
+        evidence is kept intentionally until the episode closes.
+        """
+
+        def predicate(person_id: str) -> bool:
+            if person_id == item.carrier_track_id:
+                return True
+            person = self.persons.get(person_id)
+            return person is not None and person.state == PersonTrackState.ACTIVE
+
+        return predicate
 
     # ------------------------------------------------------------------ queries
     def person_tracks(self) -> list[PersonTrack]:
@@ -115,7 +132,7 @@ class BaselineFusionEngine:
         now = self._last_step or item.last_seen_at
         if now is None:
             return None
-        return self.ledger.ranking(epc, now, item.movement_start_at)
+        return self.ledger.ranking(epc, now, item.movement_start_at, include=self._rankable(item))
 
     def acknowledge(self, event: RetailEvent, committed: bool) -> None:
         item = self.items.get(event.epc)
@@ -165,7 +182,9 @@ class BaselineFusionEngine:
             # The receiver must still be the leading candidate; a blackout or a one-step
             # margin dip does not invalidate the proposal, another shopper taking the
             # lead or the receiver leaving does.
-            top = self.ledger.ranking(item.epc, self._last_step, item.movement_start_at).top
+            top = self.ledger.ranking(
+                item.epc, self._last_step, item.movement_start_at, include=self._rankable(item)
+            ).top
             return top is not None and top.person_track_id == event.counterpart_track_id
         if event.event_type == RetailEventType.CARRY:
             return (
@@ -203,7 +222,7 @@ class BaselineFusionEngine:
         transition = self.state_machine.evaluate(
             item,
             now,
-            carrier.position if carrier else None,
+            carrier.position if carrier and carrier.state == PersonTrackState.ACTIVE else None,
             self._nearest_person_m(item, now),
         )
         if transition is not None:
@@ -249,6 +268,9 @@ class BaselineFusionEngine:
         cfg = self.config.association
         vision = [v for v in self._vision if _seconds(now, v.timestamp) <= 30.0]
         vision_owner = assign_vision_to_nearest(vision, self.persons.all, cfg.vision_match_radius_m)
+        # Only vision relevant to THIS item counts as new evidence; a sample near some
+        # other fixture must not trigger a re-score here.
+        vision_count = len(relevant_vision(vision, item, cfg)) if self._vision_enabled else 0
         considered = set(self.ledger.persons(item.epc))
         for active in self.persons.active:
             if item.position.horizontal_distance_to(active.position) <= cfg.candidate_radius_m:
@@ -274,9 +296,9 @@ class BaselineFusionEngine:
                 # against fresh item reads from a stale position.
                 continue
             pair = self.ledger.pair(item.epc, person_id)
-            if not pair.has_new_evidence(item, person, self._vision_count):
+            if not pair.has_new_evidence(item, person, vision_count):
                 continue  # an elapsed fusion tick is not an observation; the EMA must not move
-            pair.mark_scored(item, person, self._vision_count)
+            pair.mark_scored(item, person, vision_count)
             evidence = self.scorer.score(
                 item,
                 person,
@@ -328,7 +350,9 @@ class BaselineFusionEngine:
         carrier_id = item.carrier_track_id
         candidates: list[CandidateScore] = []
         if carrier_id is not None:
-            ranking = self.ledger.ranking(item.epc, now, item.movement_start_at)
+            ranking = self.ledger.ranking(
+                item.epc, now, item.movement_start_at, include=self._rankable(item)
+            )
             candidates = [c for c in ranking.candidates if c.person_track_id == carrier_id]
         fixture = (
             self.registry.fixture_at(item.position, margin=self.config.state_machine.home_radius_m)
@@ -352,7 +376,9 @@ class BaselineFusionEngine:
 
     def _attribution_events(self, item: ItemTrackState, now: datetime) -> list[RetailEvent]:
         events: list[RetailEvent] = []
-        ranking = self.ledger.ranking(item.epc, now, item.movement_start_at)
+        ranking = self.ledger.ranking(
+            item.epc, now, item.movement_start_at, include=self._rankable(item)
+        )
         if item.carrier_track_id is None:
             if item.attribution_unresolved or item.movement_start_at is None:
                 return events

@@ -72,6 +72,10 @@ class PipelineResult(ContractModel):
     observations_rejected_low_confidence: int = Field(
         default=0, description="Observations ignored by tracking for low reported confidence"
     )
+    observations_rejected_foreign_scenario: int = Field(
+        default=0,
+        description="Observations stamped with a different scenario_id than this pipeline's own",
+    )
     steps: int = 0
 
     def committed(self, event_type: str | None = None) -> list[RetailEvent]:
@@ -121,6 +125,9 @@ class FoundationPipeline:
         self._schedule_sequence = 0
         self.observations_out_of_order = 0
         self.observations_rejected_unknown_sensor = 0
+        self.observations_rejected_foreign_scenario = 0
+        self._first_input_at: datetime | None = None
+        self._cart_session: dict[str, str] = {}  # cart_id -> session_id it was committed under
 
     # ------------------------------------------------------------------ recording
     def schedule_entry(self, timestamp: datetime, kind: EntryKind, payload: dict[str, Any]) -> None:
@@ -173,9 +180,19 @@ class FoundationPipeline:
         Observations must arrive in timestamp order; this is the single entry point
         used by batch runs, paced replay and step-by-step replay alike.
         """
+        if self._first_input_at is None:
+            self._first_input_at = observation.timestamp
         if self._last_timestamp is not None and observation.timestamp < self._last_timestamp:
             # Fusion time never moves backwards; late samples are dropped, not replayed.
             self.observations_out_of_order += 1
+            return False
+        if (
+            self.scenario_id is not None
+            and observation.scenario_id is not None
+            and observation.scenario_id != self.scenario_id
+        ):
+            # A merged/misrouted stream must not leak another scenario's samples in.
+            self.observations_rejected_foreign_scenario += 1
             return False
         if not self._sensor_matches(observation):
             self.observations_rejected_unknown_sensor += 1
@@ -216,8 +233,9 @@ class FoundationPipeline:
         if self._next_step is not None:
             self._step(self._next_step)
             self._next_step = None
-        if self._scheduled:
-            self._ensure_header(self._scheduled[0][0])
+        stamp = self._scheduled[0][0] if self._scheduled else self._first_input_at
+        if stamp is not None:
+            self._ensure_header(stamp)
         self._flush_scheduled(None)
         if self._last_timestamp is not None:
             self._close_carts_of_ended_sessions(self._last_timestamp)
@@ -279,18 +297,61 @@ class FoundationPipeline:
 
     def _close_carts_of_ended_sessions(self, now: datetime) -> None:
         """A cart closes when its shopper's session ends (exit or abandonment), never
-        because one EPC crossed the exit boundary while the shopper is still inside.
-        close_cart is idempotent, so the sweep is repeated every step."""
+        because one EPC crossed the exit boundary while the shopper is still inside, and
+        never because a *different*, later session of the same shopper track ended: a cart
+        closes only for the session it was actually committed under (``_cart_session``).
+        close_cart_by_id is idempotent, so the sweep is repeated every step."""
         for session in [*self.fusion.session_history, *self.fusion.sessions.values()]:
+            cart_ids = [
+                cart_id
+                for cart_id, session_id in self._cart_session.items()
+                if session_id == session.session_id
+            ]
             if session.state == SessionState.EXITED:
-                self.cart.close_cart(session.person_track_id, session.exited_at or now)
+                stamp = session.exited_at or now
+                if cart_ids:
+                    for cart_id in cart_ids:
+                        self.cart.close_cart_by_id(cart_id, stamp)
+                else:
+                    # No cart was ever mapped to THIS session. The shopper's CURRENT cart
+                    # may belong to a different (later, possibly still-active) session, so
+                    # it may only be closed here when it, too, carries no mapping at all
+                    # (a legacy cart from a caller that bypassed _decide() entirely).
+                    cart = self.cart.state.current_cart(session.person_track_id)
+                    if cart is not None and cart.cart_id not in self._cart_session:
+                        self.cart.close_cart_by_id(cart.cart_id, stamp)
             elif session.state == SessionState.ABANDONED:
                 # The track vanished; an item-level exit event, when consistent with the
                 # cart, is the best evidence of when the merchandise left.
-                self.cart.close_cart(
-                    session.person_track_id,
-                    self.cart.exit_stamp_or(session.person_track_id, session.exited_at or now),
-                )
+                fallback = session.exited_at or now
+                if cart_ids:
+                    for cart_id in cart_ids:
+                        self.cart.close_cart_by_id(
+                            cart_id, self.cart.exit_stamp_or_by_id(cart_id, fallback)
+                        )
+                else:
+                    cart = self.cart.state.current_cart(session.person_track_id)
+                    if cart is not None and cart.cart_id not in self._cart_session:
+                        self.cart.close_cart_by_id(
+                            cart.cart_id, self.cart.exit_stamp_or_by_id(cart.cart_id, fallback)
+                        )
+
+    def _track_cart_session(self, event: RetailEvent) -> None:
+        """Remember which session a committed event's cart belongs to.
+
+        Called once a cart-affecting event actually commits, for every shopper id the
+        event names; a cart keeps its first mapping (a cart is not shared between
+        sessions, so a later commit into the same cart must not overwrite it).
+        """
+        for track_id in (event.shopper_track_id, event.counterpart_track_id):
+            if track_id is None:
+                continue
+            cart = self.cart.state.current_cart(track_id)
+            if cart is None or cart.cart_id in self._cart_session:
+                continue
+            session = self.fusion.sessions.get(track_id)
+            if session is not None:
+                self._cart_session[cart.cart_id] = session.session_id
 
     def _decide(self, event: RetailEvent, now: datetime, proposed: bool) -> None:
         decision = self.confidence.decide(event, now)
@@ -305,6 +366,7 @@ class FoundationPipeline:
             self.fusion.acknowledge(event, committed=True)
             self.confidence.forget(event.event_id)
             self._record(now, EntryKind.CART_EVENT, cart_event.model_dump(mode="json"))
+            self._track_cart_session(event)
         elif decision.decision == Decision.REVIEW:
             self._review.append(event)
             self._pending.pop(event.event_id, None)
@@ -330,6 +392,7 @@ class FoundationPipeline:
             observations_dropped=self.dedup.dropped,
             observations_out_of_order=self.observations_out_of_order,
             observations_rejected_unknown_sensor=self.observations_rejected_unknown_sensor,
+            observations_rejected_foreign_scenario=self.observations_rejected_foreign_scenario,
             observations_rejected_low_confidence=(
                 self.fusion.persons.rejected_low_confidence
                 + self.fusion.items.rejected_low_confidence

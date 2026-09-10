@@ -160,6 +160,7 @@ def test_carrier_exit_needs_a_fresh_localized_read(registry: StoreRegistry) -> N
     for i in range(3):
         manager.ingest(_item(i * 0.1, 10.3, 4.0))
     track.state = ItemState.CARRIED
+    track.carrier_track_id = "P0001"  # committed carry: FIX2 preserves the episode across the gap
     track.rest_position = WorldCoordinate(x=3.8, y=6.5)
     carrier_at_door = WorldCoordinate(x=11.2, y=4.0)
     manager.ingest(_item(10.0, None, None, zone="zone-f2"))  # coarse read, position is 10 s old

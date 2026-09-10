@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from radiowave.adapters.rfid.base import NativeRfidRead
-from radiowave.contracts import EPC, NATIVE_ANTENNA_KEY, ItemObservation, SensorCoordinate
+from radiowave.contracts import EPC, NATIVE_ANTENNA_KEY, ItemObservation, WorldCoordinate
 from radiowave.digital_twin.registry import StoreRegistry
 from radiowave.ingestion.deduplication import ObservationDeduplicator
 from radiowave.ingestion.normalization import ObservationNormalizer
@@ -35,9 +35,12 @@ def test_dedup_capacity_is_bounded() -> None:
     assert dedup.accept(_obs("o0", 0)) is True  # evicted, so accepted again (bounded memory)
 
 
-def test_rfid_normalization_assigns_zone_from_read_point_and_keeps_native_port(
+def test_rfid_normalization_assigns_zone_from_the_estimate_and_keeps_native_port(
     registry: StoreRegistry,
 ) -> None:
+    # A localized read's zone comes from its world-frame estimate, not the antenna's own
+    # pose: pick an estimate that lands squarely inside zone-f1's bounds.
+    estimate = registry.transform("rfid-f1").to_sensor(WorldCoordinate(x=4.0, y=6.5, z=0.9))
     read = NativeRfidRead(
         sensor_id="rfid-f1",
         sequence=3,
@@ -48,7 +51,7 @@ def test_rfid_normalization_assigns_zone_from_read_point_and_keeps_native_port(
         phase_rad=0.3,
         read_rate_hz=4.0,
         confidence=0.85,
-        estimate=SensorCoordinate(x=0.2, y=-0.1, z=1.7, frame_id="rfid-f1"),
+        estimate=estimate,
         estimate_sigma_m=0.5,
     )
     obs = ObservationNormalizer(registry, "unit").item(read)

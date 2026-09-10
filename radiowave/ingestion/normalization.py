@@ -73,8 +73,11 @@ class ObservationNormalizer:
         if read.estimate is not None and read.estimate_sigma_m is not None:
             coordinate = transform.to_world(read.estimate)
             uncertainty = SpatialUncertainty.isotropic(read.estimate_sigma_m)
+        # A localized read takes its zone from the actual world-frame estimate; only a
+        # zone-only read (no estimate) falls back to the read point's own pose.
+        zone_point = coordinate if coordinate is not None else sensor.pose.position
         zone = self._registry.zone_at(
-            sensor.pose.position, kinds={ZoneKind.FIXTURE, ZoneKind.SALES_FLOOR, ZoneKind.EXIT}
+            zone_point, kinds={ZoneKind.FIXTURE, ZoneKind.SALES_FLOOR, ZoneKind.EXIT}
         )
         metadata: dict[str, Any] = {NATIVE_ANTENNA_KEY: read.antenna_port}
         if read.estimate is not None:

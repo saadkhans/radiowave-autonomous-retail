@@ -107,8 +107,12 @@ def test_unsorted_or_duplicate_candidate_rankings_are_rejected() -> None:
 
 def test_metadata_must_be_json_values() -> None:
     with pytest.raises(ValidationError, match="not a JSON value"):
-        _item(0.0, 1.0, 1.0).model_copy(update={"metadata": {"native": object()}}).model_validate(
+        ItemObservation.model_validate(
             {**_item(0.0, 1.0, 1.0).model_dump(), "metadata": {"native": object()}}
+        )
+    with pytest.raises(ValidationError, match="non-finite"):
+        ItemObservation.model_validate(
+            {**_item(0.0, 1.0, 1.0).model_dump(), "metadata": {"x": float("nan")}}
         )
     ok = ItemObservation.model_validate(
         {**_item(0.0, 1.0, 1.0).model_dump(), "metadata": {"a": [1, 2.5, "x", None, {"b": True}]}}

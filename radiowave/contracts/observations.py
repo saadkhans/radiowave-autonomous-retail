@@ -11,6 +11,7 @@ as canonical shopper or item identity; that mapping is owned by fusion.
 
 from __future__ import annotations
 
+import math
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -27,6 +28,9 @@ NATIVE_POSITION_KEY = "native_position"
 
 
 def _require_json(value: Any, path: str) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        msg = f"{path}: non-finite float ({value!r}) is not a JSON value"
+        raise ValueError(msg)
     if value is None or isinstance(value, bool | int | float | str):
         return
     if isinstance(value, list):

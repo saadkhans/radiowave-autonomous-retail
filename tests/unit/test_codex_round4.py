@@ -54,6 +54,19 @@ def _item(
     )
 
 
+def _person(t: float, x: float, y: float, native: str) -> PersonObservation:
+    return PersonObservation(
+        observation_id=f"mmwave:radar-north:{t:.3f}:{native}",
+        sensor_id="radar-north",
+        timestamp=at(t),
+        confidence=0.9,
+        coordinate=WorldCoordinate(x=x, y=y, z=1.0),
+        uncertainty=SpatialUncertainty.isotropic(0.08),
+        velocity=Velocity(),
+        metadata={NATIVE_TRACK_KEY: native},
+    )
+
+
 def test_recording_carries_the_pipeline_config_and_replays_with_it() -> None:
     scenario = load_scenario("01")
     config = PipelineConfig(thresholds=ConfidenceThresholds(commit_min_confidence=0.6))
@@ -136,13 +149,24 @@ def test_low_confidence_person_observations_are_ignored() -> None:
 def test_handoff_proposal_is_inactive_once_the_receiver_changes(registry: StoreRegistry) -> None:
     engine = BaselineFusionEngine(registry)
     epc = EPC(value=EPC_SHIRT_A)
+    # Real ACTIVE tracks for the three shoppers the ledger below will reference: FIX1's
+    # `_rankable` only lets a ranked (non-carrier) candidate lead when its person track
+    # exists and is ACTIVE, so a seeded ledger id needs a matching real track.
     for i in range(10):
         engine.ingest(_item(i * 0.1, 3.8, 6.5))
+        engine.ingest(_person(i * 0.1, 3.8, 5.4, "T1"))  # -> P0001
+        engine.ingest(_person(i * 0.1, 4.8, 5.4, "T2"))  # -> P0002
+        engine.ingest(_person(i * 0.1, 5.8, 5.4, "T3"))  # -> P0003
     engine.step(at(1.0))
     item = engine.items.get(epc)
     assert item is not None
     item.state = ItemState.CARRIED
     item.carrier_track_id = "P0001"
+    # Keep all three ACTIVE as of `at(1.0)`, the `now` engine.is_active() uses below.
+    engine.ingest(_person(1.0, 3.8, 5.4, "T1"))
+    engine.ingest(_person(1.0, 4.8, 5.4, "T2"))
+    engine.ingest(_person(1.0, 5.8, 5.4, "T3"))
+    assert {p.track_id for p in engine.persons.all} == {"P0001", "P0002", "P0003"}
 
     def evidence(score: float) -> AssociationEvidence:
         return AssociationEvidence(

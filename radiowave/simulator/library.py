@@ -272,37 +272,34 @@ def scenario_07_identical_skus_different_epcs() -> Scenario:
 
 def scenario_08_rfid_dropout() -> Scenario:
     base = scenario_01_single_pick()
-    return base.model_copy(
-        update={
-            "scenario_id": "08",
-            "name": "temporary RFID observation loss",
-            "description": "Scenario 01 with all RFID reads suppressed for 3 s mid-carry.",
-            "rfid_dropouts": [Dropout(start_t=9.0, end_t=12.0)],
-        }
-    )
+    update = {
+        "scenario_id": "08",
+        "name": "temporary RFID observation loss",
+        "description": "Scenario 01 with all RFID reads suppressed for 3 s mid-carry.",
+        "rfid_dropouts": [Dropout(start_t=9.0, end_t=12.0)],
+    }
+    return Scenario.model_validate({**base.model_dump(), **update})
 
 
 def scenario_09_radar_dropout() -> Scenario:
     base = scenario_01_single_pick()
-    return base.model_copy(
-        update={
-            "scenario_id": "09",
-            "name": "temporary radar observation loss",
-            "description": "Scenario 01 with both radars suppressed for 2 s mid-carry.",
-            "radar_dropouts": [Dropout(start_t=9.0, end_t=11.0)],
-        }
-    )
+    update = {
+        "scenario_id": "09",
+        "name": "temporary radar observation loss",
+        "description": "Scenario 01 with both radars suppressed for 2 s mid-carry.",
+        "radar_dropouts": [Dropout(start_t=9.0, end_t=11.0)],
+    }
+    return Scenario.model_validate({**base.model_dump(), **update})
 
 
 def scenario_10_duplicate_replay() -> Scenario:
     base = scenario_01_single_pick()
-    return base.model_copy(
-        update={
-            "scenario_id": "10",
-            "name": "duplicate observation replay",
-            "description": "Scenario 01 whose observation stream is fed twice.",
-        }
-    )
+    update = {
+        "scenario_id": "10",
+        "name": "duplicate observation replay",
+        "description": "Scenario 01 whose observation stream is fed twice.",
+    }
+    return Scenario.model_validate({**base.model_dump(), **update})
 
 
 def scenario_11_rfid_jitter_no_pickup() -> Scenario:
@@ -357,14 +354,13 @@ def scenario_12_ambiguous_pick() -> Scenario:
 
 def scenario_12v_ambiguous_pick_with_vision() -> Scenario:
     base = scenario_12_ambiguous_pick()
-    return base.model_copy(
-        update={
-            "scenario_id": "12v",
-            "name": "ambiguous pickup resolved by vision evidence",
-            "description": "Scenario 12 with selective vision evidence enabled at the fixture.",
-            "vision_enabled": True,
-        }
-    )
+    update = {
+        "scenario_id": "12v",
+        "name": "ambiguous pickup resolved by vision evidence",
+        "description": "Scenario 12 with selective vision evidence enabled at the fixture.",
+        "vision_enabled": True,
+    }
+    return Scenario.model_validate({**base.model_dump(), **update})
 
 
 def scenario_13_companion_leaves_store() -> Scenario:

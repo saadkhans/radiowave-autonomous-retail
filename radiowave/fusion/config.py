@@ -40,6 +40,7 @@ class PersonTrackingConfig(FrozenModel):
     velocity_window_s: float = Field(default=0.6)
     prediction_horizon_s: float = Field(
         default=1.0,
+        ge=0.0,
         description="Maximum dead-reckoning horizon when a LOST track's position is needed",
     )
     history_length: int = Field(

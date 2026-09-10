@@ -12,8 +12,9 @@ Examples::
 from __future__ import annotations
 
 import argparse
+import itertools
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
@@ -23,7 +24,7 @@ from radiowave.contracts.store import Store
 from radiowave.digital_twin.registry import StoreRegistry
 from radiowave.pipeline import FoundationPipeline, PipelineConfig, PipelineResult
 from radiowave.replay.clock import ReplayPacer
-from radiowave.replay.reader import ReplayPlayer, observations_from, open_replay_source
+from radiowave.replay.reader import observations_from, open_replay_source
 from radiowave.replay.recorder import InMemoryRecorder, JsonlRecorder, ParquetRecorder
 from radiowave.simulator.library import SCENARIOS, load_scenario
 from radiowave.simulator.runner import run_scenario
@@ -36,6 +37,7 @@ def _print_summary(result: PipelineResult, out: Callable[[str], None] = print) -
         f"{result.observations_dropped} duplicates dropped, "
         f"{result.observations_rejected_low_confidence} rejected (low confidence), "
         f"{result.observations_rejected_unknown_sensor} rejected (unknown sensor), "
+        f"{result.observations_rejected_foreign_scenario} rejected (foreign scenario), "
         f"{result.steps} fusion steps"
     )
     out(f"person tracks   : {[t.track_id for t in result.person_tracks]}")
@@ -133,16 +135,31 @@ def _store_for(entries: list[RecordedEntry], args: argparse.Namespace) -> Store:
     raise SystemExit(msg)
 
 
+def _paced(entries: Iterator[RecordedEntry], pacer: ReplayPacer | None) -> Iterator[RecordedEntry]:
+    for entry in entries:
+        if pacer is not None:
+            pacer.wait_for(entry.timestamp)
+        yield entry
+
+
 def cmd_replay(args: argparse.Namespace) -> int:
     source = open_replay_source(args.path)
-    entries = list(source.entries())
-    if not entries:
+    rest = iter(source.entries())  # read the source exactly once
+    # STORE_TWIN/PIPELINE_CONFIG (and any other header) precede the first OBSERVATION;
+    # buffer only up to and including it, then chain the rest back in unread.
+    headers: list[RecordedEntry] = []
+    for entry in rest:
+        headers.append(entry)
+        if entry.kind == EntryKind.OBSERVATION:
+            break
+    if not headers:
         print("recording is empty", file=sys.stderr)
         return 1
-    store = _store_for(entries, args)
-    scenario_id = args.scenario or entries[0].scenario_id
+    store = _store_for(headers, args)
+    scenario_id = args.scenario or headers[0].scenario_id
     registry = StoreRegistry(store)
-    pipeline = FoundationPipeline(registry, _config_for(entries, args), scenario_id=scenario_id)
+    pipeline = FoundationPipeline(registry, _config_for(headers, args), scenario_id=scenario_id)
+    entries = itertools.chain(headers, rest)
     if args.step:
         print("step mode: press Enter to release the next observation, q to finish")
         for entry in entries:
@@ -160,13 +177,14 @@ def cmd_replay(args: argparse.Namespace) -> int:
         result = pipeline.finish()
     else:
         pacer = ReplayPacer(rate=args.rate) if args.rate > 0 else None
-        player = ReplayPlayer(source, pacer)
-        result = pipeline.run(observations_from(iter(player)))
+        result = pipeline.run(observations_from(_paced(entries, pacer)))
     _print_summary(result)
-    if result.observations_rejected_unknown_sensor and not result.observations_accepted:
+    if (
+        result.observations_rejected_unknown_sensor or result.observations_rejected_foreign_scenario
+    ) and not result.observations_accepted:
         print(
-            "every observation named a sensor unknown to the twin; the recording and the "
-            "store do not belong together",
+            "every observation was rejected (unknown sensor or foreign scenario_id); the "
+            "recording does not belong to this store twin or --scenario",
             file=sys.stderr,
         )
         return 1

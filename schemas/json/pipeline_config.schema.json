@@ -276,6 +276,7 @@
         "prediction_horizon_s": {
           "default": 1.0,
           "description": "Maximum dead-reckoning horizon when a LOST track's position is needed",
+          "minimum": 0.0,
           "title": "Prediction Horizon S",
           "type": "number"
         },

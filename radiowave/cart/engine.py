@@ -108,8 +108,11 @@ class InMemoryCartEngine:
         """Freeze open carts holding an EXIT_WITH_ITEM line whose shopper is no longer seen.
 
         Used only when the shopper's session never ended (track lost at the door). The
-        stamp is the latest exit event and must not predate the newest line, otherwise
-        the exit evidence is inconsistent with the cart and the cart stays open.
+        preferred stamp is the latest exit event, but only when it is not older than the
+        newest line (otherwise the exit evidence is inconsistent with the cart). A gone
+        shopper must still reach a terminal state even then: the cart still closes, stamped
+        with the later of the newest line and the latest exit event, so a stale exit does
+        not leave the cart open forever.
         """
         for cart in self.state.carts.values():
             if cart.status != CartStatus.OPEN or not shopper_gone(cart.shopper_track_id):
@@ -117,15 +120,20 @@ class InMemoryCartEngine:
             if not any(line.final_ownership_candidate for line in cart.lines.values()):
                 continue
             stamp = self._consistent_exit_stamp(cart)
-            if stamp is not None:
-                cart.status = CartStatus.EXITED
-                cart.exited_at = stamp
+            if stamp is None:
+                exits = [line.exit_event_at for line in cart.lines.values() if line.exit_event_at]
+                newest_line = max(line.added_at for line in cart.lines.values())
+                stamp = max(newest_line, *exits) if exits else newest_line
+            cart.status = CartStatus.EXITED
+            cart.exited_at = stamp
 
     def close_cart(self, shopper_track_id: str, session_ended_at: datetime) -> None:
-        """Freeze the shopper's current cart because their session ended.
+        """Freeze the shopper's CURRENT cart because their session ended.
 
         The cart is stamped with the session end; item-level exit times live on the
-        lines (``exit_event_at``).
+        lines (``exit_event_at``). For direct callers/tests only; a caller that knows
+        which session ended (the pipeline) should use ``close_cart_by_id`` instead, since
+        the shopper's *current* cart may already belong to a later, still-active session.
         """
         cart = self.state.current_cart(shopper_track_id)
         if cart is None or cart.status != CartStatus.OPEN:
@@ -134,8 +142,24 @@ class InMemoryCartEngine:
         cart.exited_at = session_ended_at
 
     def exit_stamp_or(self, shopper_track_id: str, fallback: datetime) -> datetime:
-        """Latest consistent EXIT_WITH_ITEM time of the shopper's open cart, else fallback."""
+        """Latest consistent EXIT_WITH_ITEM time of the shopper's CURRENT cart, else fallback."""
         cart = self.state.current_cart(shopper_track_id)
+        if cart is None:
+            return fallback
+        stamp = self._consistent_exit_stamp(cart)
+        return stamp if stamp is not None else fallback
+
+    def close_cart_by_id(self, cart_id: str, session_ended_at: datetime) -> None:
+        """Freeze one specific cart (by id) because the session it belongs to ended."""
+        cart = self.state.carts.get(cart_id)
+        if cart is None or cart.status != CartStatus.OPEN:
+            return
+        cart.status = CartStatus.EXITED
+        cart.exited_at = session_ended_at
+
+    def exit_stamp_or_by_id(self, cart_id: str, fallback: datetime) -> datetime:
+        """Latest consistent EXIT_WITH_ITEM time of one specific cart, else fallback."""
+        cart = self.state.carts.get(cart_id)
         if cart is None:
             return fallback
         stamp = self._consistent_exit_stamp(cart)
