@@ -62,6 +62,10 @@ class FusionEngine(Protocol):
         """Feedback from the confidence/cart layer about a proposed event."""
         ...
 
+    def is_active(self, event: RetailEvent) -> bool:
+        """Whether a previously proposed event still describes the current episode."""
+        ...
+
 
 @runtime_checkable
 class ConfidenceEngine(Protocol):

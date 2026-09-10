@@ -65,8 +65,9 @@ class StateMachineConfig(FrozenModel):
     movement_confirm_reads: int = Field(
         default=4,
         ge=1,
-        description="Consecutive evaluations, each backed by at least one new RFID read, with "
-        "the smoothed estimate beyond the threshold before INTERACTION_CANDIDATE",
+        description="Consecutive evaluations, each backed by at least one new localized RFID "
+        "read, with the smoothed estimate beyond the threshold before INTERACTION_CANDIDATE. "
+        "In read-sparse zones this scales with the read interval, not the fusion step",
     )
     carry_displacement_m: float = Field(
         default=1.5, description="Displacement from rest to become CARRIED"
@@ -98,6 +99,12 @@ class StateMachineConfig(FrozenModel):
     )
     exit_item_radius_m: float = Field(
         default=1.5, description="Item within this distance of an exiting carrier leaves with them"
+    )
+    exit_zone_confirm_reads: int = Field(
+        default=3,
+        ge=1,
+        description="Consecutive reads from an EXIT zone (a portal burst) that close a carried "
+        "episode even without localization; a single stray read from a far read point is not",
     )
     physical_event_confidence: float = Field(
         default=0.9, description="Confidence for rest/exit facts backed by fresh reads"

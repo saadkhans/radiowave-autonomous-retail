@@ -8,6 +8,7 @@ is still dropped while observations that differ in any field are kept.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import OrderedDict
 
@@ -25,7 +26,8 @@ class ObservationDeduplicator:
     def content_key(observation: SensorObservation) -> str:
         """Every normalized field except the id, so distinct evidence is never collapsed."""
         payload = observation.model_dump(mode="json", exclude={"observation_id"})
-        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.blake2b(canonical.encode("utf-8"), digest_size=16).hexdigest()
 
     def accept(self, observation: SensorObservation) -> bool:
         """Return True if the observation is new; False (and drop) if seen before."""

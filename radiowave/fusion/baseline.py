@@ -24,7 +24,7 @@ from radiowave.contracts.observations import (
     VisionEvidence,
 )
 from radiowave.contracts.sessions import SessionState, ShopperSession
-from radiowave.contracts.store import EPC, BoundaryKind
+from radiowave.contracts.store import EPC, BoundaryKind, ZoneKind
 from radiowave.contracts.tracks import (
     CandidateScore,
     InteractionCandidate,
@@ -129,12 +129,37 @@ class BaselineFusionEngine:
                 self._handoff_since.pop(event.epc, None)
         else:
             self._rejected_ids.add(event.event_id)
-            if item is not None and event.event_type in (
-                RetailEventType.PICK,
-                RetailEventType.HANDOFF,
+            if (
+                item is not None
+                and event.event_type in (RetailEventType.PICK, RetailEventType.HANDOFF)
+                and self.is_active(event)
             ):
+                # Only the live episode is affected; a rejection of an older, already
+                # superseded proposal must not poison the item's current attribution.
                 item.attribution_unresolved = True
                 self._handoff_since.pop(event.epc, None)
+
+    def is_active(self, event: RetailEvent) -> bool:
+        """True while the proposal still describes the item's current episode."""
+        item = self.items.get(event.epc)
+        if item is None:
+            return False
+        if event.event_type == RetailEventType.PICK:
+            return (
+                item.state == ItemState.CARRIED
+                and item.carrier_track_id is None
+                and item.movement_start_at is not None
+                and event.event_id
+                == make_event_id(RetailEventType.PICK, item.epc, item.movement_start_at)
+            )
+        if event.event_type in (RetailEventType.HANDOFF, RetailEventType.CARRY):
+            return (
+                item.state == ItemState.CARRIED
+                and item.carrier_track_id == event.shopper_track_id
+                and not item.attribution_unresolved
+            )
+        # PUTBACK / MISPLACE / EXIT_WITH_ITEM describe the transition that produced them.
+        return item.state_since == event.timestamp
 
     # ------------------------------------------------------------------ stepping
     def step(self, now: datetime) -> list[RetailEvent]:
@@ -164,7 +189,11 @@ class BaselineFusionEngine:
             self.transitions.append(transition)
             events.extend(self._events_for_transition(item, transition, now))
         if item.is_stale(now, self.config.item.stale_after_s):
-            return events  # no fresh reads: never score or attribute against a cached position
+            # No fresh reads: never score or attribute against a cached position, and do
+            # not let dwell timers keep counting through the blackout.
+            self._handoff_since.pop(item.epc, None)
+            item.at_rest_since = None
+            return events
         if item.state in (ItemState.INTERACTION_CANDIDATE, ItemState.CARRIED):
             self._score_candidates(item, now)
         if item.state == ItemState.CARRIED:
@@ -200,14 +229,17 @@ class BaselineFusionEngine:
                 considered.add(active.track_id)
         for person_id in sorted(considered):
             person = self.persons.get(person_id)
-            if (
-                person is None
-                or person.state == PersonTrackState.ENDED
-                or not self._in_store(person)
-            ):
-                # Departed or exited shoppers cannot be candidates nor block others.
+            if person is None:
                 self.ledger.drop(item.epc, person_id)
                 continue
+            departed = person.state == PersonTrackState.ENDED or not self._in_store(person)
+            if departed and person_id != item.carrier_track_id:
+                # Departed or exited shoppers cannot become candidates nor block others;
+                # the committed carrier keeps its evidence until the episode closes.
+                self.ledger.drop(item.epc, person_id)
+                continue
+            if person.state == PersonTrackState.ENDED:
+                continue  # carrier's track ended: keep its last evidence, do not re-score
             pair = self.ledger.pair(item.epc, person_id)
             evidence = self.scorer.score(
                 item,
@@ -398,11 +430,9 @@ class BaselineFusionEngine:
             if session is None:
                 session = self._open_session(person, person.created_at)
             if session.state == SessionState.EXITED:
-                # A track that steps back out of the exit boundary starts a fresh session;
-                # the exited one keeps its cart for settlement.
-                if person.state == PersonTrackState.ACTIVE and not self.registry.in_exit_boundary(
-                    person.position
-                ):
+                # A track seen back on the sales floor (not merely past the door) starts a
+                # fresh session; the exited one keeps its cart for settlement.
+                if person.state == PersonTrackState.ACTIVE and self._on_sales_floor(person):
                     self._open_session(person, now)
                 continue
             if session.state != SessionState.ACTIVE:
@@ -416,6 +446,14 @@ class BaselineFusionEngine:
             elif person.state == PersonTrackState.ENDED:
                 session.state = SessionState.ABANDONED
                 session.exited_at = now
+
+    def _on_sales_floor(self, person: PersonState) -> bool:
+        if self.registry.in_exit_boundary(person.position):
+            return False
+        zone = self.registry.zone_at(
+            person.position, kinds={ZoneKind.SALES_FLOOR, ZoneKind.FIXTURE}
+        )
+        return zone is not None
 
     def _open_session(self, person: PersonState, entered_at: datetime) -> ShopperSession:
         self._session_counter[person.track_id] = self._session_counter.get(person.track_id, 0) + 1

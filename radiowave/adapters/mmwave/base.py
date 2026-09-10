@@ -23,7 +23,9 @@ class NativeRadarSample(FrozenModel):
     sensor_id: str = Field(min_length=1, description="Our sensor id, not the vendor's")
     sequence: int = Field(ge=0, description="Monotonic per-sensor sample counter")
     timestamp: UtcDatetime
-    native_track_id: str = Field(description="Vendor track number; continuity hint only")
+    native_track_id: str = Field(
+        min_length=1, description="Vendor track number; continuity hint only"
+    )
     position: SensorCoordinate
     velocity: Velocity | None = Field(default=None, description="In the sensor frame")
     track_confidence: UnitInterval

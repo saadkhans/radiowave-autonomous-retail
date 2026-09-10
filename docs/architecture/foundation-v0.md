@@ -112,7 +112,10 @@ candidates there is nothing to disambiguate and margin is 1.0. Physical events
   scenario always produces byte-identical observations.
 * The pipeline steps fusion on simulated time only; no wall clock is read.
 * While an item has no fresh reads (stale) it is neither scored nor attributed; a cached
-  position is never treated as new evidence.
+  position is never treated as new evidence, and dwell timers (handoff, rest) restart after
+  the blackout. Exit detection also accepts zone-only reads from an exit portal.
+* A pending WAIT proposal whose episode has ended (item put back, re-picked, exited) is
+  dropped rather than decided late.
 * A JSONL or Parquet recording replays to the identical committed events, carts
   and item states (`tests/integration/test_pipeline_replay.py`). Every recording
   starts with a `STORE_TWIN` entry so replay uses the original twin.

@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from radiowave.contracts.geometry import WorldCoordinate
+from radiowave.contracts.store import ZoneKind
 from radiowave.contracts.tracks import ItemState
 from radiowave.digital_twin.registry import StoreRegistry
 from radiowave.fusion.config import ItemTrackingConfig, StateMachineConfig
@@ -77,6 +78,12 @@ class ItemStateMachine:
             return None
         if item.state == ItemState.EXITED:
             return None
+        if item.state == ItemState.CARRIED:
+            # Leaving the store is zone/carrier evidence, not motion evidence: an exit
+            # portal that only reports zone-level reads must still close the episode.
+            exited = self._exit_transition(item, now, carrier_position)
+            if exited is not None:
+                return exited
         if item.is_stale(now, self._item_cfg.stale_after_s):
             return None
         if not item.has_fresh_evidence():
@@ -177,27 +184,6 @@ class ItemStateMachine:
     ) -> Transition | None:
         cfg = self._cfg
         assert item.position is not None
-        if self._registry.in_exit_boundary(item.position):
-            return self._apply(
-                item,
-                ItemState.EXITED,
-                now,
-                reason="item location estimate inside exit boundary",
-                measurements={},
-            )
-        if carrier_position is not None and self._registry.in_exit_boundary(carrier_position):
-            gap = item.position.horizontal_distance_to(carrier_position)
-            if gap <= cfg.exit_item_radius_m:
-                return self._apply(
-                    item,
-                    ItemState.EXITED,
-                    now,
-                    reason=(
-                        f"carrier inside exit boundary with item {gap:.2f} m away "
-                        f"(radius {cfg.exit_item_radius_m} m)"
-                    ),
-                    measurements={"carrier_gap_m": gap},
-                )
         displacement = item.rest_displacement(cfg.rest_window_s)
         possibly_held = nearest_person_m is not None and nearest_person_m <= cfg.hold_radius_m
         if (
@@ -240,6 +226,57 @@ class ItemStateMachine:
                 )
         else:
             item.at_rest_since = None
+        return None
+
+    def _exit_transition(
+        self, item: ItemTrackState, now: datetime, carrier_position: WorldCoordinate | None
+    ) -> Transition | None:
+        """EXITED when any recent read (localized or zone-only) places the item at the exit."""
+        cfg = self._cfg
+        if (
+            item.last_seen_at is None
+            or _seconds(now, item.last_seen_at) > self._item_cfg.stale_after_s
+        ):
+            return None
+        recent = list(item.zone_history)[-cfg.exit_zone_confirm_reads :]
+        if len(recent) == cfg.exit_zone_confirm_reads and all(
+            z is not None and self._registry.zone(z).kind == ZoneKind.EXIT for z in recent
+        ):
+            return self._apply(
+                item,
+                ItemState.EXITED,
+                now,
+                reason=(
+                    f"{cfg.exit_zone_confirm_reads} consecutive reads from exit zone "
+                    f"{recent[-1]} (portal burst)"
+                ),
+                measurements={"exit_zone_reads": float(len(recent))},
+            )
+        if item.position is not None and self._registry.in_exit_boundary(item.position):
+            return self._apply(
+                item,
+                ItemState.EXITED,
+                now,
+                reason="item location estimate inside exit boundary",
+                measurements={},
+            )
+        if (
+            carrier_position is not None
+            and item.position is not None
+            and self._registry.in_exit_boundary(carrier_position)
+        ):
+            gap = item.position.horizontal_distance_to(carrier_position)
+            if gap <= cfg.exit_item_radius_m:
+                return self._apply(
+                    item,
+                    ItemState.EXITED,
+                    now,
+                    reason=(
+                        f"carrier inside exit boundary with item {gap:.2f} m away "
+                        f"(radius {cfg.exit_item_radius_m} m)"
+                    ),
+                    measurements={"carrier_gap_m": gap},
+                )
         return None
 
     # ------------------------------------------------------------------

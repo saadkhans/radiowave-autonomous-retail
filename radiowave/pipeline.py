@@ -168,11 +168,11 @@ class FoundationPipeline:
         if not self._twin_recorded:
             # The recording carries the twin it was produced against, so a replay never
             # has to guess which store the coordinates, zones and home fixtures refer to.
-            self._record(
-                observation.timestamp,
-                EntryKind.STORE_TWIN,
-                self.registry.store.model_dump(mode="json"),
-            )
+            # It is stamped no later than anything else so the file stays chronological.
+            first = observation.timestamp
+            if self._scheduled and self._scheduled[0][0] < first:
+                first = self._scheduled[0][0]
+            self._record(first, EntryKind.STORE_TWIN, self.registry.store.model_dump(mode="json"))
             self._twin_recorded = True
         self._flush_scheduled(observation.timestamp)
         self._record(
@@ -210,18 +210,25 @@ class FoundationPipeline:
         for event in self.fusion.step(now):
             proposed_now.add(event.event_id)
             self._proposed.append(event)
-            self._decide(event, now)
+            self._decide(event, now, proposed=True)
         # One-shot proposals (CARRY, PUTBACK, MISPLACE, EXIT_WITH_ITEM) are not re-proposed by
         # fusion; keep re-evaluating them while the confidence engine says WAIT so they
-        # eventually COMMIT or expire into REVIEW instead of silently vanishing.
+        # eventually COMMIT or expire into REVIEW instead of silently vanishing. A pending
+        # proposal whose episode has since ended is dropped, never decided late.
         for event_id, event in list(self._pending.items()):
-            if event_id not in proposed_now:
-                self._decide(event, now)
+            if event_id in proposed_now:
+                continue
+            if not self.fusion.is_active(event):
+                self._pending.pop(event_id, None)
+                self.confidence.forget(event_id)
+                continue
+            self._decide(event, now, proposed=False)
 
-    def _decide(self, event: RetailEvent, now: datetime) -> None:
+    def _decide(self, event: RetailEvent, now: datetime, proposed: bool) -> None:
         decision = self.confidence.decide(event, now)
         self._decisions.append(decision)
-        self._record(now, EntryKind.RETAIL_EVENT, event.model_dump(mode="json"))
+        if proposed:
+            self._record(now, EntryKind.RETAIL_EVENT, event.model_dump(mode="json"))
         self._record(now, EntryKind.DECISION, decision.model_dump(mode="json"))
         if decision.decision == Decision.COMMIT:
             cart_event = self.cart.apply(event)

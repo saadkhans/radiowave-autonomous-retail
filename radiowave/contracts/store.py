@@ -83,6 +83,14 @@ class CoordinateFrame(FrozenModel):
     description: str = "Store floor plan frame: origin at a documented corner, x east, y north"
     units: str = "m"
 
+    @field_validator("frame_id")
+    @classmethod
+    def _store_frame_only(cls, value: str) -> str:
+        if value != STORE_FRAME_ID:
+            msg = f"the store frame must be {STORE_FRAME_ID!r}, got {value!r}"
+            raise ValueError(msg)
+        return value
+
 
 class Box2D(FrozenModel):
     """Axis-aligned rectangle on the floor plane, in store-frame meters."""

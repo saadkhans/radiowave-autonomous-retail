@@ -130,7 +130,7 @@ class PersonTrackManager:
                 track = self._tracks[mapped]
                 if (
                     track.state != PersonTrackState.ENDED
-                    and self._gate_radius(track, observation) is not None
+                    and self._gate_radius(track, observation, continuity=True) is not None
                 ):
                     return track
                 del self._native_map[key]
@@ -156,17 +156,25 @@ class PersonTrackManager:
             self._native_map[key] = track.track_id
         return track
 
-    def _gate_radius(self, track: PersonState, observation: PersonObservation) -> float | None:
-        """Distance from the track's prediction if it is inside the gate, else None."""
+    def _gate_radius(
+        self, track: PersonState, observation: PersonObservation, continuity: bool = False
+    ) -> float | None:
+        """Distance from the track's prediction if it is inside the gate, else None.
+
+        ``continuity`` is used for a sample carrying the native id already bound to the
+        track: the gate grows with the time since the last sample (frame gaps, turns),
+        instead of the cross-sensor merge radius meant for simultaneous observations.
+        """
         cfg = self._config
         now = observation.timestamp
-        if track.state == PersonTrackState.ACTIVE:
-            radius = cfg.merge_radius_m
+        silent_for = max(0.0, _seconds(now, track.updated_at))
+        if track.state != PersonTrackState.ACTIVE and silent_for > cfg.reacquire_window_s:
+            return None
+        if continuity or track.state != PersonTrackState.ACTIVE:
+            base = cfg.merge_radius_m if continuity else cfg.reacquire_base_radius_m
+            radius = base + cfg.reacquire_growth_m_per_s * silent_for
         else:
-            lost_for = _seconds(now, track.updated_at)
-            if lost_for > cfg.reacquire_window_s:
-                return None
-            radius = cfg.reacquire_base_radius_m + cfg.reacquire_growth_m_per_s * lost_for
+            radius = cfg.merge_radius_m
         distance = track.predicted_position(now).horizontal_distance_to(observation.coordinate)
         return distance if distance <= radius else None
 
@@ -182,12 +190,13 @@ class PersonTrackManager:
             if track.state == PersonTrackState.ENDED:
                 continue
             last_same_sensor = track.sensor_last_update.get(observation.sensor_id)
-            if (
-                not allow_same_sensor
-                and last_same_sensor is not None
-                and _seconds(now, last_same_sensor) < cfg.same_sensor_exclusion_s
-            ):
-                continue  # this sensor already reports a different native track for this person
+            if last_same_sensor is not None:
+                if allow_same_sensor and last_same_sensor >= now:
+                    continue  # already claimed by another hint-less sample of this frame
+                if not allow_same_sensor and (
+                    _seconds(now, last_same_sensor) < cfg.same_sensor_exclusion_s
+                ):
+                    continue  # this sensor already reports a different native track here
             distance = self._gate_radius(track, observation)
             if distance is not None and distance < best_distance:
                 best, best_distance = track, distance
@@ -259,6 +268,7 @@ class ItemTrackState:
     observation_count: int = 0
     last_localized_at: datetime | None = None
     localized_count: int = 0
+    zone_history: deque[str | None] = field(default_factory=lambda: deque(maxlen=16))
     reads_beyond_threshold: int = 0
     localized_at_last_evaluation: int = 0
     at_rest_since: datetime | None = None
@@ -370,6 +380,7 @@ class ItemTrackManager:
             return track
         track.last_seen_at = observation.timestamp
         track.observation_count += 1
+        track.zone_history.append(observation.zone_id)
         if observation.zone_id is not None:
             track.zone_id = observation.zone_id
         if observation.coordinate is None:
