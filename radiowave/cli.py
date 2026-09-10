@@ -38,6 +38,7 @@ def _print_summary(result: PipelineResult, out: Callable[[str], None] = print) -
         f"{result.observations_rejected_low_confidence} rejected (low confidence), "
         f"{result.observations_rejected_unknown_sensor} rejected (unknown sensor), "
         f"{result.observations_rejected_foreign_scenario} rejected (foreign scenario), "
+        f"{result.observations_rejected_spatially_inconsistent} rejected (spatially inconsistent), "
         f"{result.steps} fusion steps"
     )
     out(f"person tracks   : {[t.track_id for t in result.person_tracks]}")
@@ -180,11 +181,14 @@ def cmd_replay(args: argparse.Namespace) -> int:
         result = pipeline.run(observations_from(_paced(entries, pacer)))
     _print_summary(result)
     if (
-        result.observations_rejected_unknown_sensor or result.observations_rejected_foreign_scenario
+        result.observations_rejected_unknown_sensor
+        or result.observations_rejected_foreign_scenario
+        or result.observations_rejected_spatially_inconsistent
     ) and not result.observations_accepted:
         print(
-            "every observation was rejected (unknown sensor or foreign scenario_id); the "
-            "recording does not belong to this store twin or --scenario",
+            "every observation was rejected (unknown sensor, foreign scenario_id or "
+            "spatially inconsistent); the recording does not belong to this store twin or "
+            "--scenario",
             file=sys.stderr,
         )
         return 1

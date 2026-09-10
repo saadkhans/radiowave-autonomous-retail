@@ -62,6 +62,42 @@ def test_dropout_reacquires_the_same_canonical_track() -> None:
     assert len(manager.all) == 1
 
 
+def test_capped_prediction_rejects_a_shopper_far_beyond_the_horizon() -> None:
+    manager = PersonTrackManager(PersonTrackingConfig())
+    manager.ingest(_person("radar-north", "T1", 0.0, 1.0, 2.0, vx=3.0))
+    manager.step(at(5.0))  # 5 s silence -> LOST
+    lost = manager.get("P0001")
+    assert lost is not None and lost.state == PersonTrackState.LOST
+    # Uncapped dead reckoning would place T1 at x=16.0 (1.0 + 3.0*5.0); capped to the
+    # prediction horizon (1.0 s default) it is only at x=4.0, outside the re-acquisition gate.
+    far = manager.ingest(_person("radar-north", "T2", 5.0, 16.0, 2.0))
+    assert far.track_id == "P0002"
+    assert len(manager.all) == 2
+    still_lost = manager.get("P0001")
+    assert still_lost is not None and still_lost.state == PersonTrackState.LOST
+
+
+def test_capped_prediction_still_reacquires_within_the_gate() -> None:
+    manager = PersonTrackManager(PersonTrackingConfig())
+    manager.ingest(_person("radar-north", "T1", 0.0, 1.0, 2.0, vx=3.0))
+    manager.step(at(5.0))  # 5 s silence -> LOST
+    near = manager.ingest(_person("radar-north", "T3", 5.0, 4.5, 2.0))
+    assert near.track_id == "P0001"
+    assert near.state == PersonTrackState.ACTIVE
+    assert len(manager.all) == 1
+
+
+def test_recycled_native_id_does_not_override_bounded_gating() -> None:
+    manager = PersonTrackManager(PersonTrackingConfig())
+    manager.ingest(_person("radar-north", "T1", 0.0, 1.0, 2.0, vx=3.0))
+    manager.step(at(5.0))  # 5 s silence -> LOST
+    # The same native id resurfaces far away: the continuity hint alone must not
+    # override the capped gate.
+    recycled = manager.ingest(_person("radar-north", "T1", 5.0, 16.0, 2.0))
+    assert recycled.track_id == "P0002"
+    assert len(manager.all) == 2
+
+
 def test_track_ends_after_long_silence_and_new_person_gets_new_id() -> None:
     manager = PersonTrackManager(PersonTrackingConfig())
     manager.ingest(_person("radar-north", "T1", 0.0, 1.0, 2.0))

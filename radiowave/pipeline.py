@@ -76,6 +76,10 @@ class PipelineResult(ContractModel):
         default=0,
         description="Observations stamped with a different scenario_id than this pipeline's own",
     )
+    observations_rejected_spatially_inconsistent: int = Field(
+        default=0,
+        description="Observations whose coordinate falls outside the zone they claim to be in",
+    )
     steps: int = 0
 
     def committed(self, event_type: str | None = None) -> list[RetailEvent]:
@@ -126,6 +130,7 @@ class FoundationPipeline:
         self.observations_out_of_order = 0
         self.observations_rejected_unknown_sensor = 0
         self.observations_rejected_foreign_scenario = 0
+        self.observations_rejected_spatially_inconsistent = 0
         self._first_input_at: datetime | None = None
         self._cart_session: dict[str, str] = {}  # cart_id -> session_id it was committed under
 
@@ -182,10 +187,6 @@ class FoundationPipeline:
         """
         if self._first_input_at is None:
             self._first_input_at = observation.timestamp
-        if self._last_timestamp is not None and observation.timestamp < self._last_timestamp:
-            # Fusion time never moves backwards; late samples are dropped, not replayed.
-            self.observations_out_of_order += 1
-            return False
         if (
             self.scenario_id is not None
             and observation.scenario_id is not None
@@ -197,10 +198,23 @@ class FoundationPipeline:
         if not self._sensor_matches(observation):
             self.observations_rejected_unknown_sensor += 1
             return False
+        if not self._spatially_consistent(observation):
+            self.observations_rejected_spatially_inconsistent += 1
+            return False
+        if self.dedup.is_duplicate(observation):
+            # A pure peek: dropping a duplicate must never mutate the dedup cache or
+            # advance fusion time, however stale or futuristic its timestamp is.
+            self.dedup.dropped += 1
+            return False
+        if self._last_timestamp is not None and observation.timestamp < self._last_timestamp:
+            # Fusion time never moves backwards; late samples are dropped, not replayed
+            # (and never committed to the dedup cache, so a later replay of the same
+            # late sample is still counted out-of-order, not duplicate).
+            self.observations_out_of_order += 1
+            return False
         self._last_timestamp = observation.timestamp
         self._advance_to(observation.timestamp)
-        if not self.dedup.accept(observation):
-            return False
+        self.dedup.commit(observation)
         self._ensure_header(observation.timestamp)
         self._flush_scheduled(observation.timestamp)
         self._record(
@@ -212,6 +226,21 @@ class FoundationPipeline:
         )
         self.fusion.ingest(observation)
         return True
+
+    def _spatially_consistent(self, observation: SensorObservation) -> bool:
+        """A localized read's coordinate must fall inside its own claimed zone.
+
+        Zone-only evidence (no coordinate) and observations with no zone at all
+        (e.g. person observations) are unaffected; an unknown zone id paired with a
+        coordinate is rejected rather than silently ignored.
+        """
+        zone_id = getattr(observation, "zone_id", None)
+        if zone_id is None or observation.coordinate is None:
+            return True
+        zone = self.registry.zone_or_none(zone_id)
+        if zone is None:
+            return False
+        return zone.bounds.contains(observation.coordinate)
 
     def _lost_at_an_exit(self, track_id: str) -> bool:
         """The shopper's track stopped inside an exit boundary (not merely anywhere)."""
@@ -393,6 +422,9 @@ class FoundationPipeline:
             observations_out_of_order=self.observations_out_of_order,
             observations_rejected_unknown_sensor=self.observations_rejected_unknown_sensor,
             observations_rejected_foreign_scenario=self.observations_rejected_foreign_scenario,
+            observations_rejected_spatially_inconsistent=(
+                self.observations_rejected_spatially_inconsistent
+            ),
             observations_rejected_low_confidence=(
                 self.fusion.persons.rejected_low_confidence
                 + self.fusion.items.rejected_low_confidence

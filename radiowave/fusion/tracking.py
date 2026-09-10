@@ -180,7 +180,9 @@ class PersonTrackManager:
             radius = base + cfg.reacquire_growth_m_per_s * silent_for
         else:
             radius = cfg.merge_radius_m
-        distance = track.predicted_position(now).horizontal_distance_to(observation.coordinate)
+        distance = track.predicted_position(
+            now, self._config.prediction_horizon_s
+        ).horizontal_distance_to(observation.coordinate)
         return distance if distance <= radius else None
 
     def _gate(
