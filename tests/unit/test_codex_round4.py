@@ -89,7 +89,11 @@ def test_item_exit_freezes_the_line_but_only_a_session_exit_closes_the_cart() ->
     assert cart.status == CartStatus.EXITED  # the shopper's session exited
     assert cart.lines[EPC_SHIRT_A].final_ownership_candidate is True
     session = next(s for s in result.sessions if s.person_track_id == cart.shopper_track_id)
-    assert cart.exited_at == session.exited_at
+    assert session.state.value == "EXITED"
+    exit_event = next(
+        e for e in result.committed_events if e.event_type == RetailEventType.EXIT_WITH_ITEM
+    )
+    assert cart.exited_at == exit_event.timestamp
 
 
 def test_low_confidence_reads_never_touch_physical_state(registry: StoreRegistry) -> None:
@@ -272,7 +276,7 @@ def test_exit_line_after_a_closed_cart_opens_a_new_lifecycle() -> None:
     )
     assert engine.state.carts["P0001"].epcs == {EPC_SHIRT_A}
     assert engine.state.carts["P0001#2"].epcs == {EPC_SHIRT_B}
-    engine.close_carts_with_exit_candidates()
+    engine.close_carts_with_exit_candidates(shopper_gone=lambda _: True)
     assert engine.state.carts["P0001#2"].status == CartStatus.EXITED
     assert engine.state.carts["P0001#2"].exited_at == at(30)
 

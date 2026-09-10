@@ -253,6 +253,8 @@ class ItemStateMachine:
                 ),
                 measurements={"exit_zone_reads": float(len(recent))},
             )
+        if item.is_stale(now, self._item_cfg.stale_after_s):
+            return None  # coordinate checks below need a fresh localized read, not any read
         if item.position is not None and self._registry.in_exit_boundary(item.position):
             return self._apply(
                 item,

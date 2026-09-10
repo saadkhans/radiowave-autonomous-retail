@@ -108,7 +108,7 @@ class Dropout(FrozenModel):
 
 
 class GroundTruthEvent(FrozenModel):
-    t: float
+    t: float = Field(ge=0.0)
     event_type: RetailEventType
     epc: str
     shopper_label: str | None = None
@@ -132,7 +132,26 @@ class Scenario(ContractModel):
 
     @model_validator(mode="after")
     def _references(self) -> Scenario:
-        labels = {s.label for s in self.shoppers}
+        all_labels = [s.label for s in self.shoppers]
+        labels = set(all_labels)
+        if len(all_labels) != len(labels):
+            msg = "shopper labels must be unique"
+            raise ValueError(msg)
+        modality = {s.sensor_id: s.modality for s in self.store.sensors}
+        for kind, dropouts in (("MMWAVE", self.radar_dropouts), ("RFID", self.rfid_dropouts)):
+            for dropout in dropouts:
+                if dropout.sensor_id is None:
+                    continue
+                if modality.get(dropout.sensor_id) is None:
+                    msg = f"dropout references unknown sensor {dropout.sensor_id}"
+                    raise ValueError(msg)
+                if modality[dropout.sensor_id].value != kind:
+                    msg = f"dropout sensor {dropout.sensor_id} is not a {kind} sensor"
+                    raise ValueError(msg)
+        for truth in self.expected_events:
+            if truth.t > self.duration_s:
+                msg = f"ground-truth event at {truth.t} s is after the scenario ends"
+                raise ValueError(msg)
         placed = [p.epc for p in self.placements]
         epcs = set(placed)
         if len(placed) != len(epcs):
@@ -145,6 +164,15 @@ class Scenario(ContractModel):
                 raise ValueError(msg)
             if carry.carrier_label not in labels:
                 msg = f"carry references unknown shopper {carry.carrier_label}"
+                raise ValueError(msg)
+            script = self.shopper(carry.carrier_label)
+            present_from, present_to = script.waypoints[0].t, script.waypoints[-1].t
+            carry_end = self.duration_s if carry.end_t is None else carry.end_t
+            if carry.start_t < present_from or carry_end > present_to:
+                msg = (
+                    f"carry of {carry.epc} ({carry.start_t}-{carry_end} s) is outside "
+                    f"{carry.carrier_label}'s presence ({present_from}-{present_to} s)"
+                )
                 raise ValueError(msg)
             if carry.epc not in epcs:
                 msg = f"carry references unplaced item {carry.epc}"

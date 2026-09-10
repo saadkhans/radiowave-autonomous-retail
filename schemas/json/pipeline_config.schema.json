@@ -373,6 +373,8 @@
         "physical_event_confidence": {
           "default": 0.9,
           "description": "Confidence for rest/exit facts backed by fresh reads",
+          "maximum": 1.0,
+          "minimum": 0.0,
           "title": "Physical Event Confidence",
           "type": "number"
         },
@@ -412,6 +414,12 @@
     },
     "thresholds": {
       "$ref": "#/$defs/ConfidenceThresholds"
+    },
+    "vision_enabled": {
+      "default": false,
+      "description": "Whether a vision provider is wired in; changes association weight normalization, so it is recorded and restored on replay",
+      "title": "Vision Enabled",
+      "type": "boolean"
     }
   },
   "title": "PipelineConfig",

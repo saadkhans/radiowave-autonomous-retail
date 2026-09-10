@@ -29,6 +29,9 @@ class SimulatedClock:
         return self._now
 
     def advance(self, seconds: float) -> datetime:
+        if seconds < 0:
+            msg = "SimulatedClock cannot move backwards"
+            raise ValueError(msg)
         self._now = self._now + timedelta(seconds=seconds)
         return self._now
 

@@ -33,10 +33,12 @@ def build_pipeline(
     recorder: Recorder | None = None,
 ) -> FoundationPipeline:
     """Pipeline for a scenario; ground-truth events are scheduled into the recording."""
+    config = (pipeline_config or PipelineConfig()).model_copy(
+        update={"vision_enabled": scenario.vision_enabled}
+    )
     pipeline = FoundationPipeline(
         StoreRegistry(scenario.store),
-        pipeline_config,
-        vision_enabled=scenario.vision_enabled,
+        config,
         scenario_id=scenario.scenario_id,
         recorder=recorder,
     )

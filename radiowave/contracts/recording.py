@@ -67,8 +67,19 @@ class RecordedEntry(ContractModel):
         if self.kind != EntryKind.OBSERVATION or self.source_type is None:
             msg = f"entry {self.sequence} is not an observation"
             raise ValueError(msg)
+        observation: AnyObservation
         if self.source_type == SourceType.MMWAVE:
-            return PersonObservation.model_validate(self.payload)
-        if self.source_type == SourceType.RFID:
-            return ItemObservation.model_validate(self.payload)
-        return VisionEvidence.model_validate(self.payload)
+            observation = PersonObservation.model_validate(self.payload)
+        elif self.source_type == SourceType.RFID:
+            observation = ItemObservation.model_validate(self.payload)
+        else:
+            observation = VisionEvidence.model_validate(self.payload)
+        if (
+            observation.timestamp != self.timestamp
+            or observation.sensor_id != self.sensor_id
+            or observation.source_type != self.source_type
+            or (self.scenario_id is not None and observation.scenario_id != self.scenario_id)
+        ):
+            msg = f"entry {self.sequence}: observation payload disagrees with its envelope"
+            raise ValueError(msg)
+        return observation

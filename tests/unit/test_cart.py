@@ -88,7 +88,7 @@ def test_exit_preserves_final_ownership_candidate_without_settlement() -> None:
     assert cart.status == CartStatus.OPEN  # one item at the door does not close the cart
     engine.close_cart("P0001", at(9.5))  # the shopper's session exits
     assert cart.status == CartStatus.EXITED
-    assert cart.exited_at == at(9.5)
+    assert cart.exited_at == at(9.0)  # the item-level exit event is the better stamp
     assert not any(field in cart.model_dump() for field in ("total", "payment", "charge"))
 
 

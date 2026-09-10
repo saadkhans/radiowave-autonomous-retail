@@ -140,7 +140,10 @@ candidates there is nothing to disambiguate and margin is 1.0. Physical events
 * Items with no configured home fixture rest as MISPLACED, never ON_FIXTURE.
 * A cart closes when the shopper's session exits; `EXIT_WITH_ITEM` only freezes that
   item's line as the settlement candidate.
-* Observations below the configured minimum confidence are ignored by tracking.
+* Observations below the configured minimum confidence are ignored by tracking, and
+  observations naming an unknown sensor (or one of another modality) are rejected at intake.
+* Candidate scores move only when the item or the shopper produced a new sample; elapsed
+  fusion ticks never accumulate evidence.
 * A shopper whose track ends (left radar coverage) is dropped from every candidate
   ledger; if they were the true carrier the item is later attributed to whoever remains.
 * No persistence, streaming or services: everything runs in-process on synthetic data.

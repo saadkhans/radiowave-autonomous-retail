@@ -29,6 +29,9 @@ class CartLine(FrozenModel):
     final_ownership_candidate: bool = Field(
         default=False, description="Set on EXIT_WITH_ITEM; preserved for future settlement"
     )
+    exit_event_at: UtcDatetime | None = Field(
+        default=None, description="Timestamp of the EXIT_WITH_ITEM event that froze the line"
+    )
 
 
 class Cart(ContractModel):

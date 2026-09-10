@@ -46,7 +46,21 @@ class PairState:
     co_motion: deque[bool] = field(default_factory=deque)
     distance_history: deque[tuple[datetime, float]] = field(default_factory=deque)
     last_seen: datetime | None = None
+    last_item_count: int = -1
+    last_person_count: int = -1
     start_resolved_for: datetime | None = None
+
+    def has_new_evidence(self, item: ItemTrackState, person: PersonState) -> bool:
+        """True when the item or the shopper produced a sample since the last scoring."""
+        return (
+            item.localized_count != self.last_item_count
+            or person.observation_count != self.last_person_count
+        )
+
+    def mark_scored(self, item: ItemTrackState, person: PersonState) -> None:
+        self.last_item_count = item.localized_count
+        self.last_person_count = person.observation_count
+
     start_person_position: WorldCoordinate | None = None
 
     def resolve_start(self, item: ItemTrackState, person: PersonState) -> None:

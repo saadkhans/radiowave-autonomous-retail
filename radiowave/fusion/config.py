@@ -120,7 +120,10 @@ class StateMachineConfig(FrozenModel):
         "episode even without localization; a single stray read from a far read point is not",
     )
     physical_event_confidence: float = Field(
-        default=0.9, description="Confidence for rest/exit facts backed by fresh reads"
+        default=0.9,
+        ge=0.0,
+        le=1.0,
+        description="Confidence for rest/exit facts backed by fresh reads",
     )
 
 

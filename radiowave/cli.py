@@ -35,6 +35,7 @@ def _print_summary(result: PipelineResult, out: Callable[[str], None] = print) -
         f"observations    : {result.observations_accepted} accepted, "
         f"{result.observations_dropped} duplicates dropped, "
         f"{result.observations_rejected_low_confidence} rejected (low confidence), "
+        f"{result.observations_rejected_unknown_sensor} rejected (unknown sensor), "
         f"{result.steps} fusion steps"
     )
     out(f"person tracks   : {[t.track_id for t in result.person_tracks]}")
@@ -140,19 +141,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
         return 1
     store = _store_for(entries, args)
     scenario_id = args.scenario or entries[0].scenario_id
-    vision_enabled = any(
-        e.kind == EntryKind.OBSERVATION
-        and e.source_type is not None
-        and e.source_type.value == "VISION"
-        for e in entries
-    )
     registry = StoreRegistry(store)
-    pipeline = FoundationPipeline(
-        registry,
-        _config_for(entries, args),
-        vision_enabled=vision_enabled,
-        scenario_id=scenario_id,
-    )
+    pipeline = FoundationPipeline(registry, _config_for(entries, args), scenario_id=scenario_id)
     if args.step:
         print("step mode: press Enter to release the next observation, q to finish")
         for entry in entries:

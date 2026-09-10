@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 
 from radiowave.cart.models import CartLine, CartState, CartStatus, UnresolvedItem
@@ -98,18 +99,24 @@ class InMemoryCartEngine:
         line = cart.lines[event.epc.value]
         # Item-level fact only: the line is frozen as the settlement candidate. The cart
         # itself closes through close_cart() when the shopper's session exits.
-        cart.lines[event.epc.value] = line.model_copy(update={"final_ownership_candidate": True})
+        cart.lines[event.epc.value] = line.model_copy(
+            update={"final_ownership_candidate": True, "exit_event_at": event.timestamp}
+        )
         return self._emit(event, CartEventType.EXIT_HOLD, cart_id=cart.cart_id)
 
-    def close_carts_with_exit_candidates(self) -> None:
-        """Freeze open carts that hold an EXIT_WITH_ITEM line, stamped with that exit."""
+    def close_carts_with_exit_candidates(self, shopper_gone: Callable[[str], bool]) -> None:
+        """Freeze open carts holding an EXIT_WITH_ITEM line whose shopper is no longer seen.
+
+        Stamped with the latest exit event, never with the line's PICK time. A shopper
+        who is still tracked inside the store keeps an open cart.
+        """
         for cart in self.state.carts.values():
-            if cart.status != CartStatus.OPEN:
+            if cart.status != CartStatus.OPEN or not shopper_gone(cart.shopper_track_id):
                 continue
-            exits = [line for line in cart.lines.values() if line.final_ownership_candidate]
+            exits = [line.exit_event_at for line in cart.lines.values() if line.exit_event_at]
             if exits:
                 cart.status = CartStatus.EXITED
-                cart.exited_at = max(line.added_at for line in exits)
+                cart.exited_at = max(exits)
 
     def close_cart(self, shopper_track_id: str, exited_at: datetime) -> None:
         """Freeze the shopper's current cart because their session exited the store."""
@@ -117,7 +124,10 @@ class InMemoryCartEngine:
         if cart is None or cart.status != CartStatus.OPEN:
             return
         cart.status = CartStatus.EXITED
-        cart.exited_at = exited_at
+        # An item-level exit event is direct evidence of when the merchandise left;
+        # prefer it over the session's end time (boundary step or abandonment).
+        exits = [line.exit_event_at for line in cart.lines.values() if line.exit_event_at]
+        cart.exited_at = max(exits) if exits else exited_at
 
     # --- helpers ---------------------------------------------------------------
     def _shopper_of(self, cart_id: str) -> str:

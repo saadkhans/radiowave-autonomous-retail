@@ -216,7 +216,7 @@ class BaselineFusionEngine:
     def _nearest_person_m(self, item: ItemTrackState, now: datetime) -> float | None:
         """Distance from the item to the closest ACTIVE or LOST person track.
 
-        LOST tracks are dead-reckoned for at most ``prediction_horizon_s`` so a
+        LOST tracks count only within ``prediction_horizon_s`` of their last sample, so a
         long-gone shopper cannot hold or release a rest decision from a ghost position.
         """
         if item.position is None:
@@ -225,7 +225,11 @@ class BaselineFusionEngine:
         distances = [
             item.position.horizontal_distance_to(person.predicted_position(now, horizon))
             for person in self.persons.all
-            if person.state != PersonTrackState.ENDED
+            if person.state == PersonTrackState.ACTIVE
+            or (
+                person.state == PersonTrackState.LOST
+                and _seconds(now, person.updated_at) <= horizon
+            )
         ]
         return min(distances) if distances else None
 
@@ -254,6 +258,9 @@ class BaselineFusionEngine:
             if person.state == PersonTrackState.ENDED:
                 continue  # carrier's track ended: keep its last evidence, do not re-score
             pair = self.ledger.pair(item.epc, person_id)
+            if not pair.has_new_evidence(item, person):
+                continue  # an elapsed fusion tick is not an observation; the EMA must not move
+            pair.mark_scored(item, person)
             evidence = self.scorer.score(
                 item,
                 person,

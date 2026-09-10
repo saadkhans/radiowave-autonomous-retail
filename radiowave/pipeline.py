@@ -28,7 +28,7 @@ from radiowave.contracts.observations import AnyObservation, SensorObservation
 from radiowave.contracts.recording import EntryKind, RecordedEntry
 from radiowave.contracts.sessions import SessionState, ShopperSession
 from radiowave.contracts.store import SourceType
-from radiowave.contracts.tracks import ItemTrack, PersonTrack
+from radiowave.contracts.tracks import ItemTrack, PersonTrack, PersonTrackState
 from radiowave.digital_twin.registry import StoreRegistry
 from radiowave.fusion.baseline import BaselineFusionEngine
 from radiowave.fusion.config import FusionConfig
@@ -38,6 +38,11 @@ from radiowave.ingestion.deduplication import ObservationDeduplicator
 
 class PipelineConfig(FrozenModel):
     step_interval_s: float = Field(default=0.25, gt=0.0)
+    vision_enabled: bool = Field(
+        default=False,
+        description="Whether a vision provider is wired in; changes association weight "
+        "normalization, so it is recorded and restored on replay",
+    )
     fusion: FusionConfig = Field(default_factory=FusionConfig)
     thresholds: ConfidenceThresholds = Field(default_factory=ConfidenceThresholds)
 
@@ -61,6 +66,9 @@ class PipelineResult(ContractModel):
     observations_accepted: int = 0
     observations_dropped: int = 0
     observations_out_of_order: int = 0
+    observations_rejected_unknown_sensor: int = Field(
+        default=0, description="Observations whose sensor is unknown or of another modality"
+    )
     observations_rejected_low_confidence: int = Field(
         default=0, description="Observations ignored by tracking for low reported confidence"
     )
@@ -83,7 +91,6 @@ class FoundationPipeline:
         self,
         registry: StoreRegistry,
         config: PipelineConfig | None = None,
-        vision_enabled: bool = False,
         scenario_id: str | None = None,
         recorder: Recorder | None = None,
     ) -> None:
@@ -91,7 +98,10 @@ class FoundationPipeline:
         self.registry = registry
         self.scenario_id = scenario_id
         self.fusion = BaselineFusionEngine(
-            registry, self.config.fusion, vision_enabled=vision_enabled, scenario_id=scenario_id
+            registry,
+            self.config.fusion,
+            vision_enabled=self.config.vision_enabled,
+            scenario_id=scenario_id,
         )
         self.confidence = ThresholdConfidenceEngine(self.config.thresholds)
         self.cart = InMemoryCartEngine({i.epc.value: i.gtin for i in registry.items})
@@ -108,12 +118,15 @@ class FoundationPipeline:
         self._scheduled: list[tuple[datetime, int, EntryKind, dict[str, Any]]] = []
         self._last_timestamp: datetime | None = None
         self._twin_recorded = False
+        self._schedule_sequence = 0
         self.observations_out_of_order = 0
+        self.observations_rejected_unknown_sensor = 0
 
     # ------------------------------------------------------------------ recording
     def schedule_entry(self, timestamp: datetime, kind: EntryKind, payload: dict[str, Any]) -> None:
         """Queue a non-observation entry (e.g. ground truth) to be recorded in timestamp order."""
-        heapq.heappush(self._scheduled, (timestamp, len(self._scheduled), kind, payload))
+        self._schedule_sequence += 1
+        heapq.heappush(self._scheduled, (timestamp, self._schedule_sequence, kind, payload))
 
     def _record(
         self,
@@ -164,6 +177,9 @@ class FoundationPipeline:
             # Fusion time never moves backwards; late samples are dropped, not replayed.
             self.observations_out_of_order += 1
             return False
+        if not self._sensor_matches(observation):
+            self.observations_rejected_unknown_sensor += 1
+            return False
         self._last_timestamp = observation.timestamp
         self._advance_to(observation.timestamp)
         if not self.dedup.accept(observation):
@@ -180,6 +196,14 @@ class FoundationPipeline:
         self.fusion.ingest(observation)
         return True
 
+    def _sensor_matches(self, observation: SensorObservation) -> bool:
+        """The observation's sensor must exist in the twin with the same modality."""
+        try:
+            sensor = self.registry.sensor(observation.sensor_id)
+        except KeyError:
+            return False
+        return sensor.modality == observation.source_type
+
     def finish(self) -> PipelineResult:
         """Run one final fusion step after the last observation and return the result."""
         if self._next_step is not None:
@@ -191,8 +215,14 @@ class FoundationPipeline:
         if self._last_timestamp is not None:
             self._close_carts_of_ended_sessions(self._last_timestamp)
         # A shopper whose track was lost at the door never reaches a terminal session;
-        # a cart that already holds an exit candidate line is still frozen at the end.
-        self.cart.close_carts_with_exit_candidates()
+        # a cart that holds an exit candidate line is frozen at the end only when that
+        # shopper is no longer observed, never while they are still inside the store.
+        self.cart.close_carts_with_exit_candidates(
+            shopper_gone=lambda track_id: (
+                (person := self.fusion.persons.get(track_id)) is None
+                or person.state != PersonTrackState.ACTIVE
+            )
+        )
         return self.result()
 
     def _ensure_header(self, timestamp: datetime) -> None:
@@ -288,6 +318,7 @@ class FoundationPipeline:
             observations_accepted=self.dedup.accepted,
             observations_dropped=self.dedup.dropped,
             observations_out_of_order=self.observations_out_of_order,
+            observations_rejected_unknown_sensor=self.observations_rejected_unknown_sensor,
             observations_rejected_low_confidence=(
                 self.fusion.persons.rejected_low_confidence
                 + self.fusion.items.rejected_low_confidence
