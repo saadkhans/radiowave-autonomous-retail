@@ -119,6 +119,9 @@ class StateMachineConfig(FrozenModel):
         description="Consecutive reads from an EXIT zone (a portal burst) that close a carried "
         "episode even without localization; a single stray read from a far read point is not",
     )
+    exit_zone_burst_window_s: float = Field(
+        default=2.0, gt=0.0, description="The portal burst must fit inside this window"
+    )
     physical_event_confidence: float = Field(
         default=0.9,
         ge=0.0,
@@ -140,7 +143,12 @@ class AssociationConfig(FrozenModel):
     )
     distance_scale_m: float = Field(default=1.5, gt=0.0)
     co_motion_radius_m: float = Field(default=1.3, gt=0.0)
-    co_motion_window_steps: int = Field(default=12, ge=1)
+    co_motion_window_s: float = Field(
+        default=3.0,
+        gt=0.0,
+        description="Time window for co-motion and distance-trend evidence; time-bounded so "
+        "pairs scored at different cadences stay comparable",
+    )
     moving_speed_m_s: float = Field(default=0.3)
     item_moving_speed_m_s: float = Field(default=0.2)
     fixture_proximity_m: float = Field(default=1.0)

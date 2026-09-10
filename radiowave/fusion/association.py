@@ -43,23 +43,29 @@ class PairState:
 
     score: float = 0.0
     evidence: AssociationEvidence | None = None
-    co_motion: deque[bool] = field(default_factory=deque)
+    co_motion: deque[tuple[datetime, bool]] = field(default_factory=deque)
     distance_history: deque[tuple[datetime, float]] = field(default_factory=deque)
     last_seen: datetime | None = None
     last_item_count: int = -1
     last_person_count: int = -1
     start_resolved_for: datetime | None = None
 
-    def has_new_evidence(self, item: ItemTrackState, person: PersonState) -> bool:
-        """True when the item or the shopper produced a sample since the last scoring."""
+    last_vision_count: int = -1
+
+    def has_new_evidence(
+        self, item: ItemTrackState, person: PersonState, vision_count: int
+    ) -> bool:
+        """True when the item, the shopper or vision produced a sample since the last scoring."""
         return (
             item.localized_count != self.last_item_count
             or person.observation_count != self.last_person_count
+            or vision_count != self.last_vision_count
         )
 
-    def mark_scored(self, item: ItemTrackState, person: PersonState) -> None:
+    def mark_scored(self, item: ItemTrackState, person: PersonState, vision_count: int) -> None:
         self.last_item_count = item.localized_count
         self.last_person_count = person.observation_count
+        self.last_vision_count = vision_count
 
     start_person_position: WorldCoordinate | None = None
 
@@ -113,7 +119,7 @@ class AssociationScorer:
         distance_trend_score = self._distance_trend(pair, distance, now, item_moving)
         velocity_score = self._velocity_similarity(item_velocity, person.velocity, item_moving)
         temporal_score, start_distance = self._temporal(item, pair)
-        co_motion_score = self._co_motion(pair, distance, item_moving, person_moving)
+        co_motion_score = self._co_motion(pair, distance, item_moving, person_moving, now)
         zone_score = self._zone(item, person, pair)
         vision_score, vision_hits = self._vision(item, person, vision, vision_owner)
 
@@ -159,7 +165,7 @@ class AssociationScorer:
         self, pair: PairState, distance: float, now: datetime, item_moving: bool
     ) -> float:
         pair.distance_history.append((now, distance))
-        while len(pair.distance_history) > self._cfg.co_motion_window_steps:
+        while _seconds(now, pair.distance_history[0][0]) > self._cfg.co_motion_window_s:
             pair.distance_history.popleft()
         if not item_moving or len(pair.distance_history) < 2:
             return 0.5
@@ -188,13 +194,18 @@ class AssociationScorer:
         return _gaussian_score(distance, self._cfg.distance_scale_m), distance
 
     def _co_motion(
-        self, pair: PairState, distance: float, item_moving: bool, person_moving: bool
+        self,
+        pair: PairState,
+        distance: float,
+        item_moving: bool,
+        person_moving: bool,
+        now: datetime,
     ) -> float:
         together = distance <= self._cfg.co_motion_radius_m and item_moving and person_moving
-        pair.co_motion.append(together)
-        while len(pair.co_motion) > self._cfg.co_motion_window_steps:
+        pair.co_motion.append((now, together))
+        while _seconds(now, pair.co_motion[0][0]) > self._cfg.co_motion_window_s:
             pair.co_motion.popleft()
-        return sum(pair.co_motion) / len(pair.co_motion)
+        return sum(1 for _, flag in pair.co_motion if flag) / len(pair.co_motion)
 
     def _zone(self, item: ItemTrackState, person: PersonState, pair: PairState) -> float:
         """Was the shopper at the departure fixture / zone when the item left it?"""

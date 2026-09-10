@@ -138,8 +138,10 @@ candidates there is nothing to disambiguate and margin is 1.0. Physical events
   and a new cart lifecycle (`<track>#2`), and exited sessions/carts never receive
   further attribution.
 * Items with no configured home fixture rest as MISPLACED, never ON_FIXTURE.
-* A cart closes when the shopper's session exits; `EXIT_WITH_ITEM` only freezes that
-  item's line as the settlement candidate.
+* A cart closes when the shopper's session ends (stamped with the session end);
+  `EXIT_WITH_ITEM` only freezes that item's line as the settlement candidate. When the
+  track was lost at the door, the cart is closed at the end of the run with the latest
+  exit event, provided that event is not older than the newest line.
 * Observations below the configured minimum confidence are ignored by tracking, and
   observations naming an unknown sensor (or one of another modality) are rejected at intake.
 * Candidate scores move only when the item or the shopper produced a new sample; elapsed

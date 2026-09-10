@@ -278,8 +278,15 @@ class FoundationPipeline:
         because one EPC crossed the exit boundary while the shopper is still inside.
         close_cart is idempotent, so the sweep is repeated every step."""
         for session in [*self.fusion.session_history, *self.fusion.sessions.values()]:
-            if session.state != SessionState.ACTIVE:
+            if session.state == SessionState.EXITED:
                 self.cart.close_cart(session.person_track_id, session.exited_at or now)
+            elif session.state == SessionState.ABANDONED:
+                # The track vanished; an item-level exit event, when consistent with the
+                # cart, is the best evidence of when the merchandise left.
+                self.cart.close_cart(
+                    session.person_track_id,
+                    self.cart.exit_stamp_or(session.person_track_id, session.exited_at or now),
+                )
 
     def _decide(self, event: RetailEvent, now: datetime, proposed: bool) -> None:
         decision = self.confidence.decide(event, now)

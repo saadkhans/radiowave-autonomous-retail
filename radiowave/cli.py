@@ -163,6 +163,13 @@ def cmd_replay(args: argparse.Namespace) -> int:
         player = ReplayPlayer(source, pacer)
         result = pipeline.run(observations_from(iter(player)))
     _print_summary(result)
+    if result.observations_rejected_unknown_sensor and not result.observations_accepted:
+        print(
+            "every observation named a sensor unknown to the twin; the recording and the "
+            "store do not belong together",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

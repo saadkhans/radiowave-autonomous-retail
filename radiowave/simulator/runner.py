@@ -33,9 +33,11 @@ def build_pipeline(
     recorder: Recorder | None = None,
 ) -> FoundationPipeline:
     """Pipeline for a scenario; ground-truth events are scheduled into the recording."""
-    config = (pipeline_config or PipelineConfig()).model_copy(
-        update={"vision_enabled": scenario.vision_enabled}
-    )
+    base = pipeline_config or PipelineConfig()
+    if base.vision_enabled and not scenario.vision_enabled:
+        msg = f"pipeline config enables vision but scenario {scenario.scenario_id} has no provider"
+        raise ValueError(msg)
+    config = base.model_copy(update={"vision_enabled": scenario.vision_enabled})
     pipeline = FoundationPipeline(
         StoreRegistry(scenario.store),
         config,

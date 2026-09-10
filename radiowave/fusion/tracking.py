@@ -273,7 +273,9 @@ class ItemTrackState:
     observation_count: int = 0
     last_localized_at: datetime | None = None
     localized_count: int = 0
-    zone_history: deque[str | None] = field(default_factory=lambda: deque(maxlen=16))
+    zone_history: deque[tuple[datetime, str | None]] = field(
+        default_factory=lambda: deque(maxlen=16)
+    )
     reads_beyond_threshold: int = 0
     localized_at_last_evaluation: int = 0
     at_rest_since: datetime | None = None
@@ -390,7 +392,7 @@ class ItemTrackManager:
             return track
         track.last_seen_at = observation.timestamp
         track.observation_count += 1
-        track.zone_history.append(observation.zone_id)
+        track.zone_history.append((observation.timestamp, observation.zone_id))
         if observation.zone_id is not None:
             track.zone_id = observation.zone_id
         if observation.coordinate is None:

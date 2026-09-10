@@ -90,10 +90,11 @@ def test_item_exit_freezes_the_line_but_only_a_session_exit_closes_the_cart() ->
     assert cart.lines[EPC_SHIRT_A].final_ownership_candidate is True
     session = next(s for s in result.sessions if s.person_track_id == cart.shopper_track_id)
     assert session.state.value == "EXITED"
+    assert cart.exited_at == session.exited_at  # the session end stamps the cart
     exit_event = next(
         e for e in result.committed_events if e.event_type == RetailEventType.EXIT_WITH_ITEM
     )
-    assert cart.exited_at == exit_event.timestamp
+    assert cart.lines[EPC_SHIRT_A].exit_event_at == exit_event.timestamp
 
 
 def test_low_confidence_reads_never_touch_physical_state(registry: StoreRegistry) -> None:

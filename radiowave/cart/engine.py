@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 
-from radiowave.cart.models import CartLine, CartState, CartStatus, UnresolvedItem
+from radiowave.cart.models import Cart, CartLine, CartState, CartStatus, UnresolvedItem
 from radiowave.contracts.events import CartEvent, CartEventType, RetailEvent, RetailEventType
 
 
@@ -107,27 +107,48 @@ class InMemoryCartEngine:
     def close_carts_with_exit_candidates(self, shopper_gone: Callable[[str], bool]) -> None:
         """Freeze open carts holding an EXIT_WITH_ITEM line whose shopper is no longer seen.
 
-        Stamped with the latest exit event, never with the line's PICK time. A shopper
-        who is still tracked inside the store keeps an open cart.
+        Used only when the shopper's session never ended (track lost at the door). The
+        stamp is the latest exit event and must not predate the newest line, otherwise
+        the exit evidence is inconsistent with the cart and the cart stays open.
         """
         for cart in self.state.carts.values():
             if cart.status != CartStatus.OPEN or not shopper_gone(cart.shopper_track_id):
                 continue
-            exits = [line.exit_event_at for line in cart.lines.values() if line.exit_event_at]
-            if exits:
+            if not any(line.final_ownership_candidate for line in cart.lines.values()):
+                continue
+            stamp = self._consistent_exit_stamp(cart)
+            if stamp is not None:
                 cart.status = CartStatus.EXITED
-                cart.exited_at = max(exits)
+                cart.exited_at = stamp
 
-    def close_cart(self, shopper_track_id: str, exited_at: datetime) -> None:
-        """Freeze the shopper's current cart because their session exited the store."""
+    def close_cart(self, shopper_track_id: str, session_ended_at: datetime) -> None:
+        """Freeze the shopper's current cart because their session ended.
+
+        The cart is stamped with the session end; item-level exit times live on the
+        lines (``exit_event_at``).
+        """
         cart = self.state.current_cart(shopper_track_id)
         if cart is None or cart.status != CartStatus.OPEN:
             return
         cart.status = CartStatus.EXITED
-        # An item-level exit event is direct evidence of when the merchandise left;
-        # prefer it over the session's end time (boundary step or abandonment).
+        cart.exited_at = session_ended_at
+
+    def exit_stamp_or(self, shopper_track_id: str, fallback: datetime) -> datetime:
+        """Latest consistent EXIT_WITH_ITEM time of the shopper's open cart, else fallback."""
+        cart = self.state.current_cart(shopper_track_id)
+        if cart is None:
+            return fallback
+        stamp = self._consistent_exit_stamp(cart)
+        return stamp if stamp is not None else fallback
+
+    @staticmethod
+    def _consistent_exit_stamp(cart: Cart) -> datetime | None:
         exits = [line.exit_event_at for line in cart.lines.values() if line.exit_event_at]
-        cart.exited_at = max(exits) if exits else exited_at
+        if not exits:
+            return None
+        stamp = max(exits)
+        newest_line = max(line.added_at for line in cart.lines.values())
+        return stamp if stamp >= newest_line else None
 
     # --- helpers ---------------------------------------------------------------
     def _shopper_of(self, cart_id: str) -> str:

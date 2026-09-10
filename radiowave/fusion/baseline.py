@@ -78,6 +78,7 @@ class BaselineFusionEngine:
         self.session_history: list[ShopperSession] = []  # exited/abandoned, in order
         self._session_counter: dict[str, int] = {}
         self._vision: deque[VisionEvidence] = deque(maxlen=_VISION_BUFFER)
+        self._vision_count = 0
         self._handoff_since: dict[EPC, tuple[str, datetime]] = {}
         self._committed_ids: set[str] = set()
         self._rejected_ids: set[str] = set()
@@ -98,6 +99,7 @@ class BaselineFusionEngine:
                     track.home_fixture_id = self.registry.home_fixture_id(track.epc)
         elif isinstance(observation, VisionEvidence):
             self._vision.append(observation)
+            self._vision_count += 1
 
     # ------------------------------------------------------------------ queries
     def person_tracks(self) -> list[PersonTrack]:
@@ -216,8 +218,9 @@ class BaselineFusionEngine:
     def _nearest_person_m(self, item: ItemTrackState, now: datetime) -> float | None:
         """Distance from the item to the closest ACTIVE or LOST person track.
 
-        LOST tracks count only within ``prediction_horizon_s`` of their last sample, so a
-        long-gone shopper cannot hold or release a rest decision from a ghost position.
+        A LOST track still counts as a possible holder while it could be re-acquired
+        (``reacquire_window_s``), dead-reckoned for at most ``prediction_horizon_s``; a
+        shopper gone longer than that no longer holds a rest decision from a ghost position.
         """
         if item.position is None:
             return None
@@ -228,7 +231,7 @@ class BaselineFusionEngine:
             if person.state == PersonTrackState.ACTIVE
             or (
                 person.state == PersonTrackState.LOST
-                and _seconds(now, person.updated_at) <= horizon
+                and _seconds(now, person.updated_at) <= self.config.person.reacquire_window_s
             )
         ]
         return min(distances) if distances else None
@@ -258,9 +261,9 @@ class BaselineFusionEngine:
             if person.state == PersonTrackState.ENDED:
                 continue  # carrier's track ended: keep its last evidence, do not re-score
             pair = self.ledger.pair(item.epc, person_id)
-            if not pair.has_new_evidence(item, person):
+            if not pair.has_new_evidence(item, person, self._vision_count):
                 continue  # an elapsed fusion tick is not an observation; the EMA must not move
-            pair.mark_scored(item, person)
+            pair.mark_scored(item, person, self._vision_count)
             evidence = self.scorer.score(
                 item,
                 person,

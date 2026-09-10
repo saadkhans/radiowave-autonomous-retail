@@ -158,13 +158,16 @@ def test_carrier_exit_needs_a_fresh_localized_read(registry: StoreRegistry) -> N
     manager = ItemTrackManager(ITEM_CFG)
     track = manager.register(EPC(value=EPC_SHIRT_A), None, FIXTURE_F1)
     for i in range(3):
-        manager.ingest(_item(i * 0.1, 8.0, 4.0))
+        manager.ingest(_item(i * 0.1, 10.3, 4.0))
     track.state = ItemState.CARRIED
     track.rest_position = WorldCoordinate(x=3.8, y=6.5)
-    manager.ingest(_item(10.0, None, None, zone="zone-f2"))  # coarse read, position is 10 s old
     carrier_at_door = WorldCoordinate(x=11.2, y=4.0)
+    manager.ingest(_item(10.0, None, None, zone="zone-f2"))  # coarse read, position is 10 s old
     assert machine.evaluate(track, at(10.1), carrier_at_door, None) is None
     assert track.state == ItemState.CARRIED
+    manager.ingest(_item(10.2, 10.3, 4.0))  # fresh localized read 0.9 m from the carrier
+    transition = machine.evaluate(track, at(10.3), carrier_at_door, None)
+    assert transition is not None and transition.to_state == ItemState.EXITED
 
 
 def test_expired_lost_tracks_do_not_block_rest(registry: StoreRegistry) -> None:
@@ -173,12 +176,14 @@ def test_expired_lost_tracks_do_not_block_rest(registry: StoreRegistry) -> None:
     for i in range(5):
         engine.ingest(_person(i * 0.1, 3.9, 6.4))
         engine.ingest(_item(i * 0.1, 3.8, 6.5))
-    engine.step(at(3.0))  # shopper silent for 2.6 s: LOST, beyond the 1 s horizon
+    engine.step(at(3.0))  # shopper silent for 2.6 s: LOST but still re-acquirable
     person = engine.persons.get("P0001")
     assert person is not None and person.state == PersonTrackState.LOST
     item = engine.items.get(epc)
     assert item is not None
-    assert engine._nearest_person_m(item, at(3.0)) is None
+    assert engine._nearest_person_m(item, at(3.0)) is not None  # may still hold the item
+    engine.step(at(7.5))  # beyond reacquire_window_s (6 s): a ghost no longer holds anything
+    assert engine._nearest_person_m(item, at(7.5)) is None
 
 
 def test_recording_envelope_must_agree_with_payload() -> None:
@@ -231,6 +236,15 @@ def test_scenario_rejects_bad_dropouts_labels_truth_and_carries() -> None:
     }
     with pytest.raises(ValidationError, match="outside A's presence"):
         Scenario.model_validate({**data_short, "carries": [outside.model_dump()]})
+    # A carrier leaving coverage while carrying is legitimate: the item stays with them.
+    leaving = Scenario.model_validate(
+        {
+            **data_short,
+            "carries": [Carry(epc=EPC_SHIRT_B, carrier_label="A", start_t=5.0).model_dump()],
+        }
+    )
+    last = leaving.item_position_at(EPC_SHIRT_B, 17.0)
+    assert (round(last.x - 0.25, 6), last.y) == (4.0, 5.3)
 
 
 def test_intake_rejects_unknown_or_mismatched_sensors(registry: StoreRegistry) -> None:

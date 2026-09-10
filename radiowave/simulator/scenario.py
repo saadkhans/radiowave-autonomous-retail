@@ -152,6 +152,13 @@ class Scenario(ContractModel):
             if truth.t > self.duration_s:
                 msg = f"ground-truth event at {truth.t} s is after the scenario ends"
                 raise ValueError(msg)
+            for label in (truth.shopper_label, truth.counterpart_label):
+                if label is not None and label not in labels:
+                    msg = f"ground-truth event references unknown shopper {label}"
+                    raise ValueError(msg)
+            if truth.epc not in {p.epc for p in self.placements}:
+                msg = f"ground-truth event references unplaced EPC {truth.epc}"
+                raise ValueError(msg)
         placed = [p.epc for p in self.placements]
         epcs = set(placed)
         if len(placed) != len(epcs):
@@ -167,10 +174,9 @@ class Scenario(ContractModel):
                 raise ValueError(msg)
             script = self.shopper(carry.carrier_label)
             present_from, present_to = script.waypoints[0].t, script.waypoints[-1].t
-            carry_end = self.duration_s if carry.end_t is None else carry.end_t
-            if carry.start_t < present_from or carry_end > present_to:
+            if carry.start_t < present_from or carry.start_t > present_to:
                 msg = (
-                    f"carry of {carry.epc} ({carry.start_t}-{carry_end} s) is outside "
+                    f"carry of {carry.epc} starts at {carry.start_t} s, outside "
                     f"{carry.carrier_label}'s presence ({present_from}-{present_to} s)"
                 )
                 raise ValueError(msg)
@@ -209,8 +215,12 @@ class Scenario(ContractModel):
             if t < carry.start_t:
                 break
             end = carry.end_t
+            script = self.shopper(carry.carrier_label)
             sample_t = t if end is None or t < end else end
-            carrier = self.shopper(carry.carrier_label).position_at(sample_t)
+            # Past the carrier's last waypoint the item stays wherever they were last seen;
+            # it never teleports back to its placement.
+            sample_t = min(sample_t, script.waypoints[-1].t)
+            carrier = script.position_at(sample_t)
             if carrier is not None:
                 position = WorldCoordinate(
                     x=carrier.x + CARRY_OFFSET[0], y=carrier.y + CARRY_OFFSET[1], z=placement.z

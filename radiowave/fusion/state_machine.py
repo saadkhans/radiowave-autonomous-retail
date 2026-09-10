@@ -239,9 +239,14 @@ class ItemStateMachine:
         ):
             return None
         recent = list(item.zone_history)[-cfg.exit_zone_confirm_reads :]
-        if len(recent) == cfg.exit_zone_confirm_reads and all(
+        in_exit = [
             (zone := self._registry.zone_or_none(z)) is not None and zone.kind == ZoneKind.EXIT
-            for z in recent
+            for _, z in recent
+        ]
+        if (
+            len(recent) == cfg.exit_zone_confirm_reads
+            and all(in_exit)
+            and _seconds(recent[-1][0], recent[0][0]) <= cfg.exit_zone_burst_window_s
         ):
             return self._apply(
                 item,
@@ -249,9 +254,24 @@ class ItemStateMachine:
                 now,
                 reason=(
                     f"{cfg.exit_zone_confirm_reads} consecutive reads from exit zone "
-                    f"{recent[-1]} (portal burst)"
+                    f"{recent[-1][1]} within {cfg.exit_zone_burst_window_s} s (portal burst)"
                 ),
                 measurements={"exit_zone_reads": float(len(recent))},
+            )
+        if (
+            in_exit
+            and in_exit[-1]
+            and carrier_position is not None
+            and self._registry.in_exit_boundary(carrier_position)
+        ):
+            # A brisk walk through the gate may yield a single portal read; with the
+            # committed carrier inside the exit boundary that is enough.
+            return self._apply(
+                item,
+                ItemState.EXITED,
+                now,
+                reason=f"portal read in exit zone {recent[-1][1]} with carrier in exit boundary",
+                measurements={"exit_zone_reads": float(sum(in_exit))},
             )
         if item.is_stale(now, self._item_cfg.stale_after_s):
             return None  # coordinate checks below need a fresh localized read, not any read

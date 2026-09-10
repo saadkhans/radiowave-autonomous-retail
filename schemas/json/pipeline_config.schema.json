@@ -24,11 +24,12 @@
           "title": "Co Motion Radius M",
           "type": "number"
         },
-        "co_motion_window_steps": {
-          "default": 12,
-          "minimum": 1,
-          "title": "Co Motion Window Steps",
-          "type": "integer"
+        "co_motion_window_s": {
+          "default": 3.0,
+          "description": "Time window for co-motion and distance-trend evidence; time-bounded so pairs scored at different cadences stay comparable",
+          "exclusiveMinimum": 0.0,
+          "title": "Co Motion Window S",
+          "type": "number"
         },
         "distance_scale_m": {
           "default": 1.5,
@@ -330,6 +331,13 @@
           "default": 1.5,
           "description": "Item within this distance of an exiting carrier leaves with them",
           "title": "Exit Item Radius M",
+          "type": "number"
+        },
+        "exit_zone_burst_window_s": {
+          "default": 2.0,
+          "description": "The portal burst must fit inside this window",
+          "exclusiveMinimum": 0.0,
+          "title": "Exit Zone Burst Window S",
           "type": "number"
         },
         "exit_zone_confirm_reads": {
