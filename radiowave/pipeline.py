@@ -250,7 +250,7 @@ class FoundationPipeline:
             cart_state=self.cart.state.model_copy(deep=True),
             person_tracks=self.fusion.person_tracks(),
             item_tracks=self.fusion.item_tracks(),
-            sessions=list(self.fusion.sessions.values()),
+            sessions=[*self.fusion.session_history, *self.fusion.sessions.values()],
             observations_accepted=self.dedup.accepted,
             observations_dropped=self.dedup.dropped,
             observations_out_of_order=self.observations_out_of_order,

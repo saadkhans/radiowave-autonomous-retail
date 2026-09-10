@@ -75,7 +75,7 @@ class BaselineFusionEngine:
         self.ledger = CandidateLedger(self.config.association)
         self.transitions: list[Transition] = []
         self.sessions: dict[str, ShopperSession] = {}
-        self.session_history: list[ShopperSession] = []
+        self.session_history: list[ShopperSession] = []  # exited/abandoned, in order
         self._session_counter: dict[str, int] = {}
         self._vision: deque[VisionEvidence] = deque(maxlen=_VISION_BUFFER)
         self._handoff_since: dict[EPC, tuple[str, datetime]] = {}

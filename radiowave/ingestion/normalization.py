@@ -20,7 +20,7 @@ from radiowave.contracts.observations import (
     PersonObservation,
     VisionEvidence,
 )
-from radiowave.contracts.store import EPC, ZoneKind
+from radiowave.contracts.store import EPC, Sensor, SourceType, ZoneKind
 from radiowave.digital_twin.registry import StoreRegistry
 
 
@@ -29,7 +29,19 @@ class ObservationNormalizer:
         self._registry = registry
         self._scenario_id = scenario_id
 
+    def _sensor(self, sensor_id: str, expected: SourceType) -> Sensor:
+        """The registered sensor, refusing samples whose modality does not match its wiring."""
+        sensor = self._registry.sensor(sensor_id)
+        if sensor.modality != expected:
+            msg = (
+                f"sensor {sensor_id!r} is registered as {sensor.modality.value}, "
+                f"but a {expected.value} sample referenced it"
+            )
+            raise ValueError(msg)
+        return sensor
+
     def person(self, sample: NativeRadarSample) -> PersonObservation:
+        self._sensor(sample.sensor_id, SourceType.MMWAVE)
         transform = self._registry.transform(sample.sensor_id)
         coordinate = transform.to_world(sample.position)
         velocity = (
@@ -54,7 +66,7 @@ class ObservationNormalizer:
         )
 
     def item(self, read: NativeRfidRead) -> ItemObservation:
-        sensor = self._registry.sensor(read.sensor_id)
+        sensor = self._sensor(read.sensor_id, SourceType.RFID)
         transform = self._registry.transform(read.sensor_id)
         coordinate = None
         uncertainty = None
@@ -84,6 +96,7 @@ class ObservationNormalizer:
         )
 
     def vision(self, detection: NativeVisionDetection) -> VisionEvidence:
+        self._sensor(detection.sensor_id, SourceType.VISION)
         transform = self._registry.transform(detection.sensor_id)
         coordinate = transform.to_world(detection.position)
         fixture = self._registry.fixture_at(coordinate, margin=0.5)

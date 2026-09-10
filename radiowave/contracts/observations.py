@@ -14,7 +14,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from radiowave.contracts._base import ContractModel, UnitInterval, UtcDatetime
 from radiowave.contracts.geometry import SpatialUncertainty, Velocity, WorldCoordinate
@@ -38,6 +38,14 @@ class SensorObservation(ContractModel):
     uncertainty: SpatialUncertainty | None = None
     scenario_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _location_is_qualified(self) -> SensorObservation:
+        if (self.coordinate is None) != (self.uncertainty is None):
+            msg = "coordinate and uncertainty must be given together (a location without "
+            msg += "a stated accuracy is not evidence)"
+            raise ValueError(msg)
+        return self
 
 
 class PersonObservation(SensorObservation):

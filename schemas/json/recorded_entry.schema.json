@@ -26,7 +26,9 @@
   "additionalProperties": false,
   "properties": {
     "format_version": {
+      "const": 1,
       "default": 1,
+      "description": "Only version 1 is understood; other versions are rejected on read",
       "title": "Format Version",
       "type": "integer"
     },

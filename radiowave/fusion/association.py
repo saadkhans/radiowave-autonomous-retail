@@ -131,8 +131,12 @@ class AssociationScorer:
                 "distance_m": distance,
                 "item_speed_m_s": item_velocity.horizontal_speed,
                 "person_speed_m_s": person.velocity.horizontal_speed,
-                "distance_at_movement_start_m": start_distance,
                 "vision_hits": float(vision_hits),
+                **(
+                    {"distance_at_movement_start_m": start_distance}
+                    if start_distance is not None
+                    else {}
+                ),
             },
         )
 
@@ -159,13 +163,13 @@ class AssociationScorer:
         magnitude = 1.0 - min(1.0, abs(si - sp) / max(si, sp))
         return _clamp(max(0.0, cosine) * magnitude)
 
-    def _temporal(self, item: ItemTrackState, pair: PairState) -> tuple[float, float]:
+    def _temporal(self, item: ItemTrackState, pair: PairState) -> tuple[float, float | None]:
         """How close was this person to the item when it started moving?"""
         if item.movement_start_at is None or item.rest_position is None:
-            return 0.5, float("nan")
+            return 0.5, None
         person_then = pair.start_person_position
         if person_then is None:
-            return 0.0, float("nan")  # track did not exist yet when the item started moving
+            return 0.0, None  # track did not exist yet when the item started moving
         distance = person_then.horizontal_distance_to(item.rest_position)
         return _gaussian_score(distance, self._cfg.distance_scale_m), distance
 

@@ -81,8 +81,15 @@ class Carry(FrozenModel):
 
     epc: str
     carrier_label: str
-    start_t: float
+    start_t: float = Field(ge=0.0)
     end_t: float | None = Field(default=None, description="None = carried until scenario end")
+
+    @model_validator(mode="after")
+    def _ordered(self) -> Carry:
+        if self.end_t is not None and self.end_t < self.start_t:
+            msg = f"carry of {self.epc} ends ({self.end_t}) before it starts ({self.start_t})"
+            raise ValueError(msg)
+        return self
 
 
 class Dropout(FrozenModel):
@@ -122,6 +129,9 @@ class Scenario(ContractModel):
         epcs = {p.epc for p in self.placements}
         store_epcs = {i.epc.value for i in self.store.items}
         for carry in self.carries:
+            if carry.start_t > self.duration_s:
+                msg = f"carry of {carry.epc} starts after the scenario ends ({self.duration_s} s)"
+                raise ValueError(msg)
             if carry.carrier_label not in labels:
                 msg = f"carry references unknown shopper {carry.carrier_label}"
                 raise ValueError(msg)

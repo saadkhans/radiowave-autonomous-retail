@@ -10,7 +10,9 @@ class InMemoryCartEngine:
     """Applies committed retail events to carts.
 
     Idempotency: an ``event_id`` is applied at most once; a PICK of an EPC already
-    in the same cart, or a removal of an EPC not in any cart, is a no-op.
+    owned by the same shopper, or a removal of an EPC not in any cart, is a no-op.
+    Carts are per shopper *lifecycle*: after EXIT_WITH_ITEM the cart is frozen and
+    any later attribution to the same track opens a new cart.
     """
 
     def __init__(self, gtin_lookup: dict[str, str] | None = None) -> None:
@@ -39,13 +41,13 @@ class InMemoryCartEngine:
         if event.shopper_track_id is None:
             return self._unresolved(event, "PICK without an attributed shopper")
         owner = self.state.owner_of(event.epc)
-        if owner == event.shopper_track_id:
+        if owner is not None and self._shopper_of(owner) == event.shopper_track_id:
             return self._emit(event, CartEventType.NOOP, cart_id=owner, note="already in cart")
         if owner is not None:
             del self.state.carts[owner].lines[event.epc.value]
-        self._add_line(event, event.shopper_track_id)
+        cart_id = self._add_line(event, event.shopper_track_id)
         self.state.unresolved.pop(event.epc.value, None)
-        return self._emit(event, CartEventType.ADD, cart_id=event.shopper_track_id)
+        return self._emit(event, CartEventType.ADD, cart_id=cart_id)
 
     def _carry(self, event: RetailEvent) -> CartEvent:
         owner = self.state.owner_of(event.epc)
@@ -76,36 +78,40 @@ class InMemoryCartEngine:
             del self.state.carts[owner].lines[event.epc.value]
         else:
             note = "item was not in the giver's cart; added to receiver"
-        self._add_line(event, receiver)
+        cart_id = self._add_line(event, receiver)
         return self._emit(
-            event, CartEventType.TRANSFER, cart_id=receiver, from_cart_id=owner, note=note
+            event, CartEventType.TRANSFER, cart_id=cart_id, from_cart_id=owner, note=note
         )
 
     def _exit(self, event: RetailEvent) -> CartEvent:
         owner = self.state.owner_of(event.epc)
-        shopper = event.shopper_track_id or owner
+        shopper = event.shopper_track_id or (self._shopper_of(owner) if owner else None)
         if shopper is None:
             return self._unresolved(event, "item exited without an attributed shopper")
-        if owner != shopper:
+        if owner is None or self._shopper_of(owner) != shopper:
             if owner is not None:
                 del self.state.carts[owner].lines[event.epc.value]
-            self._add_line(event, shopper)
-        cart = self.state.cart_for(shopper)
+            owner = self._add_line(event, shopper)
+        cart = self.state.carts[owner]
         line = cart.lines[event.epc.value]
         cart.lines[event.epc.value] = line.model_copy(update={"final_ownership_candidate": True})
         cart.status = CartStatus.EXITED
         cart.exited_at = event.timestamp
-        return self._emit(event, CartEventType.EXIT_HOLD, cart_id=shopper)
+        return self._emit(event, CartEventType.EXIT_HOLD, cart_id=cart.cart_id)
 
     # --- helpers ---------------------------------------------------------------
-    def _add_line(self, event: RetailEvent, cart_id: str) -> None:
-        cart = self.state.cart_for(cart_id)
+    def _shopper_of(self, cart_id: str) -> str:
+        return self.state.carts[cart_id].shopper_track_id
+
+    def _add_line(self, event: RetailEvent, shopper_track_id: str) -> str:
+        cart = self.state.cart_for(shopper_track_id)
         cart.lines[event.epc.value] = CartLine(
             epc=event.epc,
             gtin=self._gtin_lookup.get(event.epc.value),
             added_at=event.timestamp,
             source_event_id=event.event_id,
         )
+        return cart.cart_id
 
     def _unresolved(self, event: RetailEvent, reason: str) -> CartEvent:
         self.state.unresolved[event.epc.value] = UnresolvedItem(

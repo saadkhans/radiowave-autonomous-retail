@@ -131,7 +131,9 @@ candidates there is nothing to disambiguate and margin is 1.0. Physical events
   are out of scope until real radar characterization data exists.
 * Sessions are created on first sight, not strictly at the entry boundary. Entering
   the exit boundary ends the session; a track that steps back in gets a new session
-  and exited sessions never receive further attribution.
+  and a new cart lifecycle (`<track>#2`), and exited sessions/carts never receive
+  further attribution.
+* Items with no configured home fixture rest as MISPLACED, never ON_FIXTURE.
 * A shopper whose track ends (left radar coverage) is dropped from every candidate
   ledger; if they were the true carrier the item is later attributed to whoever remains.
 * No persistence, streaming or services: everything runs in-process on synthetic data.

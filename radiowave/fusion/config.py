@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pydantic import Field
+import math
+
+from pydantic import Field, model_validator
 
 from radiowave.contracts._base import FrozenModel
 
@@ -102,6 +104,11 @@ class StateMachineConfig(FrozenModel):
     )
 
 
+ASSOCIATION_FEATURES = frozenset(
+    {"distance", "distance_trend", "velocity", "temporal", "co_motion", "zone", "vision"}
+)
+
+
 class AssociationConfig(FrozenModel):
     candidate_radius_m: float = Field(
         default=2.5,
@@ -146,6 +153,24 @@ class AssociationConfig(FrozenModel):
         },
         description="Feature weights once a carrier is committed (who has it now / HANDOFF)",
     )
+
+    @model_validator(mode="after")
+    def _weights_are_sane(self) -> AssociationConfig:
+        for name, profile in (
+            ("pick_weights", self.pick_weights),
+            ("carry_weights", self.carry_weights),
+        ):
+            unknown = set(profile) - ASSOCIATION_FEATURES
+            if unknown:
+                msg = f"{name} has unknown features {sorted(unknown)}"
+                raise ValueError(msg)
+            if any(not math.isfinite(w) or w < 0.0 for w in profile.values()):
+                msg = f"{name} must contain finite, non-negative weights"
+                raise ValueError(msg)
+            if sum(profile.values()) <= 0.0:
+                msg = f"{name} must have a strictly positive total weight"
+                raise ValueError(msg)
+        return self
 
 
 class FusionConfig(FrozenModel):

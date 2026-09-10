@@ -24,10 +24,10 @@ NonNegativeFloat = Annotated[float, Field(ge=0.0)]
 class FrozenModel(BaseModel):
     """Immutable value object; hashable so it can be used as a dict key."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class ContractModel(BaseModel):
     """Record model; unknown fields are rejected and assignments are validated."""
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config = ConfigDict(extra="forbid", validate_assignment=True, allow_inf_nan=False)

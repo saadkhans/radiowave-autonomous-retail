@@ -91,10 +91,14 @@ class ItemStateMachine:
         return None
 
     def classify_rest(self, item: ItemTrackState, position: WorldCoordinate) -> ItemState:
-        """ON_FIXTURE if the position is within the home radius of the home fixture."""
+        """ON_FIXTURE if the position is within the home radius of the home fixture.
+
+        An item with no configured home can never be "correctly returned", so its
+        resting places are MISPLACED (an exception to review), never ON_FIXTURE.
+        """
         home = self._registry.fixture(item.home_fixture_id) if item.home_fixture_id else None
         if home is None:
-            return ItemState.ON_FIXTURE
+            return ItemState.MISPLACED
         if home.bounds.distance_to(position) <= self._cfg.home_radius_m:
             return ItemState.ON_FIXTURE
         return ItemState.MISPLACED

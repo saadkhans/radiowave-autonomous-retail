@@ -9,7 +9,7 @@ and the scenario identifier, so any experiment can be replayed without hardware.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field
 
@@ -23,7 +23,7 @@ from radiowave.contracts.observations import (
 )
 from radiowave.contracts.store import SourceType
 
-RECORDING_FORMAT_VERSION = 1
+RECORDING_FORMAT_VERSION: Literal[1] = 1
 
 
 class EntryKind(StrEnum):
@@ -42,7 +42,10 @@ class RecordedEntry(ContractModel):
     source_type: SourceType | None = None
     sensor_id: str | None = None
     scenario_id: str | None = None
-    format_version: int = RECORDING_FORMAT_VERSION
+    format_version: Literal[1] = Field(
+        default=RECORDING_FORMAT_VERSION,
+        description="Only version 1 is understood; other versions are rejected on read",
+    )
     payload: dict[str, Any]
 
     @classmethod
