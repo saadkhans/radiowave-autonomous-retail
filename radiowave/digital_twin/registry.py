@@ -37,6 +37,9 @@ class StoreRegistry:
     def zone(self, zone_id: str) -> Zone:
         return self._zones[zone_id]
 
+    def zone_or_none(self, zone_id: str | None) -> Zone | None:
+        return self._zones.get(zone_id) if zone_id else None
+
     def fixture(self, fixture_id: str) -> Fixture:
         return self._fixtures[fixture_id]
 

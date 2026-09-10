@@ -28,6 +28,7 @@ from radiowave.contracts import (
     VisionEvidence,
 )
 from radiowave.contracts.recording import RecordedEntry
+from radiowave.pipeline import PipelineConfig
 
 EXPORTS: dict[str, type[BaseModel]] = {
     "person_observation": PersonObservation,
@@ -44,6 +45,7 @@ EXPORTS: dict[str, type[BaseModel]] = {
     "shopper_session": ShopperSession,
     "store": Store,
     "recorded_entry": RecordedEntry,
+    "pipeline_config": PipelineConfig,
 }
 
 

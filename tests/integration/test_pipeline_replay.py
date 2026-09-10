@@ -10,7 +10,7 @@ import pytest
 from radiowave.contracts.observations import AnyObservation
 from radiowave.contracts.recording import EntryKind
 from radiowave.digital_twin.registry import StoreRegistry
-from radiowave.pipeline import FoundationPipeline, PipelineResult
+from radiowave.pipeline import FoundationPipeline, PipelineConfig, PipelineResult
 from radiowave.replay.reader import observations_from, open_replay_source
 from radiowave.replay.recorder import JsonlRecorder, ParquetRecorder
 from radiowave.simulator.library import load_scenario
@@ -26,7 +26,10 @@ def _fingerprint(result: PipelineResult) -> dict[str, object]:
         "decisions": [
             (d.event_id, d.decision.value, round(d.confidence, 6)) for d in result.decisions
         ],
-        "carts": {c: sorted(cart.lines) for c, cart in result.cart_state.carts.items()},
+        "carts": {
+            c: (cart.status.value, cart.exited_at, sorted(cart.lines))
+            for c, cart in result.cart_state.carts.items()
+        },
         "items": [(t.epc.value, t.state.value, t.carrier_track_id) for t in result.item_tracks],
         "persons": [(p.track_id, p.observation_count) for p in result.person_tracks],
     }
@@ -106,5 +109,8 @@ def test_recording_replays_to_identical_result(tmp_path: Path, fmt: str) -> None
     assert "coordinate" in sample.payload and "metadata" in sample.payload
     assert "confidence" in sample.payload
 
-    replayed = run_observations(scenario, observations_from(entries))
+    recorded_config = PipelineConfig.model_validate(
+        next(e for e in entries if e.kind == EntryKind.PIPELINE_CONFIG).payload
+    )
+    replayed = run_observations(scenario, observations_from(entries), recorded_config)
     assert _fingerprint(replayed) == _fingerprint(live)

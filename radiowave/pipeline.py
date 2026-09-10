@@ -26,7 +26,7 @@ from radiowave.contracts.confidence import ConfidenceDecision, ConfidenceThresho
 from radiowave.contracts.events import CartEvent, RetailEvent
 from radiowave.contracts.observations import AnyObservation, SensorObservation
 from radiowave.contracts.recording import EntryKind, RecordedEntry
-from radiowave.contracts.sessions import ShopperSession
+from radiowave.contracts.sessions import SessionState, ShopperSession
 from radiowave.contracts.store import SourceType
 from radiowave.contracts.tracks import ItemTrack, PersonTrack
 from radiowave.digital_twin.registry import StoreRegistry
@@ -61,6 +61,9 @@ class PipelineResult(ContractModel):
     observations_accepted: int = 0
     observations_dropped: int = 0
     observations_out_of_order: int = 0
+    observations_rejected_low_confidence: int = Field(
+        default=0, description="Observations ignored by tracking for low reported confidence"
+    )
     steps: int = 0
 
     def committed(self, event_type: str | None = None) -> list[RetailEvent]:
@@ -165,15 +168,7 @@ class FoundationPipeline:
         self._advance_to(observation.timestamp)
         if not self.dedup.accept(observation):
             return False
-        if not self._twin_recorded:
-            # The recording carries the twin it was produced against, so a replay never
-            # has to guess which store the coordinates, zones and home fixtures refer to.
-            # It is stamped no later than anything else so the file stays chronological.
-            first = observation.timestamp
-            if self._scheduled and self._scheduled[0][0] < first:
-                first = self._scheduled[0][0]
-            self._record(first, EntryKind.STORE_TWIN, self.registry.store.model_dump(mode="json"))
-            self._twin_recorded = True
+        self._ensure_header(observation.timestamp)
         self._flush_scheduled(observation.timestamp)
         self._record(
             observation.timestamp,
@@ -190,8 +185,31 @@ class FoundationPipeline:
         if self._next_step is not None:
             self._step(self._next_step)
             self._next_step = None
+        if self._scheduled:
+            self._ensure_header(self._scheduled[0][0])
         self._flush_scheduled(None)
+        if self._last_timestamp is not None:
+            self._close_carts_of_ended_sessions(self._last_timestamp)
+        # A shopper whose track was lost at the door never reaches a terminal session;
+        # a cart that already holds an exit candidate line is still frozen at the end.
+        self.cart.close_carts_with_exit_candidates()
         return self.result()
+
+    def _ensure_header(self, timestamp: datetime) -> None:
+        """Write the twin and the effective configuration once, before anything else.
+
+        A replay must never guess which store the coordinates refer to nor which
+        thresholds produced the recorded decisions. The header is stamped no later
+        than the first entry so the file stays chronological.
+        """
+        if self._twin_recorded:
+            return
+        first = timestamp
+        if self._scheduled and self._scheduled[0][0] < first:
+            first = self._scheduled[0][0]
+        self._record(first, EntryKind.STORE_TWIN, self.registry.store.model_dump(mode="json"))
+        self._record(first, EntryKind.PIPELINE_CONFIG, self.config.model_dump(mode="json"))
+        self._twin_recorded = True
 
     def _advance_to(self, timestamp: datetime) -> None:
         step = timedelta(seconds=self.config.step_interval_s)
@@ -223,6 +241,15 @@ class FoundationPipeline:
                 self.confidence.forget(event_id)
                 continue
             self._decide(event, now, proposed=False)
+        self._close_carts_of_ended_sessions(now)
+
+    def _close_carts_of_ended_sessions(self, now: datetime) -> None:
+        """A cart closes when its shopper's session ends (exit or abandonment), never
+        because one EPC crossed the exit boundary while the shopper is still inside.
+        close_cart is idempotent, so the sweep is repeated every step."""
+        for session in [*self.fusion.session_history, *self.fusion.sessions.values()]:
+            if session.state != SessionState.ACTIVE:
+                self.cart.close_cart(session.person_track_id, session.exited_at or now)
 
     def _decide(self, event: RetailEvent, now: datetime, proposed: bool) -> None:
         decision = self.confidence.decide(event, now)
@@ -261,6 +288,10 @@ class FoundationPipeline:
             observations_accepted=self.dedup.accepted,
             observations_dropped=self.dedup.dropped,
             observations_out_of_order=self.observations_out_of_order,
+            observations_rejected_low_confidence=(
+                self.fusion.persons.rejected_low_confidence
+                + self.fusion.items.rejected_low_confidence
+            ),
             steps=self._steps,
         )
 

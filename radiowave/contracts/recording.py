@@ -33,6 +33,7 @@ class EntryKind(StrEnum):
     CART_EVENT = "CART_EVENT"
     GROUND_TRUTH = "GROUND_TRUTH"
     STORE_TWIN = "STORE_TWIN"
+    PIPELINE_CONFIG = "PIPELINE_CONFIG"
 
 
 class RecordedEntry(ContractModel):

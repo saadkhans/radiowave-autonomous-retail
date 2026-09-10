@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from radiowave.cart.models import CartLine, CartState, CartStatus, UnresolvedItem
 from radiowave.contracts.events import CartEvent, CartEventType, RetailEvent, RetailEventType
 
@@ -91,20 +93,40 @@ class InMemoryCartEngine:
         if owner is None or self._shopper_of(owner) != shopper:
             if owner is not None:
                 del self.state.carts[owner].lines[event.epc.value]
-            owner = self._add_line(event, shopper)
+            owner = self._add_line(event, shopper, for_exit=True)
         cart = self.state.carts[owner]
         line = cart.lines[event.epc.value]
+        # Item-level fact only: the line is frozen as the settlement candidate. The cart
+        # itself closes through close_cart() when the shopper's session exits.
         cart.lines[event.epc.value] = line.model_copy(update={"final_ownership_candidate": True})
-        cart.status = CartStatus.EXITED
-        cart.exited_at = event.timestamp
         return self._emit(event, CartEventType.EXIT_HOLD, cart_id=cart.cart_id)
+
+    def close_carts_with_exit_candidates(self) -> None:
+        """Freeze open carts that hold an EXIT_WITH_ITEM line, stamped with that exit."""
+        for cart in self.state.carts.values():
+            if cart.status != CartStatus.OPEN:
+                continue
+            exits = [line for line in cart.lines.values() if line.final_ownership_candidate]
+            if exits:
+                cart.status = CartStatus.EXITED
+                cart.exited_at = max(line.added_at for line in exits)
+
+    def close_cart(self, shopper_track_id: str, exited_at: datetime) -> None:
+        """Freeze the shopper's current cart because their session exited the store."""
+        cart = self.state.current_cart(shopper_track_id)
+        if cart is None or cart.status != CartStatus.OPEN:
+            return
+        cart.status = CartStatus.EXITED
+        cart.exited_at = exited_at
 
     # --- helpers ---------------------------------------------------------------
     def _shopper_of(self, cart_id: str) -> str:
         return self.state.carts[cart_id].shopper_track_id
 
-    def _add_line(self, event: RetailEvent, shopper_track_id: str) -> str:
-        cart = self.state.cart_for(shopper_track_id)
+    def _add_line(self, event: RetailEvent, shopper_track_id: str, for_exit: bool = False) -> str:
+        cart = self.state.current_cart(shopper_track_id) if for_exit else None
+        if cart is None or cart.status != CartStatus.OPEN:
+            cart = self.state.cart_for(shopper_track_id)
         cart.lines[event.epc.value] = CartLine(
             epc=event.epc,
             gtin=self._gtin_lookup.get(event.epc.value),

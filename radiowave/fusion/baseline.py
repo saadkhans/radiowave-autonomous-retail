@@ -91,7 +91,7 @@ class BaselineFusionEngine:
             self.persons.ingest(observation)
         elif isinstance(observation, ItemObservation):
             track = self.items.ingest(observation)
-            if track.gtin is None:
+            if track is not None and track.gtin is None:
                 twin_item = self.registry.item(track.epc)
                 if twin_item is not None:
                     track.gtin = twin_item.gtin
@@ -152,7 +152,20 @@ class BaselineFusionEngine:
                 and event.event_id
                 == make_event_id(RetailEventType.PICK, item.epc, item.movement_start_at)
             )
-        if event.event_type in (RetailEventType.HANDOFF, RetailEventType.CARRY):
+        if event.event_type == RetailEventType.HANDOFF:
+            if (
+                item.state != ItemState.CARRIED
+                or item.carrier_track_id != event.shopper_track_id
+                or item.attribution_unresolved
+                or self._last_step is None
+            ):
+                return False
+            # The receiver must still be the leading candidate; a blackout or a one-step
+            # margin dip does not invalidate the proposal, another shopper taking the
+            # lead or the receiver leaving does.
+            top = self.ledger.ranking(item.epc, self._last_step, item.movement_start_at).top
+            return top is not None and top.person_track_id == event.counterpart_track_id
+        if event.event_type == RetailEventType.CARRY:
             return (
                 item.state == ItemState.CARRIED
                 and item.carrier_track_id == event.shopper_track_id

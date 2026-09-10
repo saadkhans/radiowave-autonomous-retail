@@ -50,6 +50,7 @@ def test_reentry_after_exit_opens_a_new_cart_lifecycle() -> None:
     engine = InMemoryCartEngine()
     engine.apply(_event(RetailEventType.PICK, A, "P0001", 1.0))
     engine.apply(_event(RetailEventType.EXIT_WITH_ITEM, A, "P0001", 5.0))
+    engine.close_cart("P0001", at(5.0))  # session exited
     result = engine.apply(_event(RetailEventType.PICK, B, "P0001", 30.0))
     assert result.cart_event_type == CartEventType.ADD
     assert result.cart_id == "P0001#2"
@@ -61,6 +62,7 @@ def test_reentry_after_exit_opens_a_new_cart_lifecycle() -> None:
     assert engine.state.epcs_in("P0001") == {EPC_SHIRT_B}
     # A second exit freezes the second lifecycle without touching the first.
     engine.apply(_event(RetailEventType.EXIT_WITH_ITEM, B, "P0001", 40.0))
+    engine.close_cart("P0001", at(40.0))
     assert engine.state.carts["P0001"].epcs == {EPC_SHIRT_A}
     assert engine.state.carts["P0001#2"].status == CartStatus.EXITED
 

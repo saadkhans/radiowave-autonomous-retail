@@ -118,7 +118,8 @@ candidates there is nothing to disambiguate and margin is 1.0. Physical events
   dropped rather than decided late.
 * A JSONL or Parquet recording replays to the identical committed events, carts
   and item states (`tests/integration/test_pipeline_replay.py`). Every recording
-  starts with a `STORE_TWIN` entry so replay uses the original twin.
+  starts with `STORE_TWIN` and `PIPELINE_CONFIG` entries so replay uses the original
+  twin and thresholds.
 * Observations older than the pipeline clock are dropped and counted, never applied.
 
 ## Known limitations (Foundation v0)
@@ -137,6 +138,9 @@ candidates there is nothing to disambiguate and margin is 1.0. Physical events
   and a new cart lifecycle (`<track>#2`), and exited sessions/carts never receive
   further attribution.
 * Items with no configured home fixture rest as MISPLACED, never ON_FIXTURE.
+* A cart closes when the shopper's session exits; `EXIT_WITH_ITEM` only freezes that
+  item's line as the settlement candidate.
+* Observations below the configured minimum confidence are ignored by tracking.
 * A shopper whose track ends (left radar coverage) is dropped from every candidate
   ledger; if they were the true carrier the item is later attributed to whoever remains.
 * No persistence, streaming or services: everything runs in-process on synthetic data.

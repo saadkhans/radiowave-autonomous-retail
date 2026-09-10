@@ -95,9 +95,16 @@ class Carry(FrozenModel):
 class Dropout(FrozenModel):
     """Suppress a sensor modality (optionally one sensor) for a time window."""
 
-    start_t: float
-    end_t: float
+    start_t: float = Field(ge=0.0)
+    end_t: float = Field(ge=0.0)
     sensor_id: str | None = None
+
+    @model_validator(mode="after")
+    def _ordered(self) -> Dropout:
+        if self.end_t < self.start_t:
+            msg = f"dropout ends ({self.end_t}) before it starts ({self.start_t})"
+            raise ValueError(msg)
+        return self
 
 
 class GroundTruthEvent(FrozenModel):
@@ -126,7 +133,11 @@ class Scenario(ContractModel):
     @model_validator(mode="after")
     def _references(self) -> Scenario:
         labels = {s.label for s in self.shoppers}
-        epcs = {p.epc for p in self.placements}
+        placed = [p.epc for p in self.placements]
+        epcs = set(placed)
+        if len(placed) != len(epcs):
+            msg = "each EPC may be placed once; a physical unit cannot rest in two places"
+            raise ValueError(msg)
         store_epcs = {i.epc.value for i in self.store.items}
         for carry in self.carries:
             if carry.start_t > self.duration_s:

@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 import re
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -81,7 +82,7 @@ class CoordinateFrame(FrozenModel):
 
     frame_id: str = STORE_FRAME_ID
     description: str = "Store floor plan frame: origin at a documented corner, x east, y north"
-    units: str = "m"
+    units: Literal["m"] = Field(default="m", description="Meters only; no unit conversion")
 
     @field_validator("frame_id")
     @classmethod

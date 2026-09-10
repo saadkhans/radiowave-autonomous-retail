@@ -10,6 +10,12 @@ from radiowave.contracts._base import FrozenModel
 
 
 class PersonTrackingConfig(FrozenModel):
+    min_observation_confidence: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description="Person observations below this confidence are ignored entirely",
+    )
     merge_radius_m: float = Field(
         default=0.7,
         description="A new native track within this distance of an existing canonical track "
@@ -40,6 +46,13 @@ class PersonTrackingConfig(FrozenModel):
 
 
 class ItemTrackingConfig(FrozenModel):
+    min_read_confidence: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description="RFID reads below this confidence never refresh freshness, position, "
+        "zone history or movement confirmation",
+    )
     smoothing_alpha: float = Field(
         default=0.25, gt=0.0, le=1.0, description="EMA factor on RFID location estimates"
     )

@@ -240,7 +240,8 @@ class ItemStateMachine:
             return None
         recent = list(item.zone_history)[-cfg.exit_zone_confirm_reads :]
         if len(recent) == cfg.exit_zone_confirm_reads and all(
-            z is not None and self._registry.zone(z).kind == ZoneKind.EXIT for z in recent
+            (zone := self._registry.zone_or_none(z)) is not None and zone.kind == ZoneKind.EXIT
+            for z in recent
         ):
             return self._apply(
                 item,

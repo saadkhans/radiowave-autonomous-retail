@@ -16,10 +16,12 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
+from pydantic import BaseModel, ValidationError
+
 from radiowave.contracts.recording import EntryKind, RecordedEntry
 from radiowave.contracts.store import Store
 from radiowave.digital_twin.registry import StoreRegistry
-from radiowave.pipeline import FoundationPipeline, PipelineResult
+from radiowave.pipeline import FoundationPipeline, PipelineConfig, PipelineResult
 from radiowave.replay.clock import ReplayPacer
 from radiowave.replay.reader import ReplayPlayer, observations_from, open_replay_source
 from radiowave.replay.recorder import InMemoryRecorder, JsonlRecorder, ParquetRecorder
@@ -31,7 +33,9 @@ def _print_summary(result: PipelineResult, out: Callable[[str], None] = print) -
     out(f"scenario        : {result.scenario_id}")
     out(
         f"observations    : {result.observations_accepted} accepted, "
-        f"{result.observations_dropped} duplicates dropped, {result.steps} fusion steps"
+        f"{result.observations_dropped} duplicates dropped, "
+        f"{result.observations_rejected_low_confidence} rejected (low confidence), "
+        f"{result.steps} fusion steps"
     )
     out(f"person tracks   : {[t.track_id for t in result.person_tracks]}")
     out("items           :")
@@ -89,10 +93,33 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_json_model[M: BaseModel](path: Path, model: type[M]) -> M:
+    try:
+        return model.model_validate_json(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise SystemExit(f"cannot read {path}: {exc}") from exc
+    except ValidationError as exc:
+        raise SystemExit(f"{path} is not a valid {model.__name__}: {exc}") from exc
+
+
+def _config_for(entries: list[RecordedEntry], args: argparse.Namespace) -> PipelineConfig:
+    """The configuration the recording was produced with; never silently defaulted."""
+    if args.config is not None:
+        return _load_json_model(Path(args.config), PipelineConfig)
+    for entry in entries:
+        if entry.kind == EntryKind.PIPELINE_CONFIG:
+            return PipelineConfig.model_validate(entry.payload)
+    msg = (
+        "recording carries no PIPELINE_CONFIG entry; pass --config <pipeline.json> so replay "
+        "uses the thresholds the recording was produced with"
+    )
+    raise SystemExit(msg)
+
+
 def _store_for(entries: list[RecordedEntry], args: argparse.Namespace) -> Store:
     """The twin a recording was produced against; never silently substituted."""
     if args.store is not None:
-        return Store.model_validate_json(Path(args.store).read_text(encoding="utf-8"))
+        return _load_json_model(Path(args.store), Store)
     if args.scenario is not None:
         return load_scenario(args.scenario).store
     for entry in entries:
@@ -120,7 +147,12 @@ def cmd_replay(args: argparse.Namespace) -> int:
         for e in entries
     )
     registry = StoreRegistry(store)
-    pipeline = FoundationPipeline(registry, vision_enabled=vision_enabled, scenario_id=scenario_id)
+    pipeline = FoundationPipeline(
+        registry,
+        _config_for(entries, args),
+        vision_enabled=vision_enabled,
+        scenario_id=scenario_id,
+    )
     if args.step:
         print("step mode: press Enter to release the next observation, q to finish")
         for entry in entries:
@@ -172,6 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
     rep.add_argument("--step", action="store_true", help="release observations one by one")
     rep.add_argument("--scenario", help="built-in scenario id whose store twin to use")
     rep.add_argument("--store", help="path to a Store JSON twin to replay against")
+    rep.add_argument("--config", help="path to a PipelineConfig JSON to replay with")
     rep.set_defaults(func=cmd_replay)
     return parser
 

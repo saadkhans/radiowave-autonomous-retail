@@ -7,7 +7,8 @@
         "DECISION",
         "CART_EVENT",
         "GROUND_TRUTH",
-        "STORE_TWIN"
+        "STORE_TWIN",
+        "PIPELINE_CONFIG"
       ],
       "title": "EntryKind",
       "type": "string"

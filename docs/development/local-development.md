@@ -82,7 +82,7 @@ python -m radiowave.cli scenarios
 ## Replaying a recording
 
 ```sh
-python -m radiowave.cli replay data/synthetic/scenario-01.jsonl --rate 0   # twin comes from the recording (or --store/--scenario)
+python -m radiowave.cli replay data/synthetic/scenario-01.jsonl --rate 0   # twin and thresholds come from the recording (or --store/--scenario/--config)
 ```
 
 `--rate` controls playback speed:

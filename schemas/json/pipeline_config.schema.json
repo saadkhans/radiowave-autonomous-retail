@@ -1,0 +1,419 @@
+{
+  "$defs": {
+    "AssociationConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_radius_m": {
+          "default": 2.5,
+          "description": "Persons within this distance of the item become candidates",
+          "exclusiveMinimum": 0.0,
+          "title": "Candidate Radius M",
+          "type": "number"
+        },
+        "carry_weights": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "description": "Feature weights once a carrier is committed (who has it now / HANDOFF)",
+          "title": "Carry Weights",
+          "type": "object"
+        },
+        "co_motion_radius_m": {
+          "default": 1.3,
+          "exclusiveMinimum": 0.0,
+          "title": "Co Motion Radius M",
+          "type": "number"
+        },
+        "co_motion_window_steps": {
+          "default": 12,
+          "minimum": 1,
+          "title": "Co Motion Window Steps",
+          "type": "integer"
+        },
+        "distance_scale_m": {
+          "default": 1.5,
+          "exclusiveMinimum": 0.0,
+          "title": "Distance Scale M",
+          "type": "number"
+        },
+        "fixture_proximity_m": {
+          "default": 1.0,
+          "title": "Fixture Proximity M",
+          "type": "number"
+        },
+        "item_moving_speed_m_s": {
+          "default": 0.2,
+          "title": "Item Moving Speed M S",
+          "type": "number"
+        },
+        "ledger_alpha": {
+          "default": 0.3,
+          "exclusiveMinimum": 0.0,
+          "maximum": 1.0,
+          "title": "Ledger Alpha",
+          "type": "number"
+        },
+        "moving_speed_m_s": {
+          "default": 0.3,
+          "title": "Moving Speed M S",
+          "type": "number"
+        },
+        "pick_weights": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "description": "Feature weights while attributing a PICK (who took it off the fixture)",
+          "title": "Pick Weights",
+          "type": "object"
+        },
+        "prune_distance_m": {
+          "default": 6.0,
+          "title": "Prune Distance M",
+          "type": "number"
+        },
+        "prune_score": {
+          "default": 0.02,
+          "title": "Prune Score",
+          "type": "number"
+        },
+        "vision_match_radius_m": {
+          "default": 0.7,
+          "title": "Vision Match Radius M",
+          "type": "number"
+        },
+        "vision_min_confidence": {
+          "default": 0.6,
+          "description": "Vision evidence below this confidence is ignored entirely",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Vision Min Confidence",
+          "type": "number"
+        },
+        "vision_window_s": {
+          "default": 2.0,
+          "title": "Vision Window S",
+          "type": "number"
+        }
+      },
+      "title": "AssociationConfig",
+      "type": "object"
+    },
+    "ConfidenceThresholds": {
+      "additionalProperties": false,
+      "description": "Single source of truth for confidence thresholds. No magic numbers elsewhere.",
+      "properties": {
+        "commit_min_confidence": {
+          "default": 0.75,
+          "description": "Confidence at or above this may COMMIT",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Commit Min Confidence",
+          "type": "number"
+        },
+        "commit_min_margin": {
+          "default": 0.25,
+          "description": "Minimum gap between best and runner-up candidate to COMMIT",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Commit Min Margin",
+          "type": "number"
+        },
+        "max_wait_seconds": {
+          "default": 20.0,
+          "description": "After waiting this long an unresolved event goes to REVIEW",
+          "minimum": 0.0,
+          "title": "Max Wait Seconds",
+          "type": "number"
+        },
+        "review_grace_seconds": {
+          "default": 2.0,
+          "description": "Low confidence goes to REVIEW only after this grace period, so a new episode can still accumulate evidence",
+          "minimum": 0.0,
+          "title": "Review Grace Seconds",
+          "type": "number"
+        },
+        "wait_min_confidence": {
+          "default": 0.4,
+          "description": "Confidence at or above this (but below commit) WAITs",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Wait Min Confidence",
+          "type": "number"
+        }
+      },
+      "title": "ConfidenceThresholds",
+      "type": "object"
+    },
+    "FusionConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "association": {
+          "$ref": "#/$defs/AssociationConfig"
+        },
+        "carry_confirm_s": {
+          "default": 3.0,
+          "title": "Carry Confirm S",
+          "type": "number"
+        },
+        "handoff_confirm_s": {
+          "default": 2.0,
+          "title": "Handoff Confirm S",
+          "type": "number"
+        },
+        "handoff_min_margin": {
+          "default": 0.2,
+          "title": "Handoff Min Margin",
+          "type": "number"
+        },
+        "item": {
+          "$ref": "#/$defs/ItemTrackingConfig"
+        },
+        "person": {
+          "$ref": "#/$defs/PersonTrackingConfig"
+        },
+        "state_machine": {
+          "$ref": "#/$defs/StateMachineConfig"
+        }
+      },
+      "title": "FusionConfig",
+      "type": "object"
+    },
+    "ItemTrackingConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "history_length": {
+          "default": 400,
+          "minimum": 4,
+          "title": "History Length",
+          "type": "integer"
+        },
+        "min_read_confidence": {
+          "default": 0.2,
+          "description": "RFID reads below this confidence never refresh freshness, position, zone history or movement confirmation",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Min Read Confidence",
+          "type": "number"
+        },
+        "reset_after_s": {
+          "default": 3.0,
+          "description": "After a gap this long the smoother restarts on the next read",
+          "title": "Reset After S",
+          "type": "number"
+        },
+        "rest_init_reads": {
+          "default": 8,
+          "description": "Reads needed before the initial rest position is trusted",
+          "minimum": 1,
+          "title": "Rest Init Reads",
+          "type": "integer"
+        },
+        "smoothing_alpha": {
+          "default": 0.25,
+          "description": "EMA factor on RFID location estimates",
+          "exclusiveMinimum": 0.0,
+          "maximum": 1.0,
+          "title": "Smoothing Alpha",
+          "type": "number"
+        },
+        "stale_after_s": {
+          "default": 1.5,
+          "description": "No reads for this long -> position is stale, no motion inference",
+          "title": "Stale After S",
+          "type": "number"
+        },
+        "velocity_window_s": {
+          "default": 1.5,
+          "description": "Window for the half-mean velocity estimate",
+          "title": "Velocity Window S",
+          "type": "number"
+        }
+      },
+      "title": "ItemTrackingConfig",
+      "type": "object"
+    },
+    "PersonTrackingConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "end_after_s": {
+          "default": 8.0,
+          "description": "LOST for this long -> ENDED",
+          "title": "End After S",
+          "type": "number"
+        },
+        "history_length": {
+          "default": 600,
+          "description": "Points kept per track (~30 s at 20 Hz)",
+          "minimum": 2,
+          "title": "History Length",
+          "type": "integer"
+        },
+        "lost_after_s": {
+          "default": 1.0,
+          "description": "No observation for this long -> LOST",
+          "title": "Lost After S",
+          "type": "number"
+        },
+        "merge_radius_m": {
+          "default": 0.7,
+          "description": "A new native track within this distance of an existing canonical track (observed by a different sensor) is the same person",
+          "title": "Merge Radius M",
+          "type": "number"
+        },
+        "min_observation_confidence": {
+          "default": 0.2,
+          "description": "Person observations below this confidence are ignored entirely",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Min Observation Confidence",
+          "type": "number"
+        },
+        "prediction_horizon_s": {
+          "default": 1.0,
+          "description": "Maximum dead-reckoning horizon when a LOST track's position is needed",
+          "title": "Prediction Horizon S",
+          "type": "number"
+        },
+        "reacquire_base_radius_m": {
+          "default": 0.8,
+          "title": "Reacquire Base Radius M",
+          "type": "number"
+        },
+        "reacquire_growth_m_per_s": {
+          "default": 1.2,
+          "description": "Re-acquisition gate grows by this much per second lost",
+          "title": "Reacquire Growth M Per S",
+          "type": "number"
+        },
+        "reacquire_window_s": {
+          "default": 6.0,
+          "description": "A LOST track may be re-acquired within this window",
+          "title": "Reacquire Window S",
+          "type": "number"
+        },
+        "same_sensor_exclusion_s": {
+          "default": 0.3,
+          "description": "A canonical track updated by sensor X within this window cannot absorb a second native track from sensor X",
+          "title": "Same Sensor Exclusion S",
+          "type": "number"
+        },
+        "velocity_window_s": {
+          "default": 0.6,
+          "title": "Velocity Window S",
+          "type": "number"
+        }
+      },
+      "title": "PersonTrackingConfig",
+      "type": "object"
+    },
+    "StateMachineConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_timeout_s": {
+          "default": 8.0,
+          "description": "INTERACTION_CANDIDATE not progressing reverts after this",
+          "title": "Candidate Timeout S",
+          "type": "number"
+        },
+        "carry_displacement_m": {
+          "default": 1.5,
+          "description": "Displacement from rest to become CARRIED",
+          "title": "Carry Displacement M",
+          "type": "number"
+        },
+        "carry_min_duration_s": {
+          "default": 1.0,
+          "title": "Carry Min Duration S",
+          "type": "number"
+        },
+        "exit_item_radius_m": {
+          "default": 1.5,
+          "description": "Item within this distance of an exiting carrier leaves with them",
+          "title": "Exit Item Radius M",
+          "type": "number"
+        },
+        "exit_zone_confirm_reads": {
+          "default": 3,
+          "description": "Consecutive reads from an EXIT zone (a portal burst) that close a carried episode even without localization; a single stray read from a far read point is not",
+          "minimum": 1,
+          "title": "Exit Zone Confirm Reads",
+          "type": "integer"
+        },
+        "hold_radius_m": {
+          "default": 1.0,
+          "description": "A resting item with any tracked person closer than this may still be held in hand, so PUTBACK/MISPLACE is deferred until they step away",
+          "title": "Hold Radius M",
+          "type": "number"
+        },
+        "home_radius_m": {
+          "default": 1.2,
+          "description": "Rest within this distance of the home fixture bounds = PUTBACK",
+          "title": "Home Radius M",
+          "type": "number"
+        },
+        "home_zone_margin_m": {
+          "default": 0.5,
+          "description": "Leaving the home fixture bounds by this margin also implies carry",
+          "title": "Home Zone Margin M",
+          "type": "number"
+        },
+        "movement_confirm_reads": {
+          "default": 4,
+          "description": "Consecutive evaluations, each backed by at least one new localized RFID read, with the smoothed estimate beyond the threshold before INTERACTION_CANDIDATE. In read-sparse zones this scales with the read interval, not the fusion step",
+          "minimum": 1,
+          "title": "Movement Confirm Reads",
+          "type": "integer"
+        },
+        "movement_threshold_m": {
+          "default": 0.75,
+          "description": "Displacement from rest to become INTERACTION_CANDIDATE",
+          "title": "Movement Threshold M",
+          "type": "number"
+        },
+        "physical_event_confidence": {
+          "default": 0.9,
+          "description": "Confidence for rest/exit facts backed by fresh reads",
+          "title": "Physical Event Confidence",
+          "type": "number"
+        },
+        "rest_confirm_s": {
+          "default": 1.0,
+          "description": "At-rest condition must hold this long before PUTBACK/MISPLACE",
+          "title": "Rest Confirm S",
+          "type": "number"
+        },
+        "rest_displacement_m": {
+          "default": 0.4,
+          "description": "Half-window mean displacement below this (for the whole window) = at rest",
+          "title": "Rest Displacement M",
+          "type": "number"
+        },
+        "rest_window_s": {
+          "default": 2.5,
+          "description": "Window over which a carried item must stop moving",
+          "title": "Rest Window S",
+          "type": "number"
+        }
+      },
+      "title": "StateMachineConfig",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "fusion": {
+      "$ref": "#/$defs/FusionConfig"
+    },
+    "step_interval_s": {
+      "default": 0.25,
+      "exclusiveMinimum": 0.0,
+      "title": "Step Interval S",
+      "type": "number"
+    },
+    "thresholds": {
+      "$ref": "#/$defs/ConfidenceThresholds"
+    }
+  },
+  "title": "PipelineConfig",
+  "type": "object"
+}

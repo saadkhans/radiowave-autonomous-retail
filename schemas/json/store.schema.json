@@ -77,7 +77,9 @@
           "type": "string"
         },
         "units": {
+          "const": "m",
           "default": "m",
+          "description": "Meters only; no unit conversion",
           "title": "Units",
           "type": "string"
         }

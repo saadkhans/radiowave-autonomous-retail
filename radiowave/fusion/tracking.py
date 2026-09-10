@@ -98,6 +98,7 @@ class PersonTrackManager:
         self._tracks: dict[str, PersonState] = {}
         self._native_map: dict[tuple[str, str], str] = {}
         self._counter = 0
+        self.rejected_low_confidence = 0
 
     @property
     def active(self) -> list[PersonState]:
@@ -113,7 +114,11 @@ class PersonTrackManager:
     def snapshots(self) -> list[PersonTrack]:
         return [t.snapshot() for t in self._tracks.values()]
 
-    def ingest(self, observation: PersonObservation) -> PersonState:
+    def ingest(self, observation: PersonObservation) -> PersonState | None:
+        """Update or create the canonical track; returns None for a rejected sample."""
+        if observation.confidence < self._config.min_observation_confidence:
+            self.rejected_low_confidence += 1
+            return None
         native_hint = observation.metadata.get(NATIVE_TRACK_KEY)
         key = (observation.sensor_id, str(native_hint)) if native_hint is not None else None
         track = self._resolve(key, observation)
@@ -355,6 +360,7 @@ class ItemTrackManager:
     def __init__(self, config: ItemTrackingConfig) -> None:
         self._config = config
         self._tracks: dict[EPC, ItemTrackState] = {}
+        self.rejected_low_confidence = 0
 
     @property
     def all(self) -> list[ItemTrackState]:
@@ -373,8 +379,12 @@ class ItemTrackManager:
             self._tracks[epc] = track
         return track
 
-    def ingest(self, observation: ItemObservation) -> ItemTrackState:
+    def ingest(self, observation: ItemObservation) -> ItemTrackState | None:
+        """Update (or create) the item track; None when the read is too weak to count."""
         cfg = self._config
+        if observation.confidence < cfg.min_read_confidence:
+            self.rejected_low_confidence += 1
+            return None  # too weak to count as identity, freshness or location evidence
         track = self.register(observation.epc, None, None)
         if track.last_seen_at is not None and observation.timestamp < track.last_seen_at:
             return track

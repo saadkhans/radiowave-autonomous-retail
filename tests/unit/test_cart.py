@@ -84,9 +84,11 @@ def test_exit_preserves_final_ownership_candidate_without_settlement() -> None:
     result = engine.apply(_event(RetailEventType.EXIT_WITH_ITEM, A, "P0001", 9.0))
     assert result.cart_event_type == CartEventType.EXIT_HOLD
     cart = engine.state.carts["P0001"]
-    assert cart.status == CartStatus.EXITED
     assert cart.lines[EPC_SHIRT_A].final_ownership_candidate is True
-    assert cart.exited_at == at(9.0)
+    assert cart.status == CartStatus.OPEN  # one item at the door does not close the cart
+    engine.close_cart("P0001", at(9.5))  # the shopper's session exits
+    assert cart.status == CartStatus.EXITED
+    assert cart.exited_at == at(9.5)
     assert not any(field in cart.model_dump() for field in ("total", "payment", "charge"))
 
 
