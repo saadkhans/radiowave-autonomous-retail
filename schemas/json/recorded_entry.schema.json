@@ -1,0 +1,98 @@
+{
+  "$defs": {
+    "EntryKind": {
+      "enum": [
+        "OBSERVATION",
+        "RETAIL_EVENT",
+        "DECISION",
+        "CART_EVENT",
+        "GROUND_TRUTH",
+        "STORE_TWIN",
+        "PIPELINE_CONFIG"
+      ],
+      "title": "EntryKind",
+      "type": "string"
+    },
+    "SourceType": {
+      "description": "Sensing modality of an observation or sensor.",
+      "enum": [
+        "MMWAVE",
+        "RFID",
+        "VISION"
+      ],
+      "title": "SourceType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "format_version": {
+      "const": 1,
+      "default": 1,
+      "description": "Only version 1 is understood; other versions are rejected on read",
+      "title": "Format Version",
+      "type": "integer"
+    },
+    "kind": {
+      "$ref": "#/$defs/EntryKind"
+    },
+    "payload": {
+      "additionalProperties": true,
+      "title": "Payload",
+      "type": "object"
+    },
+    "scenario_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Scenario Id"
+    },
+    "sensor_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Sensor Id"
+    },
+    "sequence": {
+      "minimum": 0,
+      "title": "Sequence",
+      "type": "integer"
+    },
+    "source_type": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceType"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "timestamp": {
+      "format": "date-time",
+      "title": "Timestamp",
+      "type": "string"
+    }
+  },
+  "required": [
+    "sequence",
+    "timestamp",
+    "kind",
+    "payload"
+  ],
+  "title": "RecordedEntry",
+  "type": "object"
+}

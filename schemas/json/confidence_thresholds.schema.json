@@ -1,0 +1,46 @@
+{
+  "additionalProperties": false,
+  "description": "Single source of truth for confidence thresholds. No magic numbers elsewhere.",
+  "properties": {
+    "commit_min_confidence": {
+      "default": 0.75,
+      "description": "Confidence at or above this may COMMIT",
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Commit Min Confidence",
+      "type": "number"
+    },
+    "commit_min_margin": {
+      "default": 0.25,
+      "description": "Minimum gap between best and runner-up candidate to COMMIT",
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Commit Min Margin",
+      "type": "number"
+    },
+    "max_wait_seconds": {
+      "default": 20.0,
+      "description": "After waiting this long an unresolved event goes to REVIEW",
+      "minimum": 0.0,
+      "title": "Max Wait Seconds",
+      "type": "number"
+    },
+    "review_grace_seconds": {
+      "default": 2.0,
+      "description": "Low confidence goes to REVIEW only after this grace period, so a new episode can still accumulate evidence",
+      "minimum": 0.0,
+      "title": "Review Grace Seconds",
+      "type": "number"
+    },
+    "wait_min_confidence": {
+      "default": 0.4,
+      "description": "Confidence at or above this (but below commit) WAITs",
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Wait Min Confidence",
+      "type": "number"
+    }
+  },
+  "title": "ConfidenceThresholds",
+  "type": "object"
+}

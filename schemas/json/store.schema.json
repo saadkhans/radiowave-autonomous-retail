@@ -1,0 +1,434 @@
+{
+  "$defs": {
+    "Boundary": {
+      "additionalProperties": false,
+      "description": "Entry or exit boundary; crossing into the box counts as crossing the boundary.",
+      "properties": {
+        "boundary_id": {
+          "minLength": 1,
+          "title": "Boundary Id",
+          "type": "string"
+        },
+        "bounds": {
+          "$ref": "#/$defs/Box2D"
+        },
+        "kind": {
+          "$ref": "#/$defs/BoundaryKind"
+        }
+      },
+      "required": [
+        "boundary_id",
+        "kind",
+        "bounds"
+      ],
+      "title": "Boundary",
+      "type": "object"
+    },
+    "BoundaryKind": {
+      "enum": [
+        "ENTRY",
+        "EXIT"
+      ],
+      "title": "BoundaryKind",
+      "type": "string"
+    },
+    "Box2D": {
+      "additionalProperties": false,
+      "description": "Axis-aligned rectangle on the floor plane, in store-frame meters.",
+      "properties": {
+        "max_x": {
+          "title": "Max X",
+          "type": "number"
+        },
+        "max_y": {
+          "title": "Max Y",
+          "type": "number"
+        },
+        "min_x": {
+          "title": "Min X",
+          "type": "number"
+        },
+        "min_y": {
+          "title": "Min Y",
+          "type": "number"
+        }
+      },
+      "required": [
+        "min_x",
+        "min_y",
+        "max_x",
+        "max_y"
+      ],
+      "title": "Box2D",
+      "type": "object"
+    },
+    "CoordinateFrame": {
+      "additionalProperties": false,
+      "description": "The shared store frame. Right-handed, meters, z up, origin documented in text.",
+      "properties": {
+        "description": {
+          "default": "Store floor plan frame: origin at a documented corner, x east, y north",
+          "title": "Description",
+          "type": "string"
+        },
+        "frame_id": {
+          "default": "store",
+          "title": "Frame Id",
+          "type": "string"
+        },
+        "units": {
+          "const": "m",
+          "default": "m",
+          "description": "Meters only; no unit conversion",
+          "title": "Units",
+          "type": "string"
+        }
+      },
+      "title": "CoordinateFrame",
+      "type": "object"
+    },
+    "EPC": {
+      "additionalProperties": false,
+      "description": "Electronic Product Code of exactly one physical merchandise unit.\n\nStored as uppercase hexadecimal (EPC binary encoding, 32-256 bits).",
+      "properties": {
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "EPC",
+      "type": "object"
+    },
+    "Fixture": {
+      "additionalProperties": false,
+      "description": "A display fixture (rack, table, shelf) where products have a home.",
+      "properties": {
+        "bounds": {
+          "$ref": "#/$defs/Box2D"
+        },
+        "fixture_id": {
+          "minLength": 1,
+          "title": "Fixture Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "zone_id": {
+          "title": "Zone Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fixture_id",
+        "zone_id",
+        "name",
+        "bounds"
+      ],
+      "title": "Fixture",
+      "type": "object"
+    },
+    "Item": {
+      "additionalProperties": false,
+      "description": "One physical, uniquely tagged merchandise unit.",
+      "properties": {
+        "epc": {
+          "$ref": "#/$defs/EPC"
+        },
+        "gtin": {
+          "title": "Gtin",
+          "type": "string"
+        },
+        "home_fixture_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Fixture this unit was placed on (overrides the product home fixture)",
+          "title": "Home Fixture Id"
+        }
+      },
+      "required": [
+        "epc",
+        "gtin"
+      ],
+      "title": "Item",
+      "type": "object"
+    },
+    "Product": {
+      "additionalProperties": false,
+      "description": "Commercial product type (SKU / GTIN). Never a physical object.",
+      "properties": {
+        "gtin": {
+          "description": "GTIN-8/12/13/14 digits",
+          "title": "Gtin",
+          "type": "string"
+        },
+        "home_fixture_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Fixture where units of this product are normally displayed",
+          "title": "Home Fixture Id"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "sku": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sku"
+        }
+      },
+      "required": [
+        "gtin",
+        "name"
+      ],
+      "title": "Product",
+      "type": "object"
+    },
+    "Sensor": {
+      "additionalProperties": false,
+      "description": "A physical sensing device. ``sensor_id`` is ours; vendor naming stays in metadata.",
+      "properties": {
+        "modality": {
+          "$ref": "#/$defs/SourceType"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "pose": {
+          "$ref": "#/$defs/SensorPose"
+        },
+        "sensor_id": {
+          "minLength": 1,
+          "title": "Sensor Id",
+          "type": "string"
+        },
+        "vendor_metadata": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Vendor Metadata",
+          "type": "object"
+        }
+      },
+      "required": [
+        "sensor_id",
+        "modality",
+        "pose"
+      ],
+      "title": "Sensor",
+      "type": "object"
+    },
+    "SensorPose": {
+      "additionalProperties": false,
+      "description": "Rigid pose of a sensor in the store frame.\n\n``position`` is the sensor origin in store coordinates (meters).\nOrientation is intrinsic yaw (about z), pitch (about y), roll (about x) in radians.",
+      "properties": {
+        "pitch": {
+          "default": 0.0,
+          "title": "Pitch",
+          "type": "number"
+        },
+        "position": {
+          "$ref": "#/$defs/WorldCoordinate"
+        },
+        "roll": {
+          "default": 0.0,
+          "title": "Roll",
+          "type": "number"
+        },
+        "yaw": {
+          "default": 0.0,
+          "title": "Yaw",
+          "type": "number"
+        }
+      },
+      "required": [
+        "position"
+      ],
+      "title": "SensorPose",
+      "type": "object"
+    },
+    "SourceType": {
+      "description": "Sensing modality of an observation or sensor.",
+      "enum": [
+        "MMWAVE",
+        "RFID",
+        "VISION"
+      ],
+      "title": "SourceType",
+      "type": "string"
+    },
+    "WorldCoordinate": {
+      "additionalProperties": false,
+      "description": "Point in the shared store frame (meters). ``frame_id`` is always the store frame.",
+      "properties": {
+        "frame_id": {
+          "default": "store",
+          "title": "Frame Id",
+          "type": "string"
+        },
+        "x": {
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "title": "Y",
+          "type": "number"
+        },
+        "z": {
+          "default": 0.0,
+          "title": "Z",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "title": "WorldCoordinate",
+      "type": "object"
+    },
+    "Zone": {
+      "additionalProperties": false,
+      "properties": {
+        "bounds": {
+          "$ref": "#/$defs/Box2D"
+        },
+        "kind": {
+          "$ref": "#/$defs/ZoneKind"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "zone_id": {
+          "minLength": 1,
+          "title": "Zone Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "zone_id",
+        "name",
+        "kind",
+        "bounds"
+      ],
+      "title": "Zone",
+      "type": "object"
+    },
+    "ZoneKind": {
+      "enum": [
+        "SALES_FLOOR",
+        "FIXTURE",
+        "ENTRY",
+        "EXIT",
+        "FITTING_ROOM",
+        "BACK_OF_HOUSE"
+      ],
+      "title": "ZoneKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Minimal, extensible digital twin of one store.",
+  "properties": {
+    "boundaries": {
+      "items": {
+        "$ref": "#/$defs/Boundary"
+      },
+      "title": "Boundaries",
+      "type": "array"
+    },
+    "fixtures": {
+      "items": {
+        "$ref": "#/$defs/Fixture"
+      },
+      "title": "Fixtures",
+      "type": "array"
+    },
+    "floor_bounds": {
+      "$ref": "#/$defs/Box2D"
+    },
+    "frame": {
+      "$ref": "#/$defs/CoordinateFrame"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/Item"
+      },
+      "title": "Items",
+      "type": "array"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "products": {
+      "items": {
+        "$ref": "#/$defs/Product"
+      },
+      "title": "Products",
+      "type": "array"
+    },
+    "sensors": {
+      "items": {
+        "$ref": "#/$defs/Sensor"
+      },
+      "title": "Sensors",
+      "type": "array"
+    },
+    "store_id": {
+      "minLength": 1,
+      "title": "Store Id",
+      "type": "string"
+    },
+    "zones": {
+      "items": {
+        "$ref": "#/$defs/Zone"
+      },
+      "title": "Zones",
+      "type": "array"
+    }
+  },
+  "required": [
+    "store_id",
+    "name",
+    "floor_bounds"
+  ],
+  "title": "Store",
+  "type": "object"
+}

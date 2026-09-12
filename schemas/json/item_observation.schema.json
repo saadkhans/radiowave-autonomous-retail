@@ -1,0 +1,211 @@
+{
+  "$defs": {
+    "EPC": {
+      "additionalProperties": false,
+      "description": "Electronic Product Code of exactly one physical merchandise unit.\n\nStored as uppercase hexadecimal (EPC binary encoding, 32-256 bits).",
+      "properties": {
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "EPC",
+      "type": "object"
+    },
+    "SpatialUncertainty": {
+      "additionalProperties": false,
+      "description": "One-sigma positional uncertainty per axis, in meters.",
+      "properties": {
+        "sigma_x": {
+          "minimum": 0.0,
+          "title": "Sigma X",
+          "type": "number"
+        },
+        "sigma_y": {
+          "minimum": 0.0,
+          "title": "Sigma Y",
+          "type": "number"
+        },
+        "sigma_z": {
+          "default": 0.0,
+          "minimum": 0.0,
+          "title": "Sigma Z",
+          "type": "number"
+        }
+      },
+      "required": [
+        "sigma_x",
+        "sigma_y"
+      ],
+      "title": "SpatialUncertainty",
+      "type": "object"
+    },
+    "WorldCoordinate": {
+      "additionalProperties": false,
+      "description": "Point in the shared store frame (meters). ``frame_id`` is always the store frame.",
+      "properties": {
+        "frame_id": {
+          "default": "store",
+          "title": "Frame Id",
+          "type": "string"
+        },
+        "x": {
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "title": "Y",
+          "type": "number"
+        },
+        "z": {
+          "default": 0.0,
+          "title": "Z",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "title": "WorldCoordinate",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One RFID read (or read aggregate) of a specific EPC.\n\n``coordinate``/``uncertainty`` are the adapter's *location estimate* at the\nconfigured accuracy; ``zone_id`` is the coarse read zone. Either may be absent.",
+  "properties": {
+    "confidence": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "coordinate": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorldCoordinate"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "epc": {
+      "$ref": "#/$defs/EPC"
+    },
+    "metadata": {
+      "additionalProperties": true,
+      "description": "Retained native fields; JSON-compatible values only so every observation is recordable",
+      "title": "Metadata",
+      "type": "object"
+    },
+    "observation_id": {
+      "minLength": 1,
+      "title": "Observation Id",
+      "type": "string"
+    },
+    "phase_rad": {
+      "anyOf": [
+        {
+          "maximum": 6.3,
+          "minimum": -6.3,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Phase Rad"
+    },
+    "read_rate_hz": {
+      "anyOf": [
+        {
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Read Rate Hz"
+    },
+    "rssi_dbm": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rssi Dbm"
+    },
+    "scenario_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Scenario Id"
+    },
+    "sensor_id": {
+      "minLength": 1,
+      "title": "Sensor Id",
+      "type": "string"
+    },
+    "source_type": {
+      "const": "RFID",
+      "default": "RFID",
+      "title": "Source Type",
+      "type": "string"
+    },
+    "timestamp": {
+      "format": "date-time",
+      "title": "Timestamp",
+      "type": "string"
+    },
+    "uncertainty": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SpatialUncertainty"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "zone_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Zone Id"
+    }
+  },
+  "required": [
+    "observation_id",
+    "sensor_id",
+    "timestamp",
+    "confidence",
+    "epc"
+  ],
+  "title": "ItemObservation",
+  "type": "object"
+}

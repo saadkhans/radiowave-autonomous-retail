@@ -1,0 +1,295 @@
+{
+  "$defs": {
+    "EPC": {
+      "additionalProperties": false,
+      "description": "Electronic Product Code of exactly one physical merchandise unit.\n\nStored as uppercase hexadecimal (EPC binary encoding, 32-256 bits).",
+      "properties": {
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "EPC",
+      "type": "object"
+    },
+    "ItemState": {
+      "description": "Physical state of one EPC as inferred by the retail state machine.",
+      "enum": [
+        "ON_FIXTURE",
+        "INTERACTION_CANDIDATE",
+        "CARRIED",
+        "MISPLACED",
+        "EXITED",
+        "UNKNOWN"
+      ],
+      "title": "ItemState",
+      "type": "string"
+    },
+    "SpatialUncertainty": {
+      "additionalProperties": false,
+      "description": "One-sigma positional uncertainty per axis, in meters.",
+      "properties": {
+        "sigma_x": {
+          "minimum": 0.0,
+          "title": "Sigma X",
+          "type": "number"
+        },
+        "sigma_y": {
+          "minimum": 0.0,
+          "title": "Sigma Y",
+          "type": "number"
+        },
+        "sigma_z": {
+          "default": 0.0,
+          "minimum": 0.0,
+          "title": "Sigma Z",
+          "type": "number"
+        }
+      },
+      "required": [
+        "sigma_x",
+        "sigma_y"
+      ],
+      "title": "SpatialUncertainty",
+      "type": "object"
+    },
+    "TrackPoint": {
+      "additionalProperties": false,
+      "properties": {
+        "coordinate": {
+          "$ref": "#/$defs/WorldCoordinate"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "velocity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Velocity"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "timestamp",
+        "coordinate"
+      ],
+      "title": "TrackPoint",
+      "type": "object"
+    },
+    "Velocity": {
+      "additionalProperties": false,
+      "description": "Velocity in meters/second, expressed in the store frame unless stated otherwise.",
+      "properties": {
+        "vx": {
+          "default": 0.0,
+          "title": "Vx",
+          "type": "number"
+        },
+        "vy": {
+          "default": 0.0,
+          "title": "Vy",
+          "type": "number"
+        },
+        "vz": {
+          "default": 0.0,
+          "title": "Vz",
+          "type": "number"
+        }
+      },
+      "title": "Velocity",
+      "type": "object"
+    },
+    "WorldCoordinate": {
+      "additionalProperties": false,
+      "description": "Point in the shared store frame (meters). ``frame_id`` is always the store frame.",
+      "properties": {
+        "frame_id": {
+          "default": "store",
+          "title": "Frame Id",
+          "type": "string"
+        },
+        "x": {
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "title": "Y",
+          "type": "number"
+        },
+        "z": {
+          "default": 0.0,
+          "title": "Z",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "title": "WorldCoordinate",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Canonical track of one physical item, keyed by EPC.",
+  "properties": {
+    "carrier_track_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Committed shopper track carrying this item, if any",
+      "title": "Carrier Track Id"
+    },
+    "epc": {
+      "$ref": "#/$defs/EPC"
+    },
+    "gtin": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Gtin"
+    },
+    "history": {
+      "items": {
+        "$ref": "#/$defs/TrackPoint"
+      },
+      "title": "History",
+      "type": "array"
+    },
+    "home_fixture_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Home Fixture Id"
+    },
+    "last_seen_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Seen At"
+    },
+    "movement_start_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Movement Start At"
+    },
+    "observation_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Observation Count",
+      "type": "integer"
+    },
+    "position": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorldCoordinate"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Smoothed location estimate at configured RFID accuracy"
+    },
+    "rest_position": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorldCoordinate"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Where the item last came to rest"
+    },
+    "state": {
+      "$ref": "#/$defs/ItemState",
+      "default": "UNKNOWN"
+    },
+    "state_since": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "State Since"
+    },
+    "uncertainty": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SpatialUncertainty"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "zone_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Zone Id"
+    }
+  },
+  "required": [
+    "epc"
+  ],
+  "title": "ItemTrack",
+  "type": "object"
+}

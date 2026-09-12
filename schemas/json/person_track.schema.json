@@ -1,0 +1,204 @@
+{
+  "$defs": {
+    "PersonTrackState": {
+      "enum": [
+        "ACTIVE",
+        "LOST",
+        "ENDED"
+      ],
+      "title": "PersonTrackState",
+      "type": "string"
+    },
+    "SpatialUncertainty": {
+      "additionalProperties": false,
+      "description": "One-sigma positional uncertainty per axis, in meters.",
+      "properties": {
+        "sigma_x": {
+          "minimum": 0.0,
+          "title": "Sigma X",
+          "type": "number"
+        },
+        "sigma_y": {
+          "minimum": 0.0,
+          "title": "Sigma Y",
+          "type": "number"
+        },
+        "sigma_z": {
+          "default": 0.0,
+          "minimum": 0.0,
+          "title": "Sigma Z",
+          "type": "number"
+        }
+      },
+      "required": [
+        "sigma_x",
+        "sigma_y"
+      ],
+      "title": "SpatialUncertainty",
+      "type": "object"
+    },
+    "TrackPoint": {
+      "additionalProperties": false,
+      "properties": {
+        "coordinate": {
+          "$ref": "#/$defs/WorldCoordinate"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "velocity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Velocity"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "timestamp",
+        "coordinate"
+      ],
+      "title": "TrackPoint",
+      "type": "object"
+    },
+    "Velocity": {
+      "additionalProperties": false,
+      "description": "Velocity in meters/second, expressed in the store frame unless stated otherwise.",
+      "properties": {
+        "vx": {
+          "default": 0.0,
+          "title": "Vx",
+          "type": "number"
+        },
+        "vy": {
+          "default": 0.0,
+          "title": "Vy",
+          "type": "number"
+        },
+        "vz": {
+          "default": 0.0,
+          "title": "Vz",
+          "type": "number"
+        }
+      },
+      "title": "Velocity",
+      "type": "object"
+    },
+    "WorldCoordinate": {
+      "additionalProperties": false,
+      "description": "Point in the shared store frame (meters). ``frame_id`` is always the store frame.",
+      "properties": {
+        "frame_id": {
+          "default": "store",
+          "title": "Frame Id",
+          "type": "string"
+        },
+        "x": {
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "title": "Y",
+          "type": "number"
+        },
+        "z": {
+          "default": 0.0,
+          "title": "Z",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "title": "WorldCoordinate",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Canonical anonymous shopper track.\n\n``track_id`` is assigned by fusion and is independent of any sensor's native\ntrack numbering. Several sensors (or re-acquisitions after dropout) can feed one track.",
+  "properties": {
+    "confidence": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "contributing_sensor_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Contributing Sensor Ids",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "history": {
+      "items": {
+        "$ref": "#/$defs/TrackPoint"
+      },
+      "title": "History",
+      "type": "array"
+    },
+    "observation_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Observation Count",
+      "type": "integer"
+    },
+    "position": {
+      "$ref": "#/$defs/WorldCoordinate"
+    },
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "state": {
+      "$ref": "#/$defs/PersonTrackState",
+      "default": "ACTIVE"
+    },
+    "track_id": {
+      "minLength": 1,
+      "title": "Track Id",
+      "type": "string"
+    },
+    "uncertainty": {
+      "$ref": "#/$defs/SpatialUncertainty"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    },
+    "velocity": {
+      "$ref": "#/$defs/Velocity"
+    }
+  },
+  "required": [
+    "track_id",
+    "created_at",
+    "updated_at",
+    "position",
+    "uncertainty",
+    "confidence"
+  ],
+  "title": "PersonTrack",
+  "type": "object"
+}

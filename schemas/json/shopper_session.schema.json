@@ -1,0 +1,79 @@
+{
+  "$defs": {
+    "SessionState": {
+      "enum": [
+        "ACTIVE",
+        "EXITED",
+        "ABANDONED"
+      ],
+      "title": "SessionState",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "entered_at": {
+      "format": "date-time",
+      "title": "Entered At",
+      "type": "string"
+    },
+    "entry_boundary_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Entry Boundary Id"
+    },
+    "exit_boundary_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Exit Boundary Id"
+    },
+    "exited_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Exited At"
+    },
+    "person_track_id": {
+      "minLength": 1,
+      "title": "Person Track Id",
+      "type": "string"
+    },
+    "session_id": {
+      "minLength": 1,
+      "title": "Session Id",
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/$defs/SessionState",
+      "default": "ACTIVE"
+    }
+  },
+  "required": [
+    "session_id",
+    "person_track_id",
+    "entered_at"
+  ],
+  "title": "ShopperSession",
+  "type": "object"
+}
