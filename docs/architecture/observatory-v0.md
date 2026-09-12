@@ -43,8 +43,11 @@ pre-generated observation list for its scenario:
   (`tests/api/test_observatory_api.py`).
 * Finalization calls `pipeline.finish(advance=False)`: the clock has already
   stepped through the duration, so nothing is evaluated past the advertised end.
-* Every mutation and snapshot of one run holds the run's lock; FastAPI serves
-  sync handlers from worker threads and concurrent clients must not interleave.
+  Input that arrived after the last step (a sample stamped exactly on the end, or
+  a final partial interval) is evaluated once more at the duration itself.
+* Every mutating route runs `ObservatoryRun.apply(operation)`, which performs the
+  mutation and takes the snapshot under one lock; FastAPI serves sync handlers
+  from worker threads and a response must describe its own request.
 * Scenarios flagged `duplicate_observation_stream` (scenario 10) are fed
   `runner.scenario_observation_stream()`, i.e. every observation twice, so the
   dropped-duplicate counter shows the idempotency the scenario exists to prove.

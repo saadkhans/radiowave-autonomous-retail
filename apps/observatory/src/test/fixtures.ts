@@ -175,6 +175,7 @@ export function installFakeApi() {
   let steps = 0;
   const calls: string[] = [];
   const failures = new Set<string>();
+  const flags = { exitHold: false };
   const state = (): RunState =>
     runState({
       time_s: time,
@@ -191,7 +192,7 @@ export function installFakeApi() {
                 session_id: "S-P0001",
                 status: "OPEN",
                 exited_s: null,
-                lines: [{ epc: "3034F0000000000000A001", short_epc: "00A001", gtin: "06281234567890", product_name: "Black shirt", added_s: 8.5, final_ownership_candidate: false, exit_event_s: null }],
+                lines: [{ epc: "3034F0000000000000A001", short_epc: "00A001", gtin: "06281234567890", product_name: "Black shirt", added_s: 8.5, final_ownership_candidate: flags.exitHold, exit_event_s: flags.exitHold ? 8.75 : null }],
               },
             ]
           : [],
@@ -235,6 +236,10 @@ export function installFakeApi() {
     time: () => time,
     /** Make the next request matching "METHOD /path" fail with 500. */
     failNext: (route: string) => failures.add(route),
+    /** Serve the cart line as an exit hold (candidate + exit event) on an OPEN cart. */
+    set exitHold(value: boolean) {
+      flags.exitHold = value;
+    },
     restore: () => {
       globalThis.fetch = original;
     },

@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { StoreMapView } from "@/components/StoreMap";
+import { episodeTrail } from "@/lib/geometry";
 import { DEFAULT_LAYERS } from "@/state/store";
 import { item, person, STORE } from "@/test/fixtures";
 
@@ -96,6 +97,17 @@ describe("StoreMapView", () => {
     const scale = Number(screen.getByTestId("store-map").getAttribute("data-scale"));
     expect(Number(disc.getAttribute("r"))).toBeCloseTo(0.02 * scale, 3);
     expect(Number(disc.getAttribute("r"))).toBeLessThan(6);
+  });
+
+  it("trims a moving item's trail to its movement episode", () => {
+    const trail = [
+      { t_s: 1, x: 5, y: 4 },
+      { t_s: 2, x: 5.1, y: 4.1 },
+      { t_s: 8, x: 5.5, y: 3 },
+      { t_s: 9, x: 6, y: 2.5 },
+    ];
+    expect(episodeTrail(item({ trail, movement_start_s: 8 })).map((p) => p.t_s)).toEqual([8, 9]);
+    expect(episodeTrail(item({ trail, movement_start_s: null }))).toHaveLength(4);
   });
 
   it("skips items that are not localized", () => {

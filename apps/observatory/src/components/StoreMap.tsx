@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { gridLines, makeProjector, rectFor, type Projector } from "@/lib/geometry";
+import { episodeTrail, gridLines, makeProjector, rectFor, type Projector } from "@/lib/geometry";
 import { decisionColor, fmtScore, itemColor, personColor } from "@/lib/format";
 import { useActions, useObservatory, type Layers, type Selection } from "@/state/store";
 import type { Item, ObservatoryStore, Person, StoreZone } from "@/types/api";
@@ -259,21 +259,23 @@ export function StoreMapView({
           })
         : null}
 
-      {/* item trails */}
+      {/* item trails: only the current movement episode, never pre-pick fixture jitter */}
       {layers.trails
-        ? items.map((item) =>
-            item.trail.length > 1 && MOVING_ITEM_STATES.has(item.state) ? (
+        ? items.map((item) => {
+            if (!MOVING_ITEM_STATES.has(item.state)) return null;
+            const trail = episodeTrail(item);
+            return trail.length > 1 ? (
               <path
                 key={`itrail-${item.epc}`}
-                d={trailPath(projector, item.trail)}
+                d={trailPath(projector, trail)}
                 fill="none"
                 stroke={itemColor(item.state)}
                 strokeWidth={1}
                 opacity={0.35}
                 strokeDasharray="2 2"
               />
-            ) : null,
-          )
+            ) : null;
+          })
         : null}
 
       {/* person trails */}

@@ -125,6 +125,8 @@ class FoundationPipeline:
         self._pending: dict[str, RetailEvent] = {}
         self._steps = 0
         self._next_step: datetime | None = None
+        self._last_step_at: datetime | None = None
+        self._ingested_since_step = False
         self._sequence = 0
         self._scheduled: list[tuple[datetime, int, EntryKind, dict[str, Any]]] = []
         self._last_timestamp: datetime | None = None
@@ -228,6 +230,7 @@ class FoundationPipeline:
             sensor_id=observation.sensor_id,
         )
         self.fusion.ingest(observation)
+        self._ingested_since_step = True
         return True
 
     def _spatially_consistent(self, observation: SensorObservation) -> bool:
@@ -265,11 +268,19 @@ class FoundationPipeline:
 
         By default one last fusion step runs after the last observation. A driver that
         has already stepped the clock through the end of the run (``advance_to``) passes
-        ``advance=False`` so nothing is evaluated past the advertised duration.
+        ``advance=False``: nothing is evaluated past the advertised duration, but input
+        that arrived after the last step (a sample stamped exactly on the end, or a final
+        partial interval) is still evaluated once, at the clock's current time.
         """
         if self._next_step is not None:
             if advance:
                 self._step(self._next_step)
+            elif self._last_timestamp is not None and (
+                self._ingested_since_step
+                or self._last_step_at is None
+                or self._last_step_at < self._last_timestamp
+            ):
+                self._step(self._last_timestamp)
             self._next_step = None
         stamp = self._scheduled[0][0] if self._scheduled else self._first_input_at
         if stamp is not None:
@@ -324,6 +335,8 @@ class FoundationPipeline:
     # ------------------------------------------------------------------ stepping
     def _step(self, now: datetime) -> None:
         self._steps += 1
+        self._last_step_at = now
+        self._ingested_since_step = False
         self._flush_scheduled(now)
         proposed_now: set[str] = set()
         for event in self.fusion.step(now):

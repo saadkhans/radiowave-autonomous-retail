@@ -231,3 +231,59 @@ def test_concurrent_steps_on_one_run_are_serialized(client: TestClient) -> None:
         f"/api/runs/{reference}/advance", json={"seconds": 40 * state["step_interval_s"]}
     ).json()
     assert _strip_run_id(state) == _strip_run_id(expected)
+
+
+# --- round 2: boundary samples are evaluated; mutation + snapshot are atomic ---------
+
+
+def test_finish_without_advance_evaluates_input_after_the_last_step() -> None:
+    from radiowave.simulator.library import load_scenario
+    from radiowave.simulator.runner import build_pipeline, scenario_observations
+
+    scenario = load_scenario("01")
+    pipeline = build_pipeline(scenario)
+    end = _at(scenario.duration_s)
+    for observation in scenario_observations(scenario):
+        if observation.timestamp <= end:
+            pipeline.ingest(observation)
+    pipeline.advance_to(end)
+    steps_before = pipeline.result().steps
+    # Samples stamped exactly on the last step boundary were ingested after that step.
+    assert pipeline._ingested_since_step is True
+    result = pipeline.finish(advance=False)
+    assert result.steps == steps_before + 1
+    assert pipeline._last_step_at == end
+    # Idempotent: a second finish evaluates nothing further.
+    assert pipeline.finish(advance=False).steps == steps_before + 1
+
+
+def test_finish_without_advance_is_a_noop_when_nothing_is_pending() -> None:
+    from radiowave.simulator.library import load_scenario
+    from radiowave.simulator.runner import build_pipeline
+
+    pipeline = build_pipeline(load_scenario("01"))
+    assert pipeline.finish(advance=False).steps == 0
+
+
+def test_partial_final_interval_is_evaluated(client: TestClient) -> None:
+    run = _create(client, "01")
+    run_id = run["run_id"]
+    interval = run["step_interval_s"]
+    # Stop 0.1 s short of a step boundary so the last interval is partial, then finish.
+    client.post(f"/api/runs/{run_id}/advance", json={"seconds": run["duration_s"] - interval / 2})
+    state = client.post(f"/api/runs/{run_id}/advance", json={"seconds": 3600}).json()
+    assert state["finished"] is True
+    reference = client.post(
+        f"/api/runs/{_create(client, '01')['run_id']}/advance", json={"seconds": 3600}
+    ).json()
+    assert _strip_run_id(state) == _strip_run_id(reference)
+
+
+def test_each_mutation_returns_its_own_snapshot(client: TestClient) -> None:
+    run = _create(client)
+    run_id = run["run_id"]
+    interval = run["step_interval_s"]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        responses = list(pool.map(lambda _: client.post(f"/api/runs/{run_id}/step"), range(40)))
+    times = sorted(round(response.json()["time_s"], 6) for response in responses)
+    assert times == [round((i + 1) * interval, 6) for i in range(40)]

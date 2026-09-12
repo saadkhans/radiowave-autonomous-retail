@@ -5,8 +5,8 @@ import { useActions, useObservatory } from "@/state/store";
 import type { DecisionKind } from "@/types/api";
 
 export function Timeline() {
-  const { run, timeline, busy } = useObservatory();
-  const { seek } = useActions();
+  const { run, timeline, busy, playing } = useObservatory();
+  const { seek, pause } = useActions();
   const duration = run?.duration_s ?? 0;
   const [scrub, setScrub] = useState<number | null>(null);
 
@@ -54,7 +54,19 @@ export function Timeline() {
         step={run?.step_interval_s ?? 0.25}
         value={value}
         disabled={!run || busy}
-        onChange={(event) => setScrub(Number(event.target.value))}
+        onChange={(event) => {
+          if (playing) pause();
+          setScrub(Number(event.target.value));
+        }}
+        onMouseDown={() => {
+          if (playing) pause();
+        }}
+        onTouchStart={() => {
+          if (playing) pause();
+        }}
+        onKeyDown={() => {
+          if (playing) pause();
+        }}
         onMouseUp={() => {
           if (scrub !== null) void seek(scrub);
         }}

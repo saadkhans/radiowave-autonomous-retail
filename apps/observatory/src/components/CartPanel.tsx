@@ -50,10 +50,14 @@ function CartCard({ cart }: { cart: Cart }) {
                 </td>
                 <td className="py-0.5 pr-2 text-console-muted">added {fmtSeconds(line.added_s)}</td>
                 <td className="py-0.5 text-right">
-                  {line.exit_event_s !== null ? (
+                  {cart.status === "EXITED" && line.exit_event_s !== null ? (
                     <span className="text-console-ok">exited {fmtSeconds(line.exit_event_s)}</span>
-                  ) : line.final_ownership_candidate ? (
-                    <span className="text-console-warn">exit candidate</span>
+                  ) : line.final_ownership_candidate || line.exit_event_s !== null ? (
+                    // The cart is still open: the exit hold is provisional ownership,
+                    // not a settled exit.
+                    <span className="text-console-warn">
+                      exit candidate{line.exit_event_s !== null ? ` @ ${fmtSeconds(line.exit_event_s)}` : ""}
+                    </span>
                   ) : (
                     <span className="text-console-muted">in cart</span>
                   )}

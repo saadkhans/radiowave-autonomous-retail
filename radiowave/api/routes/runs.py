@@ -62,29 +62,25 @@ def get_store(request: Request, run_id: str) -> ObservatoryStore:
 @router.post("/runs/{run_id}/reset", response_model=ObservatoryRunState)
 def reset_run(request: Request, run_id: str) -> ObservatoryRunState:
     run = _run(request, run_id)
-    run.reset()
-    return run.state()
+    return run.apply(run.reset)
 
 
 @router.post("/runs/{run_id}/step", response_model=ObservatoryRunState)
 def step_run(request: Request, run_id: str) -> ObservatoryRunState:
     run = _run(request, run_id)
-    run.step()
-    return run.state()
+    return run.apply(run.step)
 
 
 @router.post("/runs/{run_id}/advance", response_model=ObservatoryRunState)
 def advance_run(request: Request, run_id: str, body: AdvanceRequest) -> ObservatoryRunState:
     run = _run(request, run_id)
-    run.advance(body.seconds)
-    return run.state()
+    return run.apply(lambda: run.advance(body.seconds))
 
 
 @router.post("/runs/{run_id}/seek", response_model=ObservatoryRunState)
 def seek_run(request: Request, run_id: str, body: SeekRequest) -> ObservatoryRunState:
     run = _run(request, run_id)
-    run.seek(body.time_s)
-    return run.state()
+    return run.apply(lambda: run.seek(body.time_s))
 
 
 @router.get("/runs/{run_id}/events", response_model=ObservatoryEventPage)

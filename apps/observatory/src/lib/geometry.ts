@@ -1,4 +1,4 @@
-import type { Bounds } from "@/types/api";
+import type { Bounds, Item } from "@/types/api";
 
 /**
  * World (store frame, meters, y north) -> screen (pixels, y down) projection.
@@ -75,4 +75,10 @@ export function gridLines(floor: Bounds): { xs: number[]; ys: number[] } {
   for (let x = Math.ceil(floor.min_x); x <= Math.floor(floor.max_x); x += 1) xs.push(x);
   for (let y = Math.ceil(floor.min_y); y <= Math.floor(floor.max_y); y += 1) ys.push(y);
   return { xs, ys };
+}
+
+/** Trail points since the item started moving; earlier points are on-fixture jitter. */
+export function episodeTrail(item: Item): Item["trail"] {
+  const since = item.movement_start_s;
+  return since === null ? item.trail : item.trail.filter((point) => point.t_s >= since);
 }

@@ -172,7 +172,7 @@ function describe(error: unknown): string {
 export function ObservatoryProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const runIdRef = useRef<string | null>(null);
-  const inflightRef = useRef(false);
+  const inflightRef = useRef<Promise<void> | null>(null);
   const speedRef = useRef(state.speed);
   speedRef.current = state.speed;
 
@@ -188,9 +188,15 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const guarded = useCallback(
-    async (work: () => Promise<void>) => {
-      if (inflightRef.current) return;
-      inflightRef.current = true;
+    async (work: () => Promise<void>, options: { queue?: boolean } = {}) => {
+      if (inflightRef.current) {
+        if (!options.queue) return;
+        await inflightRef.current;
+      }
+      let release: () => void = () => {};
+      inflightRef.current = new Promise<void>((resolve) => {
+        release = resolve;
+      });
       dispatch({ type: "busy", busy: true });
       try {
         await work();
@@ -199,7 +205,8 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "error", error: describe(error) });
         dispatch({ type: "playing", playing: false });
       } finally {
-        inflightRef.current = false;
+        inflightRef.current = null;
+        release();
         dispatch({ type: "busy", busy: false });
       }
     },
@@ -241,6 +248,7 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
   const startRun = useCallback(async () => {
     const scenarioId = state.scenarioId;
     if (!scenarioId) return;
+    dispatch({ type: "playing", playing: false });
     await guarded(async () => {
       const run = await api.createRun(scenarioId);
       runIdRef.current = run.run_id;
@@ -262,11 +270,14 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
     await guarded(async () => applyRun(await api.reset(runId)));
   }, [applyRun, guarded]);
 
+  // Seeking pauses playback and, if a tick is still in flight, waits for it
+  // instead of being dropped by the in-flight guard.
   const seek = useCallback(
     async (timeS: number) => {
       const runId = runIdRef.current;
       if (!runId) return;
-      await guarded(async () => applyRun(await api.seek(runId, timeS)));
+      dispatch({ type: "playing", playing: false });
+      await guarded(async () => applyRun(await api.seek(runId, timeS)), { queue: true });
     },
     [applyRun, guarded],
   );

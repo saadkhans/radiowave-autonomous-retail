@@ -71,7 +71,7 @@ export function ScenarioSelector() {
             <button
               type="button"
               className="btn btn-active"
-              disabled={busy}
+              disabled={locked}
               onClick={() => void startRun()}
             >
               {run ? `Restart scenario ${scenario.scenario_id}` : `Run scenario ${scenario.scenario_id}`}

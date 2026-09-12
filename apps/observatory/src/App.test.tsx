@@ -74,13 +74,39 @@ describe("App", () => {
     expect(within(stream).queryAllByRole("row")).toHaveLength(2); // header + "No events yet."
   });
 
-  it("locks scenario selection while playing", async () => {
+  it("locks scenario selection and restart while playing", async () => {
     await selectAndRun();
     fireEvent.click(screen.getByRole("button", { name: "Play" }));
     const other = screen.getByRole("option", { name: /ambiguous two-shopper pickup/ });
     expect(other).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Restart scenario 01/ })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Pause" }));
     await waitFor(() => expect(other).not.toBeDisabled());
+  });
+
+  it("grabbing the timeline pauses playback and the released scrub seeks", async () => {
+    await selectAndRun();
+    fireEvent.click(screen.getByRole("button", { name: "Play" }));
+    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+    const slider = screen.getByRole("slider", { name: "Timeline" });
+    fireEvent.mouseDown(slider);
+    expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+    fireEvent.change(slider, { target: { value: "4" } });
+    fireEvent.mouseUp(slider);
+    await waitFor(() => expect(screen.getByTestId("sim-clock")).toHaveTextContent("t = 4.00s"));
+    expect(fake.calls).toContain("POST /api/runs/run-0001/seek");
+  });
+
+  it("labels an exit hold as a candidate while the cart is still open", async () => {
+    fake.exitHold = true;
+    await selectAndRun();
+    const slider = screen.getByRole("slider", { name: "Timeline" });
+    fireEvent.change(slider, { target: { value: "9" } });
+    fireEvent.mouseUp(slider);
+    await waitFor(() => expect(screen.getByTestId("sim-clock")).toHaveTextContent("t = 9.00s"));
+    const cart = screen.getByTestId("cart-cart-P0001");
+    expect(within(cart).getByText(/exit candidate/)).toBeInTheDocument();
+    expect(within(cart).queryByText(/^exited/)).not.toBeInTheDocument();
   });
 
   it("play drives the API clock at the selected speed and pause stops it", async () => {

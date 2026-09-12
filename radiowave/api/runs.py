@@ -9,6 +9,7 @@ of calls always yields the same state.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from datetime import timedelta
 from threading import Lock, RLock
 
@@ -252,6 +253,16 @@ class ObservatoryRun:
 
     def step(self) -> None:
         self.advance(self.step_interval_s)
+
+    def apply(self, operation: Callable[[], None]) -> ObservatoryRunState:
+        """Run one mutation and snapshot the result under the same lock.
+
+        A response must describe the request that produced it, never a concurrent
+        client's reset or seek that slipped in between the mutation and the snapshot.
+        """
+        with self._lock:
+            operation()
+            return self._state()
 
     def seek(self, time_s: float) -> None:
         """Deterministic scrub: rebuild from zero when moving backwards."""
