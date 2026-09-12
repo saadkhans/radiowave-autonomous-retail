@@ -1,7 +1,8 @@
 import { useActions, useObservatory } from "@/state/store";
 
 export function ScenarioSelector() {
-  const { scenarios, scenarioId, scenario, run, busy } = useObservatory();
+  const { scenarios, scenarioId, scenario, run, busy, playing } = useObservatory();
+  const locked = busy || playing;
   const { selectScenario, startRun } = useActions();
 
   return (
@@ -19,8 +20,9 @@ export function ScenarioSelector() {
               type="button"
               role="option"
               aria-selected={active}
+              disabled={locked}
               onClick={() => void selectScenario(entry.scenario_id)}
-              className={`flex w-full items-baseline gap-2 border-b border-console-line/60 px-3 py-1.5 text-left hover:bg-console-panel-2 ${
+              className={`flex w-full items-baseline gap-2 border-b border-console-line/60 px-3 py-1.5 text-left hover:bg-console-panel-2 disabled:cursor-not-allowed disabled:opacity-60 ${
                 active ? "bg-console-panel-2 text-console-accent" : ""
               }`}
             >

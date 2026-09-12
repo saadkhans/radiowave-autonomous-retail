@@ -215,7 +215,7 @@ export function StoreMapView({
             const lines: React.ReactNode[] = [];
             // While a decision is still WAIT/REVIEW the attribution is uncertain: show every
             // ranked candidate. Only a settled carrier gets the single solid link.
-            const undecided = item.pending !== null && item.pending.decision !== "COMMIT";
+            const undecided = item.decision !== null && item.decision.decision !== "COMMIT";
             if (item.carrier_track_id && !undecided) {
               const carrier = personById.get(item.carrier_track_id);
               if (carrier) {
@@ -323,9 +323,9 @@ export function StoreMapView({
                 {item.short_epc}
               </text>
             ) : null}
-            {layers.confidenceLabels && item.pending ? (
-              <text x={x + 8} y={y + 12} fontSize={8} fontFamily="var(--font-mono)" fill={decisionColor(item.pending.decision)}>
-                {item.pending.decision} {item.pending.event_type} {fmtScore(item.pending.confidence)}
+            {layers.confidenceLabels && item.decision ? (
+              <text x={x + 8} y={y + 12} fontSize={8} fontFamily="var(--font-mono)" fill={decisionColor(item.decision.decision)}>
+                {item.decision.decision} {item.decision.event_type} {fmtScore(item.decision.confidence)}
               </text>
             ) : null}
           </g>
@@ -337,7 +337,8 @@ export function StoreMapView({
         const { x, y } = projector.toScreen(person.x, person.y);
         const color = personColor(person.state);
         const selected = person.track_id === selectedPersonId;
-        const uncertainty = Math.max(projector.pixels(person.sigma_m), 6);
+        const uncertainty = projector.pixels(person.sigma_m); // metric, never inflated
+        const ring = Math.max(uncertainty, 6) + 4;
         const headingLength = 10 + Math.min(person.speed, 2) * 6;
         const hx = person.speed > 0.05 ? x + (person.vx / person.speed) * headingLength : x;
         const hy = person.speed > 0.05 ? y - (person.vy / person.speed) * headingLength : y;
@@ -353,8 +354,8 @@ export function StoreMapView({
               onSelect({ kind: "person", id: person.track_id });
             }}
           >
-            <circle cx={x} cy={y} r={uncertainty} fill={color} opacity={0.12} />
-            {selected ? <circle cx={x} cy={y} r={uncertainty + 4} fill="none" stroke="#ffffff" strokeWidth={1} /> : null}
+            <circle cx={x} cy={y} r={uncertainty} fill={color} opacity={0.12} data-testid={`sigma-${person.track_id}`} />
+            {selected ? <circle cx={x} cy={y} r={ring} fill="none" stroke="#ffffff" strokeWidth={1} /> : null}
             {person.speed > 0.05 ? (
               <line x1={x} y1={y} x2={hx} y2={hy} stroke={color} strokeWidth={1.5} markerEnd="url(#heading)" />
             ) : null}

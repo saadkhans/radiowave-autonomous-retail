@@ -55,6 +55,34 @@ describe("App", () => {
     expect(fake.calls).toContain("POST /api/runs/run-0001/reset");
   });
 
+  it("publishes run, events and timeline together so a reset never shows stale events", async () => {
+    await selectAndRun();
+    const slider = screen.getByRole("slider", { name: "Timeline" });
+    fireEvent.change(slider, { target: { value: "9" } });
+    fireEvent.mouseUp(slider);
+    await waitFor(() => expect(screen.getByTestId("sim-clock")).toHaveTextContent("t = 9.00s"));
+    const stream = screen.getByTestId("event-stream");
+    expect(within(stream).getAllByRole("row").length).toBeGreaterThan(1);
+    fake.failNext("GET /api/runs/run-0001/events");
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    await screen.findByRole("alert");
+    // The reset response arrived but its events could not be fetched: nothing is published.
+    expect(screen.getByTestId("sim-clock")).toHaveTextContent("t = 9.00s");
+    expect(within(stream).getAllByRole("row").length).toBeGreaterThan(1);
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    await waitFor(() => expect(screen.getByTestId("sim-clock")).toHaveTextContent("t = 0.00s"));
+    expect(within(stream).queryAllByRole("row")).toHaveLength(2); // header + "No events yet."
+  });
+
+  it("locks scenario selection while playing", async () => {
+    await selectAndRun();
+    fireEvent.click(screen.getByRole("button", { name: "Play" }));
+    const other = screen.getByRole("option", { name: /ambiguous two-shopper pickup/ });
+    expect(other).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(other).not.toBeDisabled());
+  });
+
   it("play drives the API clock at the selected speed and pause stops it", async () => {
     await selectAndRun();
     vi.useFakeTimers();

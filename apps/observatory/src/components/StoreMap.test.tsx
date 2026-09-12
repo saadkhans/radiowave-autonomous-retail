@@ -90,6 +90,14 @@ describe("StoreMapView", () => {
     expect(onSelect).toHaveBeenLastCalledWith(null);
   });
 
+  it("draws the uncertainty disc at metric scale without a pixel floor", () => {
+    renderMap({ persons: [person({ sigma_m: 0.02 })] });
+    const disc = screen.getByTestId("sigma-P0001");
+    const scale = Number(screen.getByTestId("store-map").getAttribute("data-scale"));
+    expect(Number(disc.getAttribute("r"))).toBeCloseTo(0.02 * scale, 3);
+    expect(Number(disc.getAttribute("r"))).toBeLessThan(6);
+  });
+
   it("skips items that are not localized", () => {
     renderMap({ items: [item({ state: "UNKNOWN", x: null, y: null })] });
     expect(screen.queryByTestId("item-00A001")).not.toBeInTheDocument();

@@ -1,0 +1,233 @@
+"""Observatory API regressions from the first Codex review round (PR #2)."""
+
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+
+import pytest
+
+pytest.importorskip("fastapi")
+pytest.importorskip("httpx")
+
+from fastapi.testclient import TestClient
+
+from radiowave.api.app import create_app
+from radiowave.api.runs import _cart_sessions, _decisions_with_proposals
+from radiowave.cart.models import Cart, CartState, CartStatus
+from radiowave.contracts.confidence import ConfidenceDecision, Decision
+from radiowave.contracts.events import RetailEvent, RetailEventType
+from radiowave.contracts.sessions import SessionState, ShopperSession
+from radiowave.contracts.store import EPC
+from radiowave.pipeline import PipelineResult
+from radiowave.simulator.scenario import SCENARIO_EPOCH
+
+EPC_A = "3034F1A0000000000000A001"
+
+
+@pytest.fixture
+def client() -> TestClient:
+    return TestClient(create_app())
+
+
+def _create(client: TestClient, scenario_id: str = "01", **body: object) -> dict:
+    response = client.post("/api/runs", json={"scenario_id": scenario_id, **body})
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def _strip_run_id(state: dict) -> dict:
+    return {key: value for key, value in state.items() if key != "run_id"}
+
+
+def _at(seconds: float):
+    return SCENARIO_EPOCH + timedelta(seconds=seconds)
+
+
+# --- P1: finalization stays within the advertised duration ---------------------
+
+
+def test_finished_run_never_evaluates_past_its_duration(client: TestClient) -> None:
+    run = _create(client)
+    run_id = run["run_id"]
+    state = client.post(f"/api/runs/{run_id}/advance", json={"seconds": 3600}).json()
+    assert state["finished"] is True
+    duration = state["duration_s"]
+    events = client.get(f"/api/runs/{run_id}/events").json()["events"]
+    assert events and max(event["t_s"] for event in events) <= duration
+    timeline = client.get(f"/api/runs/{run_id}/timeline").json()
+    assert all(marker["t_s"] <= duration for marker in timeline["markers"])
+    for item in state["items"]:
+        for key in ("state_since_s", "last_seen_s", "movement_start_s"):
+            assert item[key] is None or item[key] <= duration
+        if item["decision"] is not None:
+            assert item["decision"]["at_s"] <= duration
+    for person in state["persons"]:
+        assert person["updated_s"] <= duration
+    # The engine stepped exactly through the duration and not one interval further.
+    assert state["steps"] <= duration / state["step_interval_s"] + 1
+
+
+def test_finished_state_matches_incremental_state_at_duration(client: TestClient) -> None:
+    first = _create(client)["run_id"]
+    second = _create(client)["run_id"]
+    finished = client.post(f"/api/runs/{first}/advance", json={"seconds": 3600}).json()
+    duration = finished["duration_s"]
+    for _ in range(int(duration / 2)):
+        stepped = client.post(f"/api/runs/{second}/advance", json={"seconds": 2}).json()
+    assert stepped["finished"] is True
+    assert _strip_run_id(finished) == _strip_run_id(stepped)
+
+
+# --- P1: decisions carry the proposal that was current when judged --------------
+
+
+def test_decision_pairing_uses_the_proposal_active_at_evaluation() -> None:
+    def proposal(seconds: float, shopper: str) -> RetailEvent:
+        return RetailEvent(
+            event_id="pick-1",
+            event_type=RetailEventType.PICK,
+            timestamp=_at(seconds),
+            epc=EPC(value=EPC_A),
+            shopper_track_id=shopper,
+            confidence=0.6,
+        )
+
+    def decision(seconds: float) -> ConfidenceDecision:
+        return ConfidenceDecision(
+            event_id="pick-1",
+            decision=Decision.WAIT,
+            confidence=0.6,
+            margin=0.1,
+            waited_seconds=0.0,
+            evaluated_at=_at(seconds),
+        )
+
+    result = PipelineResult(
+        proposed_events=[proposal(8.0, "P0001"), proposal(9.0, "P0002")],
+        decisions=[decision(8.0), decision(8.5), decision(9.0)],
+    )
+    paired = _decisions_with_proposals(result)
+    assert [event.shopper_track_id for _, event in paired] == ["P0001", "P0001", "P0002"]
+
+
+def test_wait_rows_keep_their_contemporaneous_attribution(client: TestClient) -> None:
+    run = _create(client, "12")
+    observatory_run = client.app.state.runs.get(run["run_id"])  # type: ignore[attr-defined]
+    observatory_run.advance(3600)
+    result = observatory_run.pipeline.result()
+    paired = _decisions_with_proposals(result)
+    assert len(paired) == len(result.decisions)
+    proposals_by_id: dict[str, list[RetailEvent]] = {}
+    for event in result.proposed_events:
+        proposals_by_id.setdefault(event.event_id, []).append(event)
+    # Scenario 12 re-proposes the same PICK id many times while waiting.
+    assert any(len(events) > 1 for events in proposals_by_id.values())
+    for decision, event in paired:
+        assert event.event_id == decision.event_id
+        assert event.timestamp <= decision.evaluated_at
+        later = [
+            e
+            for e in proposals_by_id[event.event_id]
+            if event.timestamp < e.timestamp <= decision.evaluated_at
+        ]
+        assert later == []
+
+
+# --- P2: scenario 10 is fed twice ------------------------------------------------
+
+
+def test_scenario_10_feeds_duplicates_and_drops_them(client: TestClient) -> None:
+    baseline = _create(client, "01")
+    doubled = _create(client, "10")
+    assert doubled["observations_total"] == 2 * baseline["observations_total"]
+    state = client.post(f"/api/runs/{doubled['run_id']}/advance", json={"seconds": 3600}).json()
+    assert state["counters"]["dropped_duplicates"] == baseline["observations_total"]
+    assert state["counters"]["accepted"] == baseline["observations_total"]
+    reference = client.post(
+        f"/api/runs/{baseline['run_id']}/advance", json={"seconds": 3600}
+    ).json()
+    assert [c["lines"] for c in state["carts"]] == [c["lines"] for c in reference["carts"]]
+
+
+# --- P2: settled decisions stay visible on the item --------------------------------
+
+
+def test_item_decision_survives_commit_and_review(client: TestClient) -> None:
+    run = _create(client, "01")
+    state = client.post(f"/api/runs/{run['run_id']}/advance", json={"seconds": 8.5}).json()
+    carried = next(item for item in state["items"] if item["state"] == "CARRIED")
+    assert carried["decision"] is not None
+    assert carried["decision"]["decision"] == "COMMIT"
+    assert carried["decision"]["event_type"] == "PICK"
+    assert carried["decision"]["confidence"] >= 0.75
+
+    ambiguous = _create(client, "12")
+    end = client.post(f"/api/runs/{ambiguous['run_id']}/advance", json={"seconds": 3600}).json()
+    reviewed = next(item for item in end["items"] if item["short_epc"] == "00A001")
+    assert reviewed["decision"] is not None
+    assert reviewed["decision"]["decision"] == "REVIEW"
+    assert "waited" in reviewed["decision"]["reason"]
+
+
+# --- P2: carts follow their own session -------------------------------------------
+
+
+def test_carts_follow_their_own_session() -> None:
+    def session(session_id: str, start: float, end: float | None) -> ShopperSession:
+        return ShopperSession(
+            session_id=session_id,
+            person_track_id="P0001",
+            state=SessionState.EXITED if end is not None else SessionState.ACTIVE,
+            entered_at=_at(start),
+            exited_at=None if end is None else _at(end),
+        )
+
+    first = Cart(cart_id="P0001", shopper_track_id="P0001", status=CartStatus.EXITED)
+    second = Cart(cart_id="P0001#1", shopper_track_id="P0001", status=CartStatus.OPEN)
+    result = PipelineResult(
+        cart_state=CartState(
+            carts={first.cart_id: first, second.cart_id: second},
+            current_cart_ids={"P0001": second.cart_id},
+        ),
+        sessions=[session("S-P0001", 0.0, 10.0), session("S-P0001#1", 12.0, None)],
+        cart_sessions={"P0001": "S-P0001"},
+    )
+    assert _cart_sessions(result) == {"P0001": "S-P0001", "P0001#1": "S-P0001#1"}
+
+
+def test_pipeline_cart_session_mapping_is_exposed(client: TestClient) -> None:
+    run = _create(client, "04")
+    state = client.post(f"/api/runs/{run['run_id']}/advance", json={"seconds": 3600}).json()
+    sessions = {s["session_id"]: s for s in state["sessions"]}
+    for cart in state["carts"]:
+        assert cart["session_id"] in sessions
+        assert sessions[cart["session_id"]]["track_id"] == cart["shopper_track_id"]
+
+
+# --- P2: seed validation ------------------------------------------------------------
+
+
+def test_out_of_range_seed_is_a_validation_error(client: TestClient) -> None:
+    for seed in (-1000, 2**40):
+        response = client.post("/api/runs", json={"scenario_id": "01", "seed": seed})
+        assert response.status_code == 422, seed
+    ok = _create(client, "01", seed=11)
+    assert ok["seed"] == 11
+
+
+# --- P2: per-run serialization ----------------------------------------------------
+
+
+def test_concurrent_steps_on_one_run_are_serialized(client: TestClient) -> None:
+    run = _create(client)
+    run_id = run["run_id"]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda _: client.post(f"/api/runs/{run_id}/step"), range(40)))
+    state = client.get(f"/api/runs/{run_id}/state").json()
+    assert state["time_s"] == pytest.approx(40 * state["step_interval_s"])
+    reference = _create(client)["run_id"]
+    expected = client.post(
+        f"/api/runs/{reference}/advance", json={"seconds": 40 * state["step_interval_s"]}
+    ).json()
+    assert _strip_run_id(state) == _strip_run_id(expected)

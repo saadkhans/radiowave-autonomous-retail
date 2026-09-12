@@ -88,7 +88,7 @@ export interface Candidate {
 
 export type DecisionKind = "COMMIT" | "WAIT" | "REVIEW";
 
-export interface PendingDecision {
+export interface ItemDecision {
   event_id: string;
   event_type: string;
   decision: DecisionKind;
@@ -148,7 +148,8 @@ export interface Item {
   last_seen_s: number | null;
   observation_count: number;
   candidates: Candidate[];
-  pending: PendingDecision | null;
+  /** Latest COMMIT / WAIT / REVIEW decision for the item's current episode. */
+  decision: ItemDecision | null;
   trail: TrailPoint[];
 }
 

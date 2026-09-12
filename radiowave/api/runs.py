@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from datetime import timedelta
-from threading import Lock
+from threading import Lock, RLock
 
 from radiowave.api.viewmodels import (
     ObservatoryBoundary,
@@ -55,7 +55,7 @@ from radiowave.contracts.tracks import (
 from radiowave.digital_twin.registry import StoreRegistry
 from radiowave.pipeline import FoundationPipeline, PipelineConfig, PipelineResult
 from radiowave.simulator.library import SCENARIOS, load_scenario
-from radiowave.simulator.runner import build_pipeline, scenario_observations
+from radiowave.simulator.runner import build_pipeline, scenario_observation_stream
 from radiowave.simulator.scenario import SCENARIO_EPOCH, Scenario
 
 TRAIL_POINTS = 40
@@ -200,7 +200,11 @@ class ObservatoryRun:
         self.scenario = scenario
         self.config = pipeline_config
         self.registry = StoreRegistry(scenario.store)
-        self.observations = scenario_observations(scenario)
+        # What the scenario is *fed* (scenario 10 replays every observation twice).
+        self.observations = scenario_observation_stream(scenario)
+        # FastAPI runs sync handlers on worker threads; every mutation and every
+        # snapshot of one run is serialized so replay stays deterministic.
+        self._lock = RLock()
         self._catalog = {i.epc.value: i for i in scenario.store.items}
         self._products = {p.gtin: p for p in scenario.store.products}
         self.pipeline: FoundationPipeline = build_pipeline(scenario, pipeline_config)
@@ -211,10 +215,11 @@ class ObservatoryRun:
 
     # ----------------------------------------------------------------- control
     def reset(self) -> None:
-        self.pipeline = build_pipeline(self.scenario, self.config)
-        self.cursor = 0
-        self.time_s = 0.0
-        self.finished = False
+        with self._lock:
+            self.pipeline = build_pipeline(self.scenario, self.config)
+            self.cursor = 0
+            self.time_s = 0.0
+            self.finished = False
 
     @property
     def step_interval_s(self) -> float:
@@ -226,40 +231,50 @@ class ObservatoryRun:
 
     def advance(self, seconds: float) -> None:
         """Move simulated time forward, feeding every observation stamped up to the target."""
-        if self.finished or seconds <= 0:
-            return
-        target = min(self.time_s + seconds, self.duration_s)
-        target_at = SCENARIO_EPOCH + timedelta(seconds=target)
-        while self.cursor < len(self.observations):
-            observation = self.observations[self.cursor]
-            if observation.timestamp > target_at:
-                break
-            self.pipeline.ingest(observation)
-            self.cursor += 1
-        self.pipeline.advance_to(target_at)
-        self.time_s = round(target, 6)
-        if self.time_s >= self.duration_s and self.cursor >= len(self.observations):
-            self.pipeline.finish()
-            self.finished = True
+        with self._lock:
+            if self.finished or seconds <= 0:
+                return
+            target = min(self.time_s + seconds, self.duration_s)
+            target_at = SCENARIO_EPOCH + timedelta(seconds=target)
+            while self.cursor < len(self.observations):
+                observation = self.observations[self.cursor]
+                if observation.timestamp > target_at:
+                    break
+                self.pipeline.ingest(observation)
+                self.cursor += 1
+            self.pipeline.advance_to(target_at)
+            self.time_s = round(target, 6)
+            if self.time_s >= self.duration_s and self.cursor >= len(self.observations):
+                # The clock already stepped through the duration; finalize carts and
+                # sessions without evaluating anything past the advertised end.
+                self.pipeline.finish(advance=False)
+                self.finished = True
 
     def step(self) -> None:
         self.advance(self.step_interval_s)
 
     def seek(self, time_s: float) -> None:
         """Deterministic scrub: rebuild from zero when moving backwards."""
-        target = max(0.0, min(time_s, self.duration_s))
-        if target < self.time_s or (self.finished and target < self.duration_s):
-            self.reset()
-        if target > self.time_s:
-            self.advance(target - self.time_s)
+        with self._lock:
+            target = max(0.0, min(time_s, self.duration_s))
+            if target < self.time_s or (self.finished and target < self.duration_s):
+                self.reset()
+            if target > self.time_s:
+                self.advance(target - self.time_s)
 
     # ----------------------------------------------------------------- views
     def state(self) -> ObservatoryRunState:
+        with self._lock:
+            return self._state()
+
+    def _state(self) -> ObservatoryRunState:
         result = self.pipeline.result()
-        pending = {e.event_id: e for e in result.pending_events}
-        latest_decision = self._latest_decisions(result)
-        sessions_by_track = {s.person_track_id: s for s in result.sessions}
-        carts = [self._cart_view(c, sessions_by_track) for c in result.cart_state.carts.values()]
+        decisions = _decisions_with_proposals(result)
+        cart_sessions = _cart_sessions(result)
+        carts = [
+            self._cart_view(c, cart_sessions.get(c.cart_id))
+            for c in result.cart_state.carts.values()
+        ]
         cart_by_track = {
             cart.shopper_track_id: cart.cart_id
             for cart in carts
@@ -270,7 +285,7 @@ class ObservatoryRun:
             if item.carrier_track_id and item.state == ItemState.CARRIED:
                 carried.setdefault(item.carrier_track_id, []).append(item.epc.value)
         persons = [self._person_view(p, cart_by_track, carried) for p in result.person_tracks]
-        items = [self._item_view(i, pending, latest_decision) for i in result.item_tracks]
+        items = [self._item_view(i, decisions) for i in result.item_tracks]
         return ObservatoryRunState(
             run_id=self.run_id,
             scenario_id=self.scenario.scenario_id,
@@ -283,7 +298,7 @@ class ObservatoryRun:
             finished=self.finished,
             observations_cursor=self.cursor,
             observations_total=len(self.observations),
-            events_total=len(self.events()),
+            events_total=len(self._events()),
             persons=persons,
             items=items,
             carts=carts,
@@ -300,6 +315,10 @@ class ObservatoryRun:
         )
 
     def events(self) -> list[ObservatoryEvent]:
+        with self._lock:
+            return self._events()
+
+    def _events(self) -> list[ObservatoryEvent]:
         """Unified chronological stream: track creation, item transitions, decisions, sessions."""
         result = self.pipeline.result()
         rows: list[tuple[float, int, ObservatoryEvent]] = []
@@ -334,11 +353,7 @@ class ObservatoryRun:
                     to_state=transition.to_state.value,
                 )
             )
-        by_id = {e.event_id: e for e in result.proposed_events}
-        for decision in result.decisions:
-            event = by_id.get(decision.event_id)
-            if event is None:
-                continue
+        for decision, event in _decisions_with_proposals(result):
             add(
                 ObservatoryEvent(
                     seq=0,
@@ -381,6 +396,10 @@ class ObservatoryRun:
         return [event.model_copy(update={"seq": index}) for index, (_, _, event) in enumerate(rows)]
 
     def timeline(self) -> ObservatoryTimeline:
+        with self._lock:
+            return self._timeline()
+
+    def _timeline(self) -> ObservatoryTimeline:
         markers = [
             ObservatoryTimelineMarker(
                 t_s=e.t_s,
@@ -401,13 +420,6 @@ class ObservatoryRun:
         )
 
     # ----------------------------------------------------------------- helpers
-    @staticmethod
-    def _latest_decisions(result: PipelineResult) -> dict[str, ConfidenceDecision]:
-        latest: dict[str, ConfidenceDecision] = {}
-        for decision in result.decisions:
-            latest[decision.event_id] = decision
-        return latest
-
     def _trail(self, history: list[TrackPoint]) -> list[ObservatoryPoint]:
         recent = history[-TRAIL_POINTS:]
         return [
@@ -457,28 +469,25 @@ class ObservatoryRun:
     def _item_view(
         self,
         item: ItemTrack,
-        pending: dict[str, RetailEvent],
-        latest_decision: dict[str, ConfidenceDecision],
+        decisions: list[tuple[ConfidenceDecision, RetailEvent]],
     ) -> ObservatoryItem:
         catalog = self._catalog.get(item.epc.value)
         gtin = item.gtin or (catalog.gtin if catalog else None)
         product = self._products.get(gtin) if gtin else None
-        pending_view: ObservatoryDecision | None = None
-        for event in pending.values():
-            if event.epc == item.epc:
-                decision = latest_decision.get(event.event_id)
-                if decision is not None:
-                    pending_view = ObservatoryDecision(
-                        event_id=event.event_id,
-                        event_type=event.event_type.value,
-                        decision=decision.decision.value,
-                        confidence=decision.confidence,
-                        margin=decision.margin,
-                        waited_s=decision.waited_seconds,
-                        reason=decision.reason,
-                        at_s=_seconds(decision.evaluated_at),
-                    )
-                break
+        decision_view: ObservatoryDecision | None = None
+        latest = _episode_decision(item, decisions)
+        if latest is not None:
+            decision, event = latest
+            decision_view = ObservatoryDecision(
+                event_id=event.event_id,
+                event_type=event.event_type.value,
+                decision=decision.decision.value,
+                confidence=decision.confidence,
+                margin=decision.margin,
+                waited_s=decision.waited_seconds,
+                reason=decision.reason,
+                at_s=_seconds(decision.evaluated_at),
+            )
         return ObservatoryItem(
             epc=item.epc.value,
             short_epc=short_epc(item.epc.value),
@@ -497,14 +506,11 @@ class ObservatoryRun:
             last_seen_s=seconds_since_epoch(item.last_seen_at),
             observation_count=item.observation_count,
             candidates=self._candidates(item.epc),
-            pending=pending_view,
+            decision=decision_view,
             trail=self._trail(item.history),
         )
 
-    def _cart_view(
-        self, cart: Cart, sessions_by_track: dict[str, ShopperSession]
-    ) -> ObservatoryCart:
-        session = sessions_by_track.get(cart.shopper_track_id)
+    def _cart_view(self, cart: Cart, session_id: str | None) -> ObservatoryCart:
         lines = []
         for line in cart.lines.values():
             product = self._products.get(line.gtin) if line.gtin else None
@@ -523,7 +529,7 @@ class ObservatoryRun:
         return ObservatoryCart(
             cart_id=cart.cart_id,
             shopper_track_id=cart.shopper_track_id,
-            session_id=session.session_id if session else None,
+            session_id=session_id,
             status=cart.status.value,
             exited_s=seconds_since_epoch(cart.exited_at),
             lines=lines,
@@ -540,6 +546,83 @@ class ObservatoryRun:
             entry_boundary_id=session.entry_boundary_id,
             exit_boundary_id=session.exit_boundary_id,
         )
+
+
+def _decisions_with_proposals(
+    result: PipelineResult,
+) -> list[tuple[ConfidenceDecision, RetailEvent]]:
+    """Pair every decision with the proposal that was current when it was evaluated.
+
+    Fusion re-proposes a deterministic event id while it WAITs, possibly with a
+    different top shopper as evidence evolves; a decision must be shown with the
+    attribution it actually judged, never with the final one.
+    """
+    proposals: dict[str, list[RetailEvent]] = {}
+    for event in result.proposed_events:
+        proposals.setdefault(event.event_id, []).append(event)
+    paired: list[tuple[ConfidenceDecision, RetailEvent]] = []
+    for decision in result.decisions:
+        current: RetailEvent | None = None
+        for event in proposals.get(decision.event_id, []):
+            if event.timestamp <= decision.evaluated_at:
+                current = event
+            else:
+                break
+        if current is not None:
+            paired.append((decision, current))
+    return paired
+
+
+def _episode_decision(
+    item: ItemTrack, decisions: list[tuple[ConfidenceDecision, RetailEvent]]
+) -> tuple[ConfidenceDecision, RetailEvent] | None:
+    """Latest decision about this EPC within its current episode (movement or rest)."""
+    since = item.movement_start_at or item.state_since
+    latest: tuple[ConfidenceDecision, RetailEvent] | None = None
+    for decision, event in decisions:
+        if event.epc != item.epc:
+            continue
+        if since is not None and event.timestamp < since:
+            continue
+        if latest is None or decision.evaluated_at >= latest[0].evaluated_at:
+            latest = (decision, event)
+    return latest
+
+
+def _cart_sessions(result: PipelineResult) -> dict[str, str]:
+    """Cart id -> session id.
+
+    The pipeline records the session each cart was committed under. A cart that has
+    not committed anything yet (or one from a lifecycle the pipeline never mapped)
+    falls back to the shopper's session that was open when the cart was current: the
+    n-th cart of a track belongs to the n-th session of that track.
+    """
+    mapping = dict(result.cart_sessions)
+    by_track: dict[str, list[ShopperSession]] = {}
+    for session in result.sessions:
+        by_track.setdefault(session.person_track_id, []).append(session)
+    for sessions in by_track.values():
+        sessions.sort(key=lambda s: s.entered_at)
+    carts_by_track: dict[str, list[Cart]] = {}
+    for cart in result.cart_state.carts.values():
+        carts_by_track.setdefault(cart.shopper_track_id, []).append(cart)
+    for track_id, carts in carts_by_track.items():
+        carts.sort(key=_cart_ordinal)
+        sessions = by_track.get(track_id, [])
+        for index, cart in enumerate(carts):
+            if cart.cart_id in mapping:
+                continue
+            if index < len(sessions):
+                mapping[cart.cart_id] = sessions[index].session_id
+            elif sessions:
+                mapping[cart.cart_id] = sessions[-1].session_id
+    return mapping
+
+
+def _cart_ordinal(cart: Cart) -> int:
+    """'<track>' is lifecycle 0, '<track>#<n>' is lifecycle n."""
+    _, _, suffix = cart.cart_id.partition("#")
+    return int(suffix) if suffix.isdigit() else 0
 
 
 def _candidate_view(candidate: CandidateScore) -> ObservatoryCandidate:

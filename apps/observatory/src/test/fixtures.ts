@@ -93,7 +93,7 @@ export function item(overrides: Partial<Item> = {}): Item {
     last_seen_s: 4,
     observation_count: 8,
     candidates: [],
-    pending: null,
+    decision: null,
     trail: [],
     ...overrides,
   };
@@ -174,6 +174,7 @@ export function installFakeApi() {
   let time = 0;
   let steps = 0;
   const calls: string[] = [];
+  const failures = new Set<string>();
   const state = (): RunState =>
     runState({
       time_s: time,
@@ -216,6 +217,9 @@ export function installFakeApi() {
     const url = new URL(String(input), "http://localhost");
     const method = init?.method ?? "GET";
     calls.push(`${method} ${url.pathname}`);
+    if (failures.delete(`${method} ${url.pathname}`)) {
+      return new Response(JSON.stringify({ detail: "injected failure" }), { status: 500, headers: { "Content-Type": "application/json" } });
+    }
     const route = routes.find(([pattern, verb]) => verb === method && pattern.test(url.pathname));
     if (!route) {
       return new Response(JSON.stringify({ detail: `no route ${method} ${url.pathname}` }), { status: 404, headers: { "Content-Type": "application/json" } });
@@ -229,6 +233,8 @@ export function installFakeApi() {
   return {
     calls,
     time: () => time,
+    /** Make the next request matching "METHOD /path" fail with 500. */
+    failNext: (route: string) => failures.add(route),
     restore: () => {
       globalThis.fetch = original;
     },

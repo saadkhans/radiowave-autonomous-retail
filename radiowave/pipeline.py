@@ -63,6 +63,9 @@ class PipelineResult(ContractModel):
     person_tracks: list[PersonTrack] = Field(default_factory=list)
     item_tracks: list[ItemTrack] = Field(default_factory=list)
     sessions: list[ShopperSession] = Field(default_factory=list)
+    cart_sessions: dict[str, str] = Field(
+        default_factory=dict, description="Cart id -> session id the cart was committed under"
+    )
     observations_accepted: int = 0
     observations_dropped: int = 0
     observations_out_of_order: int = 0
@@ -257,10 +260,16 @@ class FoundationPipeline:
             return False
         return sensor.modality == observation.source_type
 
-    def finish(self) -> PipelineResult:
-        """Run one final fusion step after the last observation and return the result."""
+    def finish(self, *, advance: bool = True) -> PipelineResult:
+        """Finalize the run and return the result.
+
+        By default one last fusion step runs after the last observation. A driver that
+        has already stepped the clock through the end of the run (``advance_to``) passes
+        ``advance=False`` so nothing is evaluated past the advertised duration.
+        """
         if self._next_step is not None:
-            self._step(self._next_step)
+            if advance:
+                self._step(self._next_step)
             self._next_step = None
         stamp = self._scheduled[0][0] if self._scheduled else self._first_input_at
         if stamp is not None:
@@ -428,6 +437,7 @@ class FoundationPipeline:
             person_tracks=self.fusion.person_tracks(),
             item_tracks=self.fusion.item_tracks(),
             sessions=[*self.fusion.session_history, *self.fusion.sessions.values()],
+            cart_sessions=dict(self._cart_session),
             observations_accepted=self.dedup.accepted,
             observations_dropped=self.dedup.dropped,
             observations_out_of_order=self.observations_out_of_order,

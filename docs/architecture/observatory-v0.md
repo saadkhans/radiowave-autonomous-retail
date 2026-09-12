@@ -41,6 +41,13 @@ pre-generated observation list for its scenario:
   run and advances from t = 0. Two runs of the same scenario advanced to the same
   time produce identical state and event streams whatever the step sizes were
   (`tests/api/test_observatory_api.py`).
+* Finalization calls `pipeline.finish(advance=False)`: the clock has already
+  stepped through the duration, so nothing is evaluated past the advertised end.
+* Every mutation and snapshot of one run holds the run's lock; FastAPI serves
+  sync handlers from worker threads and concurrent clients must not interleave.
+* Scenarios flagged `duplicate_observation_stream` (scenario 10) are fed
+  `runner.scenario_observation_stream()`, i.e. every observation twice, so the
+  dropped-duplicate counter shows the idempotency the scenario exists to prove.
 
 The browser never advances the clock itself. While playing, a 200 ms wall-clock
 interval asks the API for `speed × 0.2 s` of simulated time and re-renders the
@@ -61,6 +68,18 @@ counters) capped to the last 40 trail points per entity. Events are served as a
 single chronological stream (`/events?since=<seq>`) that merges person-track
 creation, item state transitions, retail decisions and session lifecycle, so
 the UI never keeps its own copy of pipeline history.
+
+Two derivations deserve a note:
+
+* Each retail decision row is paired with the proposal that was current when it
+  was evaluated (`_decisions_with_proposals`). Fusion re-proposes a WAITing event
+  id as evidence evolves, possibly with a different top shopper; the history must
+  show what was judged, not the final attribution.
+* `Item.decision` is the latest decision for the item's current episode
+  (movement start, or rest start), so a COMMIT or REVIEW stays inspectable after
+  the event leaves the pipeline's pending set.
+* Carts map to sessions through the pipeline's `cart_sessions` record, falling
+  back to the n-th session of the track for a cart that never committed.
 
 ## Rendering rules
 

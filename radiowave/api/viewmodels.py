@@ -163,7 +163,10 @@ class ObservatoryItem(ViewModel):
     last_seen_s: float | None
     observation_count: int
     candidates: list[ObservatoryCandidate] = Field(default_factory=list)
-    pending: ObservatoryDecision | None = None
+    decision: ObservatoryDecision | None = Field(
+        default=None,
+        description="Latest COMMIT / WAIT / REVIEW decision for the item's current episode",
+    )
     trail: list[ObservatoryPoint] = Field(default_factory=list)
 
 
@@ -287,7 +290,9 @@ class ObservatoryTimeline(ViewModel):
 
 class RunCreateRequest(ViewModel):
     scenario_id: str
-    seed: int | None = None
+    seed: int | None = Field(
+        default=None, ge=0, le=2**32 - 1, description="Override the scenario seed (numpy range)"
+    )
 
 
 class AdvanceRequest(ViewModel):

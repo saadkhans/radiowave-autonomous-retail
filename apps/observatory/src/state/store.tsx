@@ -90,6 +90,7 @@ export type Action =
   | { type: "scenarios"; scenarios: ScenarioSummary[] }
   | { type: "scenario"; scenarioId: string; scenario: ScenarioDetail | null }
   | { type: "run"; run: RunState | null }
+  | { type: "snapshot"; run: RunState; events: ObservatoryEvent[]; timeline: Timeline }
   | { type: "events"; events: ObservatoryEvent[] }
   | { type: "timeline"; timeline: Timeline | null }
   | { type: "playing"; playing: boolean }
@@ -119,6 +120,8 @@ export function reducer(state: ObservatoryState, action: Action): ObservatorySta
       };
     case "run":
       return { ...state, run: action.run };
+    case "snapshot":
+      return { ...state, run: action.run, events: action.events, timeline: action.timeline };
     case "events":
       return { ...state, events: action.events };
     case "timeline":
@@ -173,15 +176,15 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
   const speedRef = useRef(state.speed);
   speedRef.current = state.speed;
 
+  // Run state, events and timeline are published together so the map, carts and
+  // event stream never show snapshots from different simulated times.
   const applyRun = useCallback(async (run: RunState) => {
-    dispatch({ type: "run", run });
     const [page, timeline] = await Promise.all([
       api.getEvents(run.run_id),
       api.getTimeline(run.run_id),
     ]);
     if (runIdRef.current !== run.run_id) return;
-    dispatch({ type: "events", events: page.events });
-    dispatch({ type: "timeline", timeline });
+    dispatch({ type: "snapshot", run, events: page.events, timeline });
   }, []);
 
   const guarded = useCallback(
@@ -220,8 +223,11 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // A selection is ignored while a request is in flight (the selector is also
+  // disabled), so a run snapshot can never land under a newer scenario.
   const selectScenario = useCallback(
     async (scenarioId: string) => {
+      if (inflightRef.current) return;
       runIdRef.current = null;
       dispatch({ type: "scenario", scenarioId, scenario: null });
       await guarded(async () => {

@@ -1,6 +1,6 @@
 import { decisionColor, featureLabel, fmtMeters, fmtScore, fmtSeconds, itemColor, personColor } from "@/lib/format";
 import { useActions, useObservatory } from "@/state/store";
-import type { Item, PendingDecision, Person } from "@/types/api";
+import type { Item, ItemDecision, Person } from "@/types/api";
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -11,7 +11,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
-function DecisionBlock({ pending }: { pending: PendingDecision }) {
+function DecisionBlock({ pending }: { pending: ItemDecision }) {
   return (
     <div
       className="mt-2 rounded border px-2 py-1.5"
@@ -162,7 +162,7 @@ function ItemDetails({ item }: { item: Item }) {
           )}
         </Row>
       </dl>
-      {item.pending ? <DecisionBlock pending={item.pending} /> : null}
+      {item.decision ? <DecisionBlock pending={item.decision} /> : null}
       <div className="panel-title mb-1 mt-3">Candidate ranking</div>
       {item.candidates.length === 0 ? (
         <div className="mono text-[11px] text-console-muted">no candidates</div>
