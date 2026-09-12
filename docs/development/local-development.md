@@ -8,7 +8,8 @@ Using `uv` (recommended):
 
 ```sh
 uv venv .venv --python 3.12
-uv pip install -e ".[dev]"
+uv pip install -e ".[dev,api]"
+pnpm install            # Observatory frontend workspace (apps/observatory)
 ```
 
 Using `pip`:
@@ -20,7 +21,7 @@ python -m venv .venv
 # POSIX
 source .venv/bin/activate
 
-pip install -e ".[dev]"
+pip install -e ".[dev,api]"
 ```
 
 ## Running checks
@@ -29,11 +30,14 @@ All checks are exposed as `pnpm` scripts (see `package.json`); `pnpm` itself has
 dependencies to install for this project — it only wraps the Python-based checks below.
 
 ```sh
-pnpm run lint         # ruff check .
-pnpm run typecheck    # mypy radiowave scripts
-pnpm run test         # pytest
-pnpm run build        # compileall radiowave scripts + JSON schema drift check
+pnpm run lint         # ruff check . && eslint (apps/observatory)
+pnpm run typecheck    # mypy radiowave scripts && tsc -b (apps/observatory)
+pnpm run test         # pytest && vitest (apps/observatory)
+pnpm run build        # compileall + JSON schema drift check + vite build
 pnpm run security:secrets   # gitleaks detect --source . --no-banner
+pnpm run dev          # Observatory: API (uvicorn :8765) + Vite (:5173) side by side
+pnpm run dev:api      # API only
+pnpm run dev:observatory   # frontend only
 ```
 
 Run a single test file or targeted test directly with pytest, without going through `pnpm`:

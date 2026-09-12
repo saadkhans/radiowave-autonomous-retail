@@ -292,6 +292,17 @@ class FoundationPipeline:
         self._record(first, EntryKind.PIPELINE_CONFIG, self.config.model_dump(mode="json"))
         self._twin_recorded = True
 
+    def advance_to(self, timestamp: datetime) -> None:
+        """Run fusion steps up to ``timestamp`` without any observation.
+
+        Lets an interactive driver (replay console, tests) move simulated time through
+        an observation-free interval such as a sensor dropout. Time never moves backwards.
+        """
+        if self._last_timestamp is not None and timestamp < self._last_timestamp:
+            return
+        self._last_timestamp = timestamp
+        self._advance_to(timestamp)
+
     def _advance_to(self, timestamp: datetime) -> None:
         step = timedelta(seconds=self.config.step_interval_s)
         if self._next_step is None:
