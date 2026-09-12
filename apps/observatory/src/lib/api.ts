@@ -3,6 +3,7 @@ import type {
   RunState,
   ScenarioDetail,
   ScenarioSummary,
+  Snapshot,
   Timeline,
 } from "@/types/api";
 
@@ -55,6 +56,7 @@ export const api = {
   getEvents: (runId: string, since = 0, limit = 5000) =>
     request<EventPage>(`/runs/${runId}/events?since=${since}&limit=${limit}`),
   getTimeline: (runId: string) => request<Timeline>(`/runs/${runId}/timeline`),
+  getSnapshot: (runId: string) => request<Snapshot>(`/runs/${runId}/snapshot`),
 };
 
 export type Api = typeof api;

@@ -176,15 +176,18 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
   const speedRef = useRef(state.speed);
   speedRef.current = state.speed;
 
-  // Run state, events and timeline are published together so the map, carts and
-  // event stream never show snapshots from different simulated times.
+  // After a mutation the UI publishes one atomic snapshot (state, events and
+  // timeline captured under the run's lock at one revision), never three
+  // independently fetched pieces that another client could have interleaved.
   const applyRun = useCallback(async (run: RunState) => {
-    const [page, timeline] = await Promise.all([
-      api.getEvents(run.run_id),
-      api.getTimeline(run.run_id),
-    ]);
+    const snapshot = await api.getSnapshot(run.run_id);
     if (runIdRef.current !== run.run_id) return;
-    dispatch({ type: "snapshot", run, events: page.events, timeline });
+    dispatch({
+      type: "snapshot",
+      run: snapshot.state,
+      events: snapshot.events.events,
+      timeline: snapshot.timeline,
+    });
   }, []);
 
   const guarded = useCallback(

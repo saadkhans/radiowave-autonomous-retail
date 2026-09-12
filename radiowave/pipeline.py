@@ -21,7 +21,7 @@ from pydantic import Field
 from radiowave.cart.engine import InMemoryCartEngine
 from radiowave.cart.models import CartState
 from radiowave.confidence.engine import ThresholdConfidenceEngine
-from radiowave.contracts._base import ContractModel, FrozenModel
+from radiowave.contracts._base import ContractModel, FrozenModel, ensure_utc
 from radiowave.contracts.confidence import ConfidenceDecision, ConfidenceThresholds, Decision
 from radiowave.contracts.events import CartEvent, RetailEvent
 from radiowave.contracts.observations import AnyObservation, SensorObservation
@@ -318,6 +318,7 @@ class FoundationPipeline:
         Lets an interactive driver (replay console, tests) move simulated time through
         an observation-free interval such as a sensor dropout. Time never moves backwards.
         """
+        timestamp = ensure_utc(timestamp)  # naive clocks are rejected, offsets normalized
         if self._last_timestamp is not None and timestamp < self._last_timestamp:
             return
         self._last_timestamp = timestamp

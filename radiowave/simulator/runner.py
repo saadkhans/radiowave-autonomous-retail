@@ -80,5 +80,5 @@ def run_scenario(
     generator_config: GeneratorConfig | None = None,
     recorder: Recorder | None = None,
 ) -> PipelineResult:
-    observations = scenario_observations(scenario, generator_config)
+    observations = scenario_observation_stream(scenario, generator_config)
     return run_observations(scenario, observations, pipeline_config, recorder)

@@ -254,6 +254,9 @@ class ObservatoryScenarioDetail(ObservatoryScenarioSummary):
 
 class ObservatoryRunState(ViewModel):
     run_id: str
+    revision: int = Field(
+        ge=0, description="Incremented by every mutation; equal across one atomic snapshot"
+    )
     scenario_id: str
     scenario_name: str
     seed: int
@@ -308,3 +311,11 @@ class ObservatoryEventPage(ViewModel):
     events: list[ObservatoryEvent]
     next_seq: int
     total: int
+
+
+class ObservatorySnapshot(ViewModel):
+    """State, events and timeline captured under one lock at one revision."""
+
+    state: ObservatoryRunState
+    events: ObservatoryEventPage
+    timeline: ObservatoryTimeline

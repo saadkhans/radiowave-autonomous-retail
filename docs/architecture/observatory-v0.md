@@ -47,7 +47,12 @@ pre-generated observation list for its scenario:
   a final partial interval) is evaluated once more at the duration itself.
 * Every mutating route runs `ObservatoryRun.apply(operation)`, which performs the
   mutation and takes the snapshot under one lock; FastAPI serves sync handlers
-  from worker threads and a response must describe its own request.
+  from worker threads and a response must describe its own request. Each
+  mutation bumps `revision`, and `GET /runs/{id}/snapshot` returns state, the
+  full event stream and the timeline captured together under that lock. The UI
+  publishes only such snapshots, never three independently fetched pieces.
+* `FoundationPipeline.advance_to()` normalizes its clock through the same
+  `ensure_utc` rule as every contract: naive timestamps are rejected.
 * Scenarios flagged `duplicate_observation_stream` (scenario 10) are fed
   `runner.scenario_observation_stream()`, i.e. every observation twice, so the
   dropped-duplicate counter shows the idempotency the scenario exists to prove.

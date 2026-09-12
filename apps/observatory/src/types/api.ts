@@ -239,6 +239,8 @@ export interface ScenarioDetail extends ScenarioSummary {
 
 export interface RunState {
   run_id: string;
+  /** Incremented by every mutation; equal across one atomic snapshot. */
+  revision: number;
   scenario_id: string;
   scenario_name: string;
   seed: number;
@@ -271,6 +273,13 @@ export interface Timeline {
   duration_s: number;
   markers: TimelineMarker[];
   ground_truth: GroundTruth[];
+}
+
+/** State, events and timeline captured under one lock at one revision. */
+export interface Snapshot {
+  state: RunState;
+  events: EventPage;
+  timeline: Timeline;
 }
 
 export interface EventPage {

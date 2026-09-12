@@ -102,6 +102,7 @@ export function item(overrides: Partial<Item> = {}): Item {
 export function runState(overrides: Partial<RunState> = {}): RunState {
   return {
     run_id: "run-0001",
+    revision: 0,
     scenario_id: "01",
     scenario_name: "one shopper picks one item",
     seed: 7,
@@ -212,6 +213,7 @@ export function installFakeApi() {
     [/^\/api\/runs\/run-0001\/state$/, "GET", () => state()],
     [/^\/api\/runs\/run-0001\/events$/, "GET", () => events()],
     [/^\/api\/runs\/run-0001\/timeline$/, "GET", () => timeline({ time_s: time })],
+    [/^\/api\/runs\/run-0001\/snapshot$/, "GET", () => ({ state: state(), events: events(), timeline: timeline({ time_s: time }) })],
   ];
 
   const fetchMock = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {

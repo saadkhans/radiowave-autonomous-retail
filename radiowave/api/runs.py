@@ -23,6 +23,7 @@ from radiowave.api.viewmodels import (
     ObservatoryCounters,
     ObservatoryDecision,
     ObservatoryEvent,
+    ObservatoryEventPage,
     ObservatoryFeature,
     ObservatoryFixture,
     ObservatoryGroundTruth,
@@ -35,6 +36,7 @@ from radiowave.api.viewmodels import (
     ObservatoryScenarioSummary,
     ObservatorySensor,
     ObservatorySession,
+    ObservatorySnapshot,
     ObservatoryStore,
     ObservatoryTimeline,
     ObservatoryTimelineMarker,
@@ -212,6 +214,7 @@ class ObservatoryRun:
         self.cursor = 0
         self.time_s = 0.0
         self.finished = False
+        self.revision = 0
         self.reset()
 
     # ----------------------------------------------------------------- control
@@ -221,6 +224,7 @@ class ObservatoryRun:
             self.cursor = 0
             self.time_s = 0.0
             self.finished = False
+            self.revision += 1
 
     @property
     def step_interval_s(self) -> float:
@@ -245,6 +249,7 @@ class ObservatoryRun:
                 self.cursor += 1
             self.pipeline.advance_to(target_at)
             self.time_s = round(target, 6)
+            self.revision += 1
             if self.time_s >= self.duration_s and self.cursor >= len(self.observations):
                 # The clock already stepped through the duration; finalize carts and
                 # sessions without evaluating anything past the advertised end.
@@ -253,6 +258,18 @@ class ObservatoryRun:
 
     def step(self) -> None:
         self.advance(self.step_interval_s)
+
+    def snapshot(self) -> ObservatorySnapshot:
+        """State, full event stream and timeline captured under one lock."""
+        with self._lock:
+            events = self._events()
+            return ObservatorySnapshot(
+                state=self._state(),
+                events=ObservatoryEventPage(
+                    run_id=self.run_id, events=events, next_seq=len(events), total=len(events)
+                ),
+                timeline=self._timeline(),
+            )
 
     def apply(self, operation: Callable[[], None]) -> ObservatoryRunState:
         """Run one mutation and snapshot the result under the same lock.
@@ -299,6 +316,7 @@ class ObservatoryRun:
         items = [self._item_view(i, decisions) for i in result.item_tracks]
         return ObservatoryRunState(
             run_id=self.run_id,
+            revision=self.revision,
             scenario_id=self.scenario.scenario_id,
             scenario_name=self.scenario.name,
             seed=self.scenario.seed,
@@ -695,11 +713,13 @@ class RunManager:
         return run
 
     def get(self, run_id: str) -> ObservatoryRun | None:
-        return self._runs.get(run_id)
+        with self._lock:
+            return self._runs.get(run_id)
 
     def delete(self, run_id: str) -> bool:
         with self._lock:
             return self._runs.pop(run_id, None) is not None
 
     def ids(self) -> list[str]:
-        return sorted(self._runs)
+        with self._lock:
+            return sorted(self._runs)

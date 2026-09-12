@@ -37,7 +37,8 @@ def _create(client: TestClient, scenario_id: str = "01", **body: object) -> dict
 
 
 def _strip_run_id(state: dict) -> dict:
-    return {key: value for key, value in state.items() if key != "run_id"}
+    """Replay state without per-run metadata (id, mutation counter)."""
+    return {key: value for key, value in state.items() if key not in {"run_id", "revision"}}
 
 
 def _at(seconds: float):
@@ -287,3 +288,63 @@ def test_each_mutation_returns_its_own_snapshot(client: TestClient) -> None:
         responses = list(pool.map(lambda _: client.post(f"/api/runs/{run_id}/step"), range(40)))
     times = sorted(round(response.json()["time_s"], 6) for response in responses)
     assert times == [round((i + 1) * interval, 6) for i in range(40)]
+
+
+# --- round 3: atomic snapshot, canonical scenario stream, UTC clock, listing lock ------
+
+
+def test_snapshot_is_one_consistent_revision(client: TestClient) -> None:
+    run = _create(client)
+    run_id = run["run_id"]
+    assert run["revision"] >= 1
+    advanced = client.post(f"/api/runs/{run_id}/advance", json={"seconds": 9}).json()
+    assert advanced["revision"] == run["revision"] + 1
+    snapshot = client.get(f"/api/runs/{run_id}/snapshot").json()
+    assert snapshot["state"] == client.get(f"/api/runs/{run_id}/state").json()
+    assert snapshot["events"]["events"] == client.get(f"/api/runs/{run_id}/events").json()["events"]
+    assert snapshot["timeline"] == client.get(f"/api/runs/{run_id}/timeline").json()
+    assert snapshot["state"]["revision"] == advanced["revision"]
+    assert snapshot["events"]["total"] == snapshot["state"]["events_total"]
+    assert client.get("/api/runs/run-9999/snapshot").status_code == 404
+
+
+def test_run_scenario_feeds_scenario_10_twice() -> None:
+    from radiowave.simulator.library import load_scenario
+    from radiowave.simulator.runner import run_scenario
+
+    doubled = run_scenario(load_scenario("10"))
+    baseline = run_scenario(load_scenario("01"))
+    assert doubled.observations_dropped == baseline.observations_accepted
+    assert doubled.observations_accepted == baseline.observations_accepted
+    assert [e.event_type for e in doubled.committed_events] == [
+        e.event_type for e in baseline.committed_events
+    ]
+
+
+def test_advance_to_rejects_naive_and_normalizes_offsets() -> None:
+    from datetime import datetime, timezone
+
+    from radiowave.simulator.library import load_scenario
+    from radiowave.simulator.runner import build_pipeline
+
+    pipeline = build_pipeline(load_scenario("01"))
+    with pytest.raises(ValueError, match="timezone-aware"):
+        pipeline.advance_to(datetime(2026, 1, 1, 0, 0, 5))
+    plus_two = timezone(timedelta(hours=2))
+    pipeline.advance_to(datetime(2026, 1, 1, 2, 0, 5, tzinfo=plus_two))
+    assert pipeline._last_timestamp == _at(5.0)
+    assert pipeline._last_timestamp.tzinfo is not None
+
+
+def test_listing_runs_while_creating_and_deleting_never_fails(client: TestClient) -> None:
+    def churn(index: int) -> int:
+        if index % 3 == 0:
+            return client.get("/api/runs").status_code
+        created = client.post("/api/runs", json={"scenario_id": "01"})
+        if index % 3 == 2:
+            client.delete(f"/api/runs/{created.json()['run_id']}")
+        return created.status_code
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        codes = list(pool.map(churn, range(60)))
+    assert set(codes) <= {200, 201}

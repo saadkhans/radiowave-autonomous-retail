@@ -25,7 +25,8 @@ def _create(client: TestClient, scenario_id: str = "01") -> dict:
 
 
 def _strip_run_id(state: dict) -> dict:
-    return {key: value for key, value in state.items() if key != "run_id"}
+    """Replay state without per-run metadata (id, mutation counter)."""
+    return {key: value for key, value in state.items() if key not in {"run_id", "revision"}}
 
 
 def test_health(client: TestClient) -> None:

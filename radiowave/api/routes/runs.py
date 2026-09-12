@@ -9,6 +9,7 @@ from radiowave.api.viewmodels import (
     AdvanceRequest,
     ObservatoryEventPage,
     ObservatoryRunState,
+    ObservatorySnapshot,
     ObservatoryStore,
     ObservatoryTimeline,
     RunCreateRequest,
@@ -52,6 +53,12 @@ def delete_run(request: Request, run_id: str) -> None:
 @router.get("/runs/{run_id}/state", response_model=ObservatoryRunState)
 def get_state(request: Request, run_id: str) -> ObservatoryRunState:
     return _run(request, run_id).state()
+
+
+@router.get("/runs/{run_id}/snapshot", response_model=ObservatorySnapshot)
+def get_snapshot(request: Request, run_id: str) -> ObservatorySnapshot:
+    """State, events and timeline at one revision, captured under the run's lock."""
+    return _run(request, run_id).snapshot()
 
 
 @router.get("/runs/{run_id}/store", response_model=ObservatoryStore)
