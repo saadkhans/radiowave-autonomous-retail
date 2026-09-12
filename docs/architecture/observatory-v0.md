@@ -48,9 +48,10 @@ pre-generated observation list for its scenario:
 * Every mutating route runs `ObservatoryRun.apply(operation)`, which performs the
   mutation and takes the snapshot under one lock; FastAPI serves sync handlers
   from worker threads and a response must describe its own request. Each
-  mutation bumps `revision`, and `GET /runs/{id}/snapshot` returns state, the
-  full event stream and the timeline captured together under that lock. The UI
-  publishes only such snapshots, never three independently fetched pieces.
+  mutation bumps `revision` and returns the complete snapshot (state, the full
+  event stream and the timeline) captured under that same lock; `GET
+  /runs/{id}/snapshot` serves the same shape for a fresh read. The UI publishes
+  only such snapshots, never independently fetched pieces.
 * `FoundationPipeline.advance_to()` normalizes its clock through the same
   `ensure_utc` rule as every contract: naive timestamps are rejected.
 * Scenarios flagged `duplicate_observation_stream` (scenario 10) are fed
@@ -100,8 +101,10 @@ Two derivations deserve a note:
 * A settled carrier gets one solid link. While the decision for an item is still
   WAIT or REVIEW, or no carrier is assigned, every ranked candidate gets a dashed
   link whose weight and opacity follow its score.
-* Item trails are only drawn once the item is off its fixture; on-fixture RFID
-  jitter is noise.
+* Item trails are only drawn once the item is off its fixture and are trimmed to
+  the movement episode (`Item.episode_start_s`, derived from the state machine's
+  transition log so it survives settling as MISPLACED); on-fixture RFID jitter
+  is noise.
 
 ## Not included
 

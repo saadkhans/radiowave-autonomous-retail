@@ -83,7 +83,7 @@ def test_create_run_starts_at_time_zero(client: TestClient) -> None:
 
 def test_step_advances_by_one_interval(client: TestClient) -> None:
     run = _create(client)
-    stepped = client.post(f"/api/runs/{run['run_id']}/step").json()
+    stepped = client.post(f"/api/runs/{run['run_id']}/step").json()["state"]
     assert stepped["time_s"] == pytest.approx(run["step_interval_s"])
     assert stepped["steps"] >= 1
 
@@ -91,7 +91,7 @@ def test_step_advances_by_one_interval(client: TestClient) -> None:
 def test_advance_produces_scenario_01_pick_and_cart(client: TestClient) -> None:
     run = _create(client)
     run_id = run["run_id"]
-    state = client.post(f"/api/runs/{run_id}/advance", json={"seconds": 9}).json()
+    state = client.post(f"/api/runs/{run_id}/advance", json={"seconds": 9}).json()["state"]
     assert state["time_s"] == pytest.approx(9.0)
     assert len(state["persons"]) == 1
     person = state["persons"][0]
@@ -123,7 +123,7 @@ def test_advance_produces_scenario_01_pick_and_cart(client: TestClient) -> None:
 def test_advance_to_end_finishes_run(client: TestClient) -> None:
     run = _create(client)
     run_id = run["run_id"]
-    state = client.post(f"/api/runs/{run_id}/advance", json={"seconds": 3600}).json()
+    state = client.post(f"/api/runs/{run_id}/advance", json={"seconds": 3600}).json()["state"]
     assert state["finished"] is True
     assert state["time_s"] == pytest.approx(state["duration_s"])
     assert state["observations_cursor"] == state["observations_total"]
@@ -143,7 +143,7 @@ def test_reset_returns_to_initial_state(client: TestClient) -> None:
     run = _create(client)
     run_id = run["run_id"]
     client.post(f"/api/runs/{run_id}/advance", json={"seconds": 9})
-    reset = client.post(f"/api/runs/{run_id}/reset").json()
+    reset = client.post(f"/api/runs/{run_id}/reset").json()["state"]
     assert _strip_run_id(reset) == _strip_run_id(run)
     events = client.get(f"/api/runs/{run_id}/events").json()
     assert events["events"] == []
@@ -153,9 +153,9 @@ def test_replay_is_deterministic_across_runs_and_step_sizes(client: TestClient) 
     first = _create(client)["run_id"]
     second = _create(client)["run_id"]
     assert first != second
-    state_a = client.post(f"/api/runs/{first}/advance", json={"seconds": 12}).json()
+    state_a = client.post(f"/api/runs/{first}/advance", json={"seconds": 12}).json()["state"]
     for _ in range(6):
-        state_b = client.post(f"/api/runs/{second}/advance", json={"seconds": 2}).json()
+        state_b = client.post(f"/api/runs/{second}/advance", json={"seconds": 2}).json()["state"]
     assert _strip_run_id(state_a) == _strip_run_id(state_b)
     events_a = client.get(f"/api/runs/{first}/events").json()["events"]
     events_b = client.get(f"/api/runs/{second}/events").json()["events"]
@@ -166,11 +166,11 @@ def test_seek_backwards_replays_from_start(client: TestClient) -> None:
     run = _create(client)
     run_id = run["run_id"]
     client.post(f"/api/runs/{run_id}/advance", json={"seconds": 12})
-    sought = client.post(f"/api/runs/{run_id}/seek", json={"time_s": 5}).json()
+    sought = client.post(f"/api/runs/{run_id}/seek", json={"time_s": 5}).json()["state"]
     assert sought["time_s"] == pytest.approx(5.0)
     assert all(item["state"] == "ON_FIXTURE" for item in sought["items"])
     fresh = _create(client)["run_id"]
-    direct = client.post(f"/api/runs/{fresh}/advance", json={"seconds": 5}).json()
+    direct = client.post(f"/api/runs/{fresh}/advance", json={"seconds": 5}).json()["state"]
     assert _strip_run_id(sought) == _strip_run_id(direct)
 
 
@@ -201,7 +201,7 @@ def test_events_pagination_uses_since_cursor(client: TestClient) -> None:
 
 def test_view_models_use_canonical_identities(client: TestClient) -> None:
     run = _create(client)
-    state = client.post(f"/api/runs/{run['run_id']}/advance", json={"seconds": 9}).json()
+    state = client.post(f"/api/runs/{run['run_id']}/advance", json={"seconds": 9}).json()["state"]
     for person in state["persons"]:
         assert person["track_id"].startswith("P")
         assert isinstance(person["sensor_ids"], list)
@@ -214,7 +214,9 @@ def test_view_models_use_canonical_identities(client: TestClient) -> None:
 @pytest.mark.parametrize("scenario_id", list(SCENARIOS))
 def test_every_scenario_runs_to_completion(client: TestClient, scenario_id: str) -> None:
     run = _create(client, scenario_id)
-    state = client.post(f"/api/runs/{run['run_id']}/advance", json={"seconds": 3600}).json()
+    state = client.post(f"/api/runs/{run['run_id']}/advance", json={"seconds": 3600}).json()[
+        "state"
+    ]
     assert state["finished"] is True
     events = client.get(f"/api/runs/{run['run_id']}/events").json()
     assert events["total"] == len(events["events"])

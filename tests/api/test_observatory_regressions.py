@@ -51,7 +51,7 @@ def _at(seconds: float):
 def test_finished_run_never_evaluates_past_its_duration(client: TestClient) -> None:
     run = _create(client)
     run_id = run["run_id"]
-    state = client.post(f"/api/runs/{run_id}/advance", json={"seconds": 3600}).json()
+    state = client.post(f"/api/runs/{run_id}/advance", json={"seconds": 3600}).json()["state"]
     assert state["finished"] is True
     duration = state["duration_s"]
     events = client.get(f"/api/runs/{run_id}/events").json()["events"]
@@ -72,10 +72,10 @@ def test_finished_run_never_evaluates_past_its_duration(client: TestClient) -> N
 def test_finished_state_matches_incremental_state_at_duration(client: TestClient) -> None:
     first = _create(client)["run_id"]
     second = _create(client)["run_id"]
-    finished = client.post(f"/api/runs/{first}/advance", json={"seconds": 3600}).json()
+    finished = client.post(f"/api/runs/{first}/advance", json={"seconds": 3600}).json()["state"]
     duration = finished["duration_s"]
     for _ in range(int(duration / 2)):
-        stepped = client.post(f"/api/runs/{second}/advance", json={"seconds": 2}).json()
+        stepped = client.post(f"/api/runs/{second}/advance", json={"seconds": 2}).json()["state"]
     assert stepped["finished"] is True
     assert _strip_run_id(finished) == _strip_run_id(stepped)
 
@@ -142,12 +142,14 @@ def test_scenario_10_feeds_duplicates_and_drops_them(client: TestClient) -> None
     baseline = _create(client, "01")
     doubled = _create(client, "10")
     assert doubled["observations_total"] == 2 * baseline["observations_total"]
-    state = client.post(f"/api/runs/{doubled['run_id']}/advance", json={"seconds": 3600}).json()
+    state = client.post(f"/api/runs/{doubled['run_id']}/advance", json={"seconds": 3600}).json()[
+        "state"
+    ]
     assert state["counters"]["dropped_duplicates"] == baseline["observations_total"]
     assert state["counters"]["accepted"] == baseline["observations_total"]
     reference = client.post(
         f"/api/runs/{baseline['run_id']}/advance", json={"seconds": 3600}
-    ).json()
+    ).json()["state"]
     assert [c["lines"] for c in state["carts"]] == [c["lines"] for c in reference["carts"]]
 
 
@@ -156,7 +158,7 @@ def test_scenario_10_feeds_duplicates_and_drops_them(client: TestClient) -> None
 
 def test_item_decision_survives_commit_and_review(client: TestClient) -> None:
     run = _create(client, "01")
-    state = client.post(f"/api/runs/{run['run_id']}/advance", json={"seconds": 8.5}).json()
+    state = client.post(f"/api/runs/{run['run_id']}/advance", json={"seconds": 8.5}).json()["state"]
     carried = next(item for item in state["items"] if item["state"] == "CARRIED")
     assert carried["decision"] is not None
     assert carried["decision"]["decision"] == "COMMIT"
@@ -164,7 +166,9 @@ def test_item_decision_survives_commit_and_review(client: TestClient) -> None:
     assert carried["decision"]["confidence"] >= 0.75
 
     ambiguous = _create(client, "12")
-    end = client.post(f"/api/runs/{ambiguous['run_id']}/advance", json={"seconds": 3600}).json()
+    end = client.post(f"/api/runs/{ambiguous['run_id']}/advance", json={"seconds": 3600}).json()[
+        "state"
+    ]
     reviewed = next(item for item in end["items"] if item["short_epc"] == "00A001")
     assert reviewed["decision"] is not None
     assert reviewed["decision"]["decision"] == "REVIEW"
@@ -199,7 +203,9 @@ def test_carts_follow_their_own_session() -> None:
 
 def test_pipeline_cart_session_mapping_is_exposed(client: TestClient) -> None:
     run = _create(client, "04")
-    state = client.post(f"/api/runs/{run['run_id']}/advance", json={"seconds": 3600}).json()
+    state = client.post(f"/api/runs/{run['run_id']}/advance", json={"seconds": 3600}).json()[
+        "state"
+    ]
     sessions = {s["session_id"]: s for s in state["sessions"]}
     for cart in state["carts"]:
         assert cart["session_id"] in sessions
@@ -230,7 +236,7 @@ def test_concurrent_steps_on_one_run_are_serialized(client: TestClient) -> None:
     reference = _create(client)["run_id"]
     expected = client.post(
         f"/api/runs/{reference}/advance", json={"seconds": 40 * state["step_interval_s"]}
-    ).json()
+    ).json()["state"]
     assert _strip_run_id(state) == _strip_run_id(expected)
 
 
@@ -272,11 +278,11 @@ def test_partial_final_interval_is_evaluated(client: TestClient) -> None:
     interval = run["step_interval_s"]
     # Stop 0.1 s short of a step boundary so the last interval is partial, then finish.
     client.post(f"/api/runs/{run_id}/advance", json={"seconds": run["duration_s"] - interval / 2})
-    state = client.post(f"/api/runs/{run_id}/advance", json={"seconds": 3600}).json()
+    state = client.post(f"/api/runs/{run_id}/advance", json={"seconds": 3600}).json()["state"]
     assert state["finished"] is True
     reference = client.post(
         f"/api/runs/{_create(client, '01')['run_id']}/advance", json={"seconds": 3600}
-    ).json()
+    ).json()["state"]
     assert _strip_run_id(state) == _strip_run_id(reference)
 
 
@@ -286,7 +292,7 @@ def test_each_mutation_returns_its_own_snapshot(client: TestClient) -> None:
     interval = run["step_interval_s"]
     with ThreadPoolExecutor(max_workers=8) as pool:
         responses = list(pool.map(lambda _: client.post(f"/api/runs/{run_id}/step"), range(40)))
-    times = sorted(round(response.json()["time_s"], 6) for response in responses)
+    times = sorted(round(response.json()["state"]["time_s"], 6) for response in responses)
     assert times == [round((i + 1) * interval, 6) for i in range(40)]
 
 
@@ -297,7 +303,7 @@ def test_snapshot_is_one_consistent_revision(client: TestClient) -> None:
     run = _create(client)
     run_id = run["run_id"]
     assert run["revision"] >= 1
-    advanced = client.post(f"/api/runs/{run_id}/advance", json={"seconds": 9}).json()
+    advanced = client.post(f"/api/runs/{run_id}/advance", json={"seconds": 9}).json()["state"]
     assert advanced["revision"] == run["revision"] + 1
     snapshot = client.get(f"/api/runs/{run_id}/snapshot").json()
     assert snapshot["state"] == client.get(f"/api/runs/{run_id}/state").json()
@@ -348,3 +354,35 @@ def test_listing_runs_while_creating_and_deleting_never_fails(client: TestClient
     with ThreadPoolExecutor(max_workers=8) as pool:
         codes = list(pool.map(churn, range(60)))
     assert set(codes) <= {200, 201}
+
+
+# --- round 4: mutations return their own snapshot; settled items keep their episode ---
+
+
+def test_mutation_response_is_its_own_complete_snapshot(client: TestClient) -> None:
+    run = _create(client)
+    run_id = run["run_id"]
+    response = client.post(f"/api/runs/{run_id}/advance", json={"seconds": 9}).json()
+    assert set(response) == {"state", "events", "timeline"}
+    assert response["state"]["revision"] == run["revision"] + 1
+    assert response["events"]["total"] == response["state"]["events_total"]
+    assert response["timeline"]["time_s"] == response["state"]["time_s"]
+    assert response == client.get(f"/api/runs/{run_id}/snapshot").json()
+    for op, body in (("step", None), ("seek", {"time_s": 3}), ("reset", None)):
+        result = client.post(f"/api/runs/{run_id}/{op}", json=body).json()
+        assert set(result) == {"state", "events", "timeline"}
+
+
+def test_misplaced_item_trail_is_trimmed_to_its_movement_episode(client: TestClient) -> None:
+    run = _create(client, "03")
+    end = client.post(f"/api/runs/{run['run_id']}/advance", json={"seconds": 3600}).json()["state"]
+    misplaced = [item for item in end["items"] if item["state"] == "MISPLACED"]
+    assert misplaced, "scenario 03 must leave an item MISPLACED"
+    for item in misplaced:
+        assert item["movement_start_s"] is None
+        assert item["episode_start_s"] is not None
+        assert item["trail"]
+        assert all(point["t_s"] >= item["episode_start_s"] for point in item["trail"])
+    # Items that never left their fixture carry no episode and their full trail.
+    resting = [item for item in end["items"] if item["state"] == "ON_FIXTURE"]
+    assert resting and all(item["episode_start_s"] is None for item in resting)

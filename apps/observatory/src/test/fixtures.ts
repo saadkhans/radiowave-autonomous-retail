@@ -90,6 +90,7 @@ export function item(overrides: Partial<Item> = {}): Item {
     zone_id: "zone-f1",
     carrier_track_id: null,
     movement_start_s: null,
+    episode_start_s: null,
     last_seen_s: 4,
     observation_count: 8,
     candidates: [],
@@ -199,6 +200,7 @@ export function installFakeApi() {
           : [],
     });
   const events = () => ({ run_id: "run-0001", events: EVENTS.filter((entry) => entry.t_s <= time), next_seq: 0, total: 0 });
+  const snapshot = () => ({ state: state(), events: events(), timeline: timeline({ time_s: time }) });
 
   const routes: Array<[RegExp, string, Handler]> = [
     [/^\/api\/health$/, "GET", () => ({ status: "ok", engine: "foundation-v0", version: "0.1.0" })],
@@ -206,14 +208,14 @@ export function installFakeApi() {
     [/^\/api\/scenarios\/01$/, "GET", () => SCENARIO_DETAIL],
     [/^\/api\/scenarios\/12$/, "GET", () => ({ ...SCENARIO_DETAIL, scenario_id: "12", name: "ambiguous two-shopper pickup", description: "Two shoppers reach for the same shirt." })],
     [/^\/api\/runs$/, "POST", () => { time = 0; steps = 0; return state(); }],
-    [/^\/api\/runs\/run-0001\/reset$/, "POST", () => { time = 0; steps = 0; return state(); }],
-    [/^\/api\/runs\/run-0001\/step$/, "POST", () => { time = Math.min(time + 0.25, 18); steps += 1; return state(); }],
-    [/^\/api\/runs\/run-0001\/advance$/, "POST", (_url, init) => { const body = JSON.parse(String(init?.body)) as { seconds: number }; time = Math.min(time + body.seconds, 18); steps += 1; return state(); }],
-    [/^\/api\/runs\/run-0001\/seek$/, "POST", (_url, init) => { const body = JSON.parse(String(init?.body)) as { time_s: number }; time = Math.min(body.time_s, 18); return state(); }],
+    [/^\/api\/runs\/run-0001\/reset$/, "POST", () => { time = 0; steps = 0; return snapshot(); }],
+    [/^\/api\/runs\/run-0001\/step$/, "POST", () => { time = Math.min(time + 0.25, 18); steps += 1; return snapshot(); }],
+    [/^\/api\/runs\/run-0001\/advance$/, "POST", (_url, init) => { const body = JSON.parse(String(init?.body)) as { seconds: number }; time = Math.min(time + body.seconds, 18); steps += 1; return snapshot(); }],
+    [/^\/api\/runs\/run-0001\/seek$/, "POST", (_url, init) => { const body = JSON.parse(String(init?.body)) as { time_s: number }; time = Math.min(body.time_s, 18); return snapshot(); }],
     [/^\/api\/runs\/run-0001\/state$/, "GET", () => state()],
     [/^\/api\/runs\/run-0001\/events$/, "GET", () => events()],
     [/^\/api\/runs\/run-0001\/timeline$/, "GET", () => timeline({ time_s: time })],
-    [/^\/api\/runs\/run-0001\/snapshot$/, "GET", () => ({ state: state(), events: events(), timeline: timeline({ time_s: time }) })],
+    [/^\/api\/runs\/run-0001\/snapshot$/, "GET", () => snapshot()],
   ];
 
   const fetchMock = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {

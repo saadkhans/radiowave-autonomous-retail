@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from threading import Lock, RLock
 
 from radiowave.api.viewmodels import (
@@ -271,15 +271,15 @@ class ObservatoryRun:
                 timeline=self._timeline(),
             )
 
-    def apply(self, operation: Callable[[], None]) -> ObservatoryRunState:
-        """Run one mutation and snapshot the result under the same lock.
+    def apply(self, operation: Callable[[], None]) -> ObservatorySnapshot:
+        """Run one mutation and capture the complete snapshot under the same lock.
 
         A response must describe the request that produced it, never a concurrent
         client's reset or seek that slipped in between the mutation and the snapshot.
         """
         with self._lock:
             operation()
-            return self._state()
+            return self.snapshot()
 
     def seek(self, time_s: float) -> None:
         """Deterministic scrub: rebuild from zero when moving backwards."""
@@ -313,7 +313,11 @@ class ObservatoryRun:
             if item.carrier_track_id and item.state == ItemState.CARRIED:
                 carried.setdefault(item.carrier_track_id, []).append(item.epc.value)
         persons = [self._person_view(p, cart_by_track, carried) for p in result.person_tracks]
-        items = [self._item_view(i, decisions) for i in result.item_tracks]
+        episode_starts = self._episode_starts()
+        items = [
+            self._item_view(i, decisions, episode_starts.get(i.epc.value))
+            for i in result.item_tracks
+        ]
         return ObservatoryRunState(
             run_id=self.run_id,
             revision=self.revision,
@@ -495,11 +499,35 @@ class ObservatoryRun:
             return []
         return [_candidate_view(c) for c in ranking.candidates]
 
+    def _episode_starts(self) -> dict[str, datetime]:
+        """EPC -> when it last left its fixture, from the state machine's transition log.
+
+        ``ItemTrack.movement_start_at`` is cleared once the item settles (MISPLACED, or
+        back ON_FIXTURE), so the trail of a settled item needs the transition log to be
+        trimmed to its movement episode.
+        """
+        starts: dict[str, datetime] = {}
+        for transition in self.pipeline.fusion.transitions:
+            if (
+                transition.from_state == ItemState.ON_FIXTURE
+                and transition.to_state != ItemState.ON_FIXTURE
+            ):
+                starts[transition.epc] = transition.timestamp
+        return starts
+
     def _item_view(
         self,
         item: ItemTrack,
         decisions: list[tuple[ConfidenceDecision, RetailEvent]],
+        left_fixture_at: datetime | None,
     ) -> ObservatoryItem:
+        episode_start = item.movement_start_at or left_fixture_at
+        history = item.history
+        if episode_start is not None and item.state not in (
+            ItemState.ON_FIXTURE,
+            ItemState.UNKNOWN,
+        ):
+            history = [p for p in history if p.timestamp >= episode_start]
         catalog = self._catalog.get(item.epc.value)
         gtin = item.gtin or (catalog.gtin if catalog else None)
         product = self._products.get(gtin) if gtin else None
@@ -532,11 +560,12 @@ class ObservatoryRun:
             zone_id=item.zone_id,
             carrier_track_id=item.carrier_track_id,
             movement_start_s=seconds_since_epoch(item.movement_start_at),
+            episode_start_s=seconds_since_epoch(episode_start),
             last_seen_s=seconds_since_epoch(item.last_seen_at),
             observation_count=item.observation_count,
             candidates=self._candidates(item.epc),
             decision=decision_view,
-            trail=self._trail(item.history),
+            trail=self._trail(history),
         )
 
     def _cart_view(self, cart: Cart, session_id: str | None) -> ObservatoryCart:

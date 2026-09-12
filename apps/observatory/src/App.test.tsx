@@ -63,10 +63,10 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByTestId("sim-clock")).toHaveTextContent("t = 9.00s"));
     const stream = screen.getByTestId("event-stream");
     expect(within(stream).getAllByRole("row").length).toBeGreaterThan(1);
-    fake.failNext("GET /api/runs/run-0001/snapshot");
+    fake.failNext("POST /api/runs/run-0001/reset");
     fireEvent.click(screen.getByRole("button", { name: "Reset" }));
     await screen.findByRole("alert");
-    // The reset response arrived but its events could not be fetched: nothing is published.
+    // The reset failed: no partial state is published.
     expect(screen.getByTestId("sim-clock")).toHaveTextContent("t = 9.00s");
     expect(within(stream).getAllByRole("row").length).toBeGreaterThan(1);
     fireEvent.click(screen.getByRole("button", { name: "Reset" }));

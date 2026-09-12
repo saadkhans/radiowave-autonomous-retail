@@ -79,6 +79,7 @@ export function gridLines(floor: Bounds): { xs: number[]; ys: number[] } {
 
 /** Trail points since the item started moving; earlier points are on-fixture jitter. */
 export function episodeTrail(item: Item): Item["trail"] {
-  const since = item.movement_start_s;
+  // movement_start_s is cleared once the item settles; episode_start_s survives.
+  const since = item.episode_start_s ?? item.movement_start_s;
   return since === null ? item.trail : item.trail.filter((point) => point.t_s >= since);
 }

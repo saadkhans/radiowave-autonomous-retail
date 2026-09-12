@@ -160,6 +160,11 @@ class ObservatoryItem(ViewModel):
     zone_id: str | None
     carrier_track_id: str | None
     movement_start_s: float | None
+    episode_start_s: float | None = Field(
+        default=None,
+        description="When the item last left its fixture; kept after it settles so the"
+        " trail of a MISPLACED/EXITED item still spans its movement episode only",
+    )
     last_seen_s: float | None
     observation_count: int
     candidates: list[ObservatoryCandidate] = Field(default_factory=list)

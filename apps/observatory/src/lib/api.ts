@@ -48,11 +48,12 @@ export const api = {
     post<RunState>("/runs", { scenario_id: scenarioId, seed: seed ?? null }),
   deleteRun: (runId: string) => request<void>(`/runs/${runId}`, { method: "DELETE" }),
   getState: (runId: string) => request<RunState>(`/runs/${runId}/state`),
-  reset: (runId: string) => post<RunState>(`/runs/${runId}/reset`),
-  step: (runId: string) => post<RunState>(`/runs/${runId}/step`),
+  // Mutations return the complete snapshot captured under the run's lock.
+  reset: (runId: string) => post<Snapshot>(`/runs/${runId}/reset`),
+  step: (runId: string) => post<Snapshot>(`/runs/${runId}/step`),
   advance: (runId: string, seconds: number) =>
-    post<RunState>(`/runs/${runId}/advance`, { seconds }),
-  seek: (runId: string, timeS: number) => post<RunState>(`/runs/${runId}/seek`, { time_s: timeS }),
+    post<Snapshot>(`/runs/${runId}/advance`, { seconds }),
+  seek: (runId: string, timeS: number) => post<Snapshot>(`/runs/${runId}/seek`, { time_s: timeS }),
   getEvents: (runId: string, since = 0, limit = 5000) =>
     request<EventPage>(`/runs/${runId}/events?since=${since}&limit=${limit}`),
   getTimeline: (runId: string) => request<Timeline>(`/runs/${runId}/timeline`),

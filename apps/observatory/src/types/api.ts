@@ -145,6 +145,8 @@ export interface Item {
   zone_id: string | null;
   carrier_track_id: string | null;
   movement_start_s: number | null;
+  /** When the item last left its fixture; survives settling as MISPLACED/EXITED. */
+  episode_start_s: number | null;
   last_seen_s: number | null;
   observation_count: number;
   candidates: Candidate[];

@@ -16,6 +16,7 @@ import type {
   RunState,
   ScenarioDetail,
   ScenarioSummary,
+  Snapshot,
   Timeline,
 } from "@/types/api";
 
@@ -176,12 +177,11 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
   const speedRef = useRef(state.speed);
   speedRef.current = state.speed;
 
-  // After a mutation the UI publishes one atomic snapshot (state, events and
-  // timeline captured under the run's lock at one revision), never three
-  // independently fetched pieces that another client could have interleaved.
-  const applyRun = useCallback(async (run: RunState) => {
-    const snapshot = await api.getSnapshot(run.run_id);
-    if (runIdRef.current !== run.run_id) return;
+  // Every mutation returns the complete snapshot (state, events and timeline
+  // captured under the run's lock at one revision); the UI publishes exactly
+  // that, so a response always describes its own request.
+  const applyRun = useCallback((snapshot: Snapshot) => {
+    if (runIdRef.current !== snapshot.state.run_id) return;
     dispatch({
       type: "snapshot",
       run: snapshot.state,
@@ -256,7 +256,7 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
       const run = await api.createRun(scenarioId);
       runIdRef.current = run.run_id;
       dispatch({ type: "select", selection: null });
-      await applyRun(run);
+      applyRun(await api.getSnapshot(run.run_id));
     });
   }, [applyRun, guarded, state.scenarioId]);
 
@@ -307,9 +307,9 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
       if (inflightRef.current) return;
       const seconds = (speedRef.current * TICK_MS) / 1000;
       void guarded(async () => {
-        const run = await api.advance(runId, seconds);
-        await applyRun(run);
-        if (run.finished) dispatch({ type: "playing", playing: false });
+        const snapshot = await api.advance(runId, seconds);
+        applyRun(snapshot);
+        if (snapshot.state.finished) dispatch({ type: "playing", playing: false });
       });
     }, TICK_MS);
     return () => window.clearInterval(handle);

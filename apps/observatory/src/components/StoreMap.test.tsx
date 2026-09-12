@@ -108,6 +108,8 @@ describe("StoreMapView", () => {
     ];
     expect(episodeTrail(item({ trail, movement_start_s: 8 })).map((p) => p.t_s)).toEqual([8, 9]);
     expect(episodeTrail(item({ trail, movement_start_s: null }))).toHaveLength(4);
+    // A settled (MISPLACED) item has no movement_start_s but keeps its episode start.
+    expect(episodeTrail(item({ trail, movement_start_s: null, episode_start_s: 8 })).map((p) => p.t_s)).toEqual([8, 9]);
   });
 
   it("skips items that are not localized", () => {
