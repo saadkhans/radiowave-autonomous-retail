@@ -24,7 +24,7 @@ from radiowave.contracts.store import Store
 from radiowave.digital_twin.registry import StoreRegistry
 from radiowave.pipeline import FoundationPipeline, PipelineConfig, PipelineResult
 from radiowave.replay.clock import ReplayPacer
-from radiowave.replay.reader import observations_from, open_replay_source
+from radiowave.replay.reader import open_replay_source
 from radiowave.replay.recorder import InMemoryRecorder, JsonlRecorder, ParquetRecorder
 from radiowave.simulator.library import SCENARIOS, load_scenario
 from radiowave.simulator.runner import run_scenario
@@ -163,7 +163,14 @@ def cmd_replay(args: argparse.Namespace) -> int:
     entries = itertools.chain(headers, rest)
     if args.step:
         print("step mode: press Enter to release the next observation, q to finish")
+        end_advance = True
         for entry in entries:
+            if entry.kind == EntryKind.CLOCK:
+                pipeline.advance_to(entry.timestamp)  # recorded clock boundary
+                continue
+            if entry.kind == EntryKind.RUN_END:
+                end_advance = bool(entry.payload.get("advance", True))
+                break
             if entry.kind != EntryKind.OBSERVATION:
                 continue
             observation = entry.to_observation()
@@ -175,10 +182,10 @@ def cmd_replay(args: argparse.Namespace) -> int:
             if answer.strip().lower() == "q":
                 break
             pipeline.ingest(observation)  # steps fusion across every boundary it crosses
-        result = pipeline.finish()
+        result = pipeline.finish(advance=end_advance)
     else:
         pacer = ReplayPacer(rate=args.rate) if args.rate > 0 else None
-        result = pipeline.run(observations_from(_paced(entries, pacer)))
+        result = pipeline.replay(_paced(entries, pacer))
     _print_summary(result)
     if (
         result.observations_rejected_unknown_sensor

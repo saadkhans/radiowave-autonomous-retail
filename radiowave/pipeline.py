@@ -184,6 +184,22 @@ class FoundationPipeline:
             self.ingest(observation)
         return self.finish()
 
+    def replay(self, entries: Iterable[RecordedEntry]) -> PipelineResult:
+        """Re-run a recording: observations, explicit clock advances and the run end.
+
+        Header, event, decision and cart entries are outputs of the original run and
+        are skipped; they are regenerated. A recording without a ``RUN_END`` entry
+        finishes the default way.
+        """
+        for entry in entries:
+            if entry.kind == EntryKind.OBSERVATION:
+                self.ingest(entry.to_observation())
+            elif entry.kind == EntryKind.CLOCK:
+                self.advance_to(entry.timestamp)
+            elif entry.kind == EntryKind.RUN_END:
+                return self.finish(advance=bool(entry.payload.get("advance", True)))
+        return self.finish()
+
     def ingest(self, observation: SensorObservation) -> bool:
         """Feed one observation, stepping fusion for every step boundary it crosses.
 
@@ -272,6 +288,9 @@ class FoundationPipeline:
         that arrived after the last step (a sample stamped exactly on the end, or a final
         partial interval) is still evaluated once, at the clock's current time.
         """
+        if self._last_timestamp is not None:
+            self._ensure_header(self._last_timestamp)
+            self._record(self._last_timestamp, EntryKind.RUN_END, {"advance": advance})
         if self._next_step is not None:
             if advance:
                 self._step(self._next_step)
@@ -322,7 +341,12 @@ class FoundationPipeline:
         if self._last_timestamp is not None and timestamp < self._last_timestamp:
             return
         self._last_timestamp = timestamp
+        # The boundary is part of the run's input: a replay must advance the clock
+        # exactly here, or decisions taken during a trailing dropout would differ. It is
+        # recorded after the steps it triggers so the recording stays in timestamp order.
+        self._ensure_header(timestamp)
         self._advance_to(timestamp)
+        self._record(timestamp, EntryKind.CLOCK, {"timestamp": timestamp.isoformat()})
 
     def _advance_to(self, timestamp: datetime) -> None:
         step = timedelta(seconds=self.config.step_interval_s)

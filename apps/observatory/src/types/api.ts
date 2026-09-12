@@ -174,6 +174,16 @@ export interface Cart {
   lines: CartLine[];
 }
 
+export interface Unresolved {
+  epc: string;
+  short_epc: string;
+  gtin: string | null;
+  product_name: string | null;
+  reason: string;
+  source_event_id: string;
+  t_s: number;
+}
+
 export interface Session {
   session_id: string;
   track_id: string;
@@ -243,6 +253,8 @@ export interface RunState {
   run_id: string;
   /** Incremented by every mutation; equal across one atomic snapshot. */
   revision: number;
+  /** Incremented when replay is rebuilt; event sequence numbers live within one epoch. */
+  epoch: number;
   scenario_id: string;
   scenario_name: string;
   seed: number;
@@ -257,6 +269,8 @@ export interface RunState {
   persons: Person[];
   items: Item[];
   carts: Cart[];
+  /** Committed physical events the cart engine could not attribute to a cart. */
+  unresolved: Unresolved[];
   sessions: Session[];
   counters: Counters;
 }
@@ -286,6 +300,7 @@ export interface Snapshot {
 
 export interface EventPage {
   run_id: string;
+  epoch: number;
   events: ObservatoryEvent[];
   next_seq: number;
   total: number;

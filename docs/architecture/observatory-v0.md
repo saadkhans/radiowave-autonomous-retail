@@ -54,7 +54,14 @@ pre-generated observation list for its scenario:
   read. The UI publishes only such snapshots, never independently fetched
   pieces.
 * `FoundationPipeline.advance_to()` normalizes its clock through the same
-  `ensure_utc` rule as every contract: naive timestamps are rejected.
+  `ensure_utc` rule as every contract: naive timestamps are rejected. Every
+  explicit advance is recorded as a `CLOCK` entry and the end of a run as
+  `RUN_END` (with its `advance` flag), and `FoundationPipeline.replay(entries)`
+  (also the CLI `replay` command) honours both, so a recording driven through a
+  trailing dropout replays to the identical result.
+* `reset` (and a backward seek) bumps `epoch`; event sequence numbers are only
+  comparable within one epoch and `GET /events?since=&epoch=` restarts at 0
+  when the epoch is stale.
 * Scenarios flagged `duplicate_observation_stream` (scenario 10) are fed
   `runner.scenario_observation_stream()`, i.e. every observation twice, so the
   dropped-duplicate counter shows the idempotency the scenario exists to prove.
@@ -90,6 +97,9 @@ Two derivations deserve a note:
   the event leaves the pipeline's pending set.
 * Carts map to sessions through the pipeline's `cart_sessions` record, falling
   back to the n-th session of the track for a cart that never committed.
+* `RunState.unresolved` lists committed physical events the cart engine could
+  not attribute (for example a MISPLACE after an unattributed PICK), so every
+  committed event reconciles with either a cart mutation or an exception.
 
 ## Rendering rules
 
@@ -103,9 +113,10 @@ Two derivations deserve a note:
   WAIT or REVIEW, or no carrier is assigned, every ranked candidate gets a dashed
   link whose weight and opacity follow its score.
 * Item trails are only drawn once the item is off its fixture and are trimmed to
-  the movement episode (`Item.episode_start_s`: the last departure from any
-  resting state in the transition log, so it survives settling as MISPLACED and
-  a later re-pick); on-fixture RFID jitter is noise.
+  the movement episode (`Item.episode_start_s`: the state machine's actual
+  movement start, remembered after the item settles, with the transition log's
+  last departure from a resting state as fallback); on-fixture RFID jitter is
+  noise.
 * The event stream includes the initial `UNKNOWN -> ON_FIXTURE|MISPLACED`
   classification of every localized item (fusion logs it as a transition), and
   timeline markers cover COMMIT and terminal REVIEW decisions, never the

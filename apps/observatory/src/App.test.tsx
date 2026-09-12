@@ -97,6 +97,18 @@ describe("App", () => {
     expect(fake.calls).toContain("POST /api/runs/run-0001/seek");
   });
 
+  it("lists cart mutations the engine could not attribute", async () => {
+    fake.unresolved = true;
+    await selectAndRun();
+    const slider = screen.getByRole("slider", { name: "Timeline" });
+    fireEvent.change(slider, { target: { value: "9" } });
+    fireEvent.mouseUp(slider);
+    await waitFor(() => expect(screen.getByTestId("sim-clock")).toHaveTextContent("t = 9.00s"));
+    const unresolved = screen.getByTestId("unresolved-items");
+    expect(within(unresolved).getByText("00A001")).toBeInTheDocument();
+    expect(within(unresolved).getByText(/without an attributed shopper/)).toBeInTheDocument();
+  });
+
   it("labels an exit hold as a candidate while the cart is still open", async () => {
     fake.exitHold = true;
     await selectAndRun();

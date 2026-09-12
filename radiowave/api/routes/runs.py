@@ -97,12 +97,25 @@ def get_events(
     run_id: str,
     since: int = Query(default=0, ge=0, description="First sequence number to return"),
     limit: int = Query(default=500, ge=1, le=5000),
+    epoch: int | None = Query(
+        default=None,
+        ge=0,
+        description="Replay build the cursor was taken from; a stale epoch restarts at 0",
+    ),
 ) -> ObservatoryEventPage:
     run = _run(request, run_id)
-    events = run.events()
+    with run.lock:
+        current_epoch = run.epoch
+        events = run.events()
+    if epoch is not None and epoch != current_epoch:
+        since = 0  # sequence numbers were reassigned by a reset / backward seek
     page = events[since : since + limit]
     return ObservatoryEventPage(
-        run_id=run_id, events=page, next_seq=since + len(page), total=len(events)
+        run_id=run_id,
+        epoch=current_epoch,
+        events=page,
+        next_seq=since + len(page),
+        total=len(events),
     )
 
 

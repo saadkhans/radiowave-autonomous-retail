@@ -38,7 +38,9 @@ def _create(client: TestClient, scenario_id: str = "01", **body: object) -> dict
 
 def _strip_run_id(state: dict) -> dict:
     """Replay state without per-run metadata (id, mutation counter)."""
-    return {key: value for key, value in state.items() if key not in {"run_id", "revision"}}
+    return {
+        key: value for key, value in state.items() if key not in {"run_id", "revision", "epoch"}
+    }
 
 
 def _at(seconds: float):
@@ -444,3 +446,154 @@ def test_timeline_marks_terminal_review(client: TestClient) -> None:
     decisions = [(m["label"], m["decision"]) for m in timeline["markers"]]
     assert ("PICK", "REVIEW") in decisions
     assert all(decision != "WAIT" for _, decision in decisions)
+
+
+# --- round 6: recorded clock boundaries, true episode start, unresolved carts, cursors ---
+
+
+def _fingerprint(result) -> dict[str, object]:
+    return {
+        "committed": [
+            (e.event_id, e.event_type.value, e.shopper_track_id) for e in result.committed_events
+        ],
+        "decisions": [
+            (d.event_id, d.decision.value, round(d.confidence, 6)) for d in result.decisions
+        ],
+        "carts": {
+            c: (cart.status.value, sorted(cart.lines))
+            for c, cart in result.cart_state.carts.items()
+        },
+        "items": [(t.epc.value, t.state.value, t.carrier_track_id) for t in result.item_tracks],
+        "sessions": [(s.session_id, s.state.value) for s in result.sessions],
+    }
+
+
+def test_explicit_clock_advances_are_recorded_and_replayed() -> None:
+    from radiowave.contracts.recording import EntryKind
+    from radiowave.replay.reader import observations_from
+    from radiowave.replay.recorder import InMemoryRecorder
+    from radiowave.simulator.library import load_scenario
+    from radiowave.simulator.runner import build_pipeline, scenario_observations
+
+    scenario = load_scenario("04")  # shopper exits with the item: session end timing matters
+    recorder = InMemoryRecorder()
+    live = build_pipeline(scenario, recorder=recorder)
+    cutoff = _at(scenario.duration_s - 4.0)
+    for observation in scenario_observations(scenario):
+        if observation.timestamp <= cutoff:
+            live.ingest(observation)
+    # A trailing 4 s without observations, driven purely by the replay clock.
+    live.advance_to(_at(scenario.duration_s))
+    live_result = live.finish(advance=False)
+
+    kinds = [entry.kind for entry in recorder.entries]
+    assert EntryKind.CLOCK in kinds and kinds[-1] != EntryKind.OBSERVATION
+    run_end = [entry for entry in recorder.entries if entry.kind == EntryKind.RUN_END]
+    assert len(run_end) == 1 and run_end[0].payload == {"advance": False}
+    clock = [entry for entry in recorder.entries if entry.kind == EntryKind.CLOCK]
+    assert clock[-1].timestamp == _at(scenario.duration_s)
+    timestamps = [entry.timestamp for entry in recorder.entries]
+    assert timestamps == sorted(timestamps)
+
+    replayed = build_pipeline(scenario).replay(recorder.entries)
+    assert _fingerprint(replayed) == _fingerprint(live_result)
+    assert replayed.steps == live_result.steps
+
+    # Observation-only replay stops at the last sample: it cannot reproduce the run.
+    partial = build_pipeline(scenario).run(observations_from(recorder.entries))
+    assert partial.steps < live_result.steps
+
+
+def test_ordinary_runs_record_their_end_and_replay_unchanged() -> None:
+    from radiowave.contracts.recording import EntryKind
+    from radiowave.replay.recorder import InMemoryRecorder
+    from radiowave.simulator.library import load_scenario
+    from radiowave.simulator.runner import build_pipeline, run_scenario
+
+    scenario = load_scenario("05")
+    recorder = InMemoryRecorder()
+    live = run_scenario(scenario, recorder=recorder)
+    ends = [entry for entry in recorder.entries if entry.kind == EntryKind.RUN_END]
+    assert len(ends) == 1 and ends[0].payload == {"advance": True}
+    assert not any(entry.kind == EntryKind.CLOCK for entry in recorder.entries)
+    assert _fingerprint(build_pipeline(scenario).replay(recorder.entries)) == _fingerprint(live)
+
+
+def test_settled_item_keeps_its_true_movement_start(client: TestClient) -> None:
+    run = _create(client, "03")
+    run_id = run["run_id"]
+    end = client.post(f"/api/runs/{run_id}/advance", json={"seconds": 3600}).json()["state"]
+    events = client.get(f"/api/runs/{run_id}/events").json()["events"]
+    misplaced = [item for item in end["items"] if item["state"] == "MISPLACED"]
+    assert misplaced
+    for item in misplaced:
+        confirmations = [
+            e["t_s"]
+            for e in events
+            if e["epc"] == item["epc"]
+            and e["from_state"] == "ON_FIXTURE"
+            and e["to_state"] != "ON_FIXTURE"
+        ]
+        assert confirmations
+        # The episode starts at the first read outside the rest neighbourhood, which the
+        # state machine confirms only movement_confirm_reads later.
+        assert item["episode_start_s"] < confirmations[-1]
+        assert all(point["t_s"] >= item["episode_start_s"] for point in item["trail"])
+
+
+def test_unresolved_cart_mutations_are_exposed(client: TestClient) -> None:
+    for scenario_id in ("12", "05", "03"):
+        run = _create(client, scenario_id)
+        state = client.post(f"/api/runs/{run['run_id']}/advance", json={"seconds": 3600}).json()[
+            "state"
+        ]
+        observatory_run = client.app.state.runs.get(run["run_id"])  # type: ignore[attr-defined]
+        engine = observatory_run.pipeline.result().cart_state.unresolved
+        assert {u["epc"] for u in state["unresolved"]} == set(engine)
+        for entry in state["unresolved"]:
+            assert entry["reason"] == engine[entry["epc"]].reason
+            assert entry["source_event_id"] == engine[entry["epc"]].source_event_id
+            assert entry["short_epc"] == entry["epc"][-6:]
+
+
+def test_unresolved_view_serializes_engine_entries(client: TestClient) -> None:
+    from radiowave.cart.models import UnresolvedItem
+
+    run = _create(client, "01")
+    observatory_run = client.app.state.runs.get(run["run_id"])  # type: ignore[attr-defined]
+    epc = observatory_run.scenario.store.items[0].epc
+    view = observatory_run._unresolved_view(
+        UnresolvedItem(
+            epc=epc,
+            reason="PICK without an attributed shopper",
+            source_event_id="evt-9",
+            timestamp=_at(8.5),
+        )
+    )
+    assert view.epc == epc.value and view.short_epc == epc.value[-6:]
+    assert view.gtin and view.product_name
+    assert view.t_s == 8.5 and view.source_event_id == "evt-9"
+
+
+def test_event_cursors_are_scoped_to_a_replay_epoch(client: TestClient) -> None:
+    run = _create(client)
+    run_id = run["run_id"]
+    client.post(f"/api/runs/{run_id}/advance", json={"seconds": 9})
+    first = client.get(f"/api/runs/{run_id}/events", params={"limit": 2}).json()
+    assert first["epoch"] == run["epoch"]
+    cursor, epoch = first["next_seq"], first["epoch"]
+    rest = client.get(f"/api/runs/{run_id}/events", params={"since": cursor, "epoch": epoch}).json()
+    assert rest["events"][0]["seq"] == cursor
+
+    reset = client.post(f"/api/runs/{run_id}/reset").json()["state"]
+    assert reset["epoch"] == epoch + 1
+    client.post(f"/api/runs/{run_id}/advance", json={"seconds": 9})
+    stale = client.get(
+        f"/api/runs/{run_id}/events", params={"since": cursor, "epoch": epoch}
+    ).json()
+    assert stale["epoch"] == epoch + 1
+    assert stale["events"][0]["seq"] == 0  # restarted: the old cursor is meaningless
+    fresh = client.get(
+        f"/api/runs/{run_id}/events", params={"since": cursor, "epoch": epoch + 1}
+    ).json()
+    assert fresh["events"][0]["seq"] == cursor

@@ -73,13 +73,16 @@ function CartCard({ cart }: { cart: Cart }) {
 
 export function CartPanel() {
   const { run } = useObservatory();
+  const { select } = useActions();
   const carts = run?.carts ?? [];
+  const unresolved = run?.unresolved ?? [];
   const open = carts.filter((cart) => cart.status === "OPEN");
   const exited = carts.filter((cart) => cart.status !== "OPEN");
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="cart-panel">
       <div className="panel-title border-b border-console-line px-3 py-2">
         Virtual carts · {open.length} open · {exited.length} exited
+        {unresolved.length > 0 ? ` · ${unresolved.length} unresolved` : ""}
       </div>
       <div className="scroll-y min-h-0 flex-1 px-3 py-2">
         {carts.length === 0 ? <div className="text-console-muted">No carts.</div> : null}
@@ -90,6 +93,27 @@ export function CartPanel() {
         {exited.map((cart) => (
           <CartCard key={cart.cart_id} cart={cart} />
         ))}
+        {unresolved.length > 0 ? (
+          <div data-testid="unresolved-items">
+            <div className="panel-title mb-1 mt-2 text-console-danger">Unresolved</div>
+            <table className="mono w-full text-[11px]">
+              <tbody>
+                {unresolved.map((entry) => (
+                  <tr key={entry.epc} className="cursor-pointer hover:bg-console-panel-2">
+                    <td className="py-0.5 pr-2" onClick={() => select({ kind: "item", id: entry.epc })}>
+                      {entry.short_epc}
+                    </td>
+                    <td className="py-0.5 pr-2 text-console-text/90">{entry.product_name ?? "—"}</td>
+                    <td className="py-0.5 pr-2 text-console-muted">{fmtSeconds(entry.t_s)}</td>
+                    <td className="py-0.5 text-console-danger" title={entry.source_event_id}>
+                      {entry.reason}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
       </div>
     </div>
   );

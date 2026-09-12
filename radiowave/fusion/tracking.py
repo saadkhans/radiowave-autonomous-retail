@@ -270,6 +270,9 @@ class ItemTrackState:
     rest_position: WorldCoordinate | None = None
     rest_state: ItemState = ItemState.ON_FIXTURE
     movement_start_at: datetime | None = None
+    # Start of the most recent movement episode; kept after the item settles so a
+    # viewer can bound the episode's trail (movement_start_at is cleared on rest).
+    last_movement_start_at: datetime | None = None
     last_seen_at: datetime | None = None
     carrier_track_id: str | None = None
     observation_count: int = 0

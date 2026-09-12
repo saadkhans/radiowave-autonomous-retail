@@ -34,6 +34,8 @@ class EntryKind(StrEnum):
     GROUND_TRUTH = "GROUND_TRUTH"
     STORE_TWIN = "STORE_TWIN"
     PIPELINE_CONFIG = "PIPELINE_CONFIG"
+    CLOCK = "CLOCK"  # explicit replay-clock advance (no observation), payload: timestamp
+    RUN_END = "RUN_END"  # explicit end of the run, payload: {"advance": bool}
 
 
 class RecordedEntry(ContractModel):

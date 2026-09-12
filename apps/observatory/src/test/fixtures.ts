@@ -104,6 +104,7 @@ export function runState(overrides: Partial<RunState> = {}): RunState {
   return {
     run_id: "run-0001",
     revision: 0,
+    epoch: 0,
     scenario_id: "01",
     scenario_name: "one shopper picks one item",
     seed: 7,
@@ -118,6 +119,7 @@ export function runState(overrides: Partial<RunState> = {}): RunState {
     persons: [],
     items: [],
     carts: [],
+    unresolved: [],
     sessions: [],
     counters: {
       accepted: 0,
@@ -177,7 +179,7 @@ export function installFakeApi() {
   let steps = 0;
   const calls: string[] = [];
   const failures = new Set<string>();
-  const flags = { exitHold: false };
+  const flags = { exitHold: false, unresolved: false };
   const state = (): RunState =>
     runState({
       time_s: time,
@@ -198,8 +200,12 @@ export function installFakeApi() {
               },
             ]
           : [],
+      unresolved:
+        flags.unresolved && time >= 8.5
+          ? [{ epc: "3034F0000000000000A001", short_epc: "00A001", gtin: "06281234567890", product_name: "Black shirt", reason: "PICK without an attributed shopper", source_event_id: "evt-1", t_s: 8.5 }]
+          : [],
     });
-  const events = () => ({ run_id: "run-0001", events: EVENTS.filter((entry) => entry.t_s <= time), next_seq: 0, total: 0 });
+  const events = () => ({ run_id: "run-0001", epoch: 0, events: EVENTS.filter((entry) => entry.t_s <= time), next_seq: 0, total: 0 });
   const snapshot = () => ({ state: state(), events: events(), timeline: timeline({ time_s: time }) });
 
   const routes: Array<[RegExp, string, Handler]> = [
@@ -243,6 +249,10 @@ export function installFakeApi() {
     /** Serve the cart line as an exit hold (candidate + exit event) on an OPEN cart. */
     set exitHold(value: boolean) {
       flags.exitHold = value;
+    },
+    /** Serve an unresolved cart mutation once the pick would have committed. */
+    set unresolved(value: boolean) {
+      flags.unresolved = value;
     },
     restore: () => {
       globalThis.fetch = original;

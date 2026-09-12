@@ -8,7 +8,9 @@
         "CART_EVENT",
         "GROUND_TRUTH",
         "STORE_TWIN",
-        "PIPELINE_CONFIG"
+        "PIPELINE_CONFIG",
+        "CLOCK",
+        "RUN_END"
       ],
       "title": "EntryKind",
       "type": "string"

@@ -55,8 +55,10 @@ export const api = {
   advance: (runId: string, seconds: number) =>
     post<Snapshot>(`/runs/${runId}/advance`, { seconds }),
   seek: (runId: string, timeS: number) => post<Snapshot>(`/runs/${runId}/seek`, { time_s: timeS }),
-  getEvents: (runId: string, since = 0, limit = 5000) =>
-    request<EventPage>(`/runs/${runId}/events?since=${since}&limit=${limit}`),
+  getEvents: (runId: string, since = 0, limit = 5000, epoch?: number) =>
+    request<EventPage>(
+      `/runs/${runId}/events?since=${since}&limit=${limit}${epoch === undefined ? "" : `&epoch=${epoch}`}`,
+    ),
   getTimeline: (runId: string) => request<Timeline>(`/runs/${runId}/timeline`),
   getSnapshot: (runId: string) => request<Snapshot>(`/runs/${runId}/snapshot`),
 };

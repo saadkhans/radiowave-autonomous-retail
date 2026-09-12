@@ -40,10 +40,11 @@ from radiowave.api.viewmodels import (
     ObservatoryStore,
     ObservatoryTimeline,
     ObservatoryTimelineMarker,
+    ObservatoryUnresolved,
     ObservatoryZone,
     seconds_since_epoch,
 )
-from radiowave.cart.models import Cart
+from radiowave.cart.models import Cart, UnresolvedItem
 from radiowave.contracts.confidence import ConfidenceDecision
 from radiowave.contracts.events import RetailEvent
 from radiowave.contracts.sessions import ShopperSession
@@ -216,6 +217,7 @@ class ObservatoryRun:
         self.time_s = 0.0
         self.finished = False
         self.revision = 0
+        self.epoch = 0
         self.reset()
 
     # ----------------------------------------------------------------- control
@@ -226,6 +228,12 @@ class ObservatoryRun:
             self.time_s = 0.0
             self.finished = False
             self.revision += 1
+            self.epoch += 1  # sequence numbers restart: a new replay build
+
+    @property
+    def lock(self) -> RLock:
+        """The run's re-entrant lock, for callers that read several fields together."""
+        return self._lock
 
     @property
     def step_interval_s(self) -> float:
@@ -267,7 +275,11 @@ class ObservatoryRun:
             return ObservatorySnapshot(
                 state=self._state(),
                 events=ObservatoryEventPage(
-                    run_id=self.run_id, events=events, next_seq=len(events), total=len(events)
+                    run_id=self.run_id,
+                    epoch=self.epoch,
+                    events=events,
+                    next_seq=len(events),
+                    total=len(events),
                 ),
                 timeline=self._timeline(),
             )
@@ -322,6 +334,7 @@ class ObservatoryRun:
         return ObservatoryRunState(
             run_id=self.run_id,
             revision=self.revision,
+            epoch=self.epoch,
             scenario_id=self.scenario.scenario_id,
             scenario_name=self.scenario.name,
             seed=self.scenario.seed,
@@ -336,6 +349,7 @@ class ObservatoryRun:
             persons=persons,
             items=items,
             carts=carts,
+            unresolved=[self._unresolved_view(u) for u in result.cart_state.unresolved.values()],
             sessions=[self._session_view(s) for s in result.sessions],
             counters=ObservatoryCounters(
                 accepted=result.observations_accepted,
@@ -523,7 +537,11 @@ class ObservatoryRun:
         decisions: list[tuple[ConfidenceDecision, RetailEvent]],
         left_fixture_at: datetime | None,
     ) -> ObservatoryItem:
-        episode_start = item.movement_start_at or left_fixture_at
+        # The state machine keeps the true start of the latest movement episode even
+        # after the item settles; the transition log is the fallback.
+        tracked = self.pipeline.fusion.items.get(item.epc)
+        remembered = tracked.last_movement_start_at if tracked is not None else None
+        episode_start = item.movement_start_at or remembered or left_fixture_at
         history = item.history
         if episode_start is not None and item.state not in (
             ItemState.ON_FIXTURE,
@@ -568,6 +586,20 @@ class ObservatoryRun:
             candidates=self._candidates(item.epc),
             decision=decision_view,
             trail=self._trail(history),
+        )
+
+    def _unresolved_view(self, entry: UnresolvedItem) -> ObservatoryUnresolved:
+        catalog = self._catalog.get(entry.epc.value)
+        gtin = catalog.gtin if catalog else None
+        product = self._products.get(gtin) if gtin else None
+        return ObservatoryUnresolved(
+            epc=entry.epc.value,
+            short_epc=short_epc(entry.epc.value),
+            gtin=gtin,
+            product_name=product.name if product else None,
+            reason=entry.reason,
+            source_event_id=entry.source_event_id,
+            t_s=_seconds(entry.timestamp),
         )
 
     def _cart_view(self, cart: Cart, session_id: str | None) -> ObservatoryCart:

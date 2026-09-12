@@ -185,6 +185,18 @@ class ObservatoryCartLine(ViewModel):
     exit_event_s: float | None
 
 
+class ObservatoryUnresolved(ViewModel):
+    """A committed physical event the cart engine could not attribute to a cart."""
+
+    epc: str
+    short_epc: str
+    gtin: str | None = None
+    product_name: str | None = None
+    reason: str
+    source_event_id: str
+    t_s: float
+
+
 class ObservatoryCart(ViewModel):
     cart_id: str
     shopper_track_id: str
@@ -262,6 +274,11 @@ class ObservatoryRunState(ViewModel):
     revision: int = Field(
         ge=0, description="Incremented by every mutation; equal across one atomic snapshot"
     )
+    epoch: int = Field(
+        ge=0,
+        description="Incremented whenever replay is rebuilt (reset / backward seek); event"
+        " sequence numbers are only comparable within one epoch",
+    )
     scenario_id: str
     scenario_name: str
     seed: int
@@ -276,6 +293,9 @@ class ObservatoryRunState(ViewModel):
     persons: list[ObservatoryPerson]
     items: list[ObservatoryItem]
     carts: list[ObservatoryCart]
+    unresolved: list[ObservatoryUnresolved] = Field(
+        default_factory=list, description="Cart mutations without a resolvable owner"
+    )
     sessions: list[ObservatorySession]
     counters: ObservatoryCounters
 
@@ -313,6 +333,7 @@ class SeekRequest(ViewModel):
 
 class ObservatoryEventPage(ViewModel):
     run_id: str
+    epoch: int = Field(ge=0, description="Replay build the sequence numbers belong to")
     events: list[ObservatoryEvent]
     next_seq: int
     total: int
