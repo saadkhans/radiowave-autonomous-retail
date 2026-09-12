@@ -61,6 +61,7 @@ from radiowave.simulator.library import SCENARIOS, load_scenario
 from radiowave.simulator.runner import build_pipeline, scenario_observation_stream
 from radiowave.simulator.scenario import SCENARIO_EPOCH, Scenario
 
+_RESTING = frozenset({ItemState.ON_FIXTURE, ItemState.MISPLACED, ItemState.UNKNOWN})
 TRAIL_POINTS = 40
 FEATURE_ORDER = (
     "distance",
@@ -442,7 +443,9 @@ class ObservatoryRun:
                 decision=e.decision,
             )
             for e in self.events()
-            if e.kind == "RETAIL_EVENT" and e.decision == "COMMIT"
+            # Settled adjudications only: COMMIT and terminal REVIEW, never the
+            # repetitive intermediate WAIT rows.
+            if e.kind == "RETAIL_EVENT" and e.decision in ("COMMIT", "REVIEW")
         ]
         return ObservatoryTimeline(
             run_id=self.run_id,
@@ -508,10 +511,9 @@ class ObservatoryRun:
         """
         starts: dict[str, datetime] = {}
         for transition in self.pipeline.fusion.transitions:
-            if (
-                transition.from_state == ItemState.ON_FIXTURE
-                and transition.to_state != ItemState.ON_FIXTURE
-            ):
+            # Leaving any resting state (ON_FIXTURE or MISPLACED) starts a movement
+            # episode; the initial UNKNOWN -> rest classification is not a departure.
+            if transition.from_state in _RESTING and transition.to_state not in _RESTING:
                 starts[transition.epc] = transition.timestamp
         return starts
 

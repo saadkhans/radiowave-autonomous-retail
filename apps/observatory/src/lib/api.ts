@@ -44,8 +44,9 @@ export const api = {
   health: () => request<{ status: string; engine: string; version: string }>("/health"),
   listScenarios: () => request<ScenarioSummary[]>("/scenarios"),
   getScenario: (scenarioId: string) => request<ScenarioDetail>(`/scenarios/${scenarioId}`),
+  // Creation returns the initial snapshot so the client binds to the new run atomically.
   createRun: (scenarioId: string, seed?: number) =>
-    post<RunState>("/runs", { scenario_id: scenarioId, seed: seed ?? null }),
+    post<Snapshot>("/runs", { scenario_id: scenarioId, seed: seed ?? null }),
   deleteRun: (runId: string) => request<void>(`/runs/${runId}`, { method: "DELETE" }),
   getState: (runId: string) => request<RunState>(`/runs/${runId}/state`),
   // Mutations return the complete snapshot captured under the run's lock.

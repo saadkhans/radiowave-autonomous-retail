@@ -207,7 +207,7 @@ export function installFakeApi() {
     [/^\/api\/scenarios$/, "GET", () => [SCENARIO_SUMMARY, { ...SCENARIO_SUMMARY, scenario_id: "12", name: "ambiguous two-shopper pickup" }]],
     [/^\/api\/scenarios\/01$/, "GET", () => SCENARIO_DETAIL],
     [/^\/api\/scenarios\/12$/, "GET", () => ({ ...SCENARIO_DETAIL, scenario_id: "12", name: "ambiguous two-shopper pickup", description: "Two shoppers reach for the same shirt." })],
-    [/^\/api\/runs$/, "POST", () => { time = 0; steps = 0; return state(); }],
+    [/^\/api\/runs$/, "POST", () => { time = 0; steps = 0; return snapshot(); }],
     [/^\/api\/runs\/run-0001\/reset$/, "POST", () => { time = 0; steps = 0; return snapshot(); }],
     [/^\/api\/runs\/run-0001\/step$/, "POST", () => { time = Math.min(time + 0.25, 18); steps += 1; return snapshot(); }],
     [/^\/api\/runs\/run-0001\/advance$/, "POST", (_url, init) => { const body = JSON.parse(String(init?.body)) as { seconds: number }; time = Math.min(time + body.seconds, 18); steps += 1; return snapshot(); }],

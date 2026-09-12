@@ -33,7 +33,7 @@ def client() -> TestClient:
 def _create(client: TestClient, scenario_id: str = "01", **body: object) -> dict:
     response = client.post("/api/runs", json={"scenario_id": scenario_id, **body})
     assert response.status_code == 201, response.text
-    return response.json()
+    return response.json()["state"]
 
 
 def _strip_run_id(state: dict) -> dict:
@@ -221,6 +221,9 @@ def test_out_of_range_seed_is_a_validation_error(client: TestClient) -> None:
         assert response.status_code == 422, seed
     ok = _create(client, "01", seed=11)
     assert ok["seed"] == 11
+    created = client.post("/api/runs", json={"scenario_id": "01"})
+    assert created.status_code == 201
+    assert set(created.json()) == {"state", "events", "timeline"}
 
 
 # --- P2: per-run serialization ----------------------------------------------------
@@ -348,7 +351,7 @@ def test_listing_runs_while_creating_and_deleting_never_fails(client: TestClient
             return client.get("/api/runs").status_code
         created = client.post("/api/runs", json={"scenario_id": "01"})
         if index % 3 == 2:
-            client.delete(f"/api/runs/{created.json()['run_id']}")
+            client.delete(f"/api/runs/{created.json()['state']['run_id']}")
         return created.status_code
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -386,3 +389,58 @@ def test_misplaced_item_trail_is_trimmed_to_its_movement_episode(client: TestCli
     # Items that never left their fixture carry no episode and their full trail.
     resting = [item for item in end["items"] if item["state"] == "ON_FIXTURE"]
     assert resting and all(item["episode_start_s"] is None for item in resting)
+
+
+# --- round 5: initial classification, repeated episodes, REVIEW markers, create snapshot ---
+
+
+def test_initial_item_classification_is_a_lifecycle_row(client: TestClient) -> None:
+    run = _create(client, "01")
+    # A few reads are needed before an item has a rest position to classify.
+    state = client.post(f"/api/runs/{run['run_id']}/advance", json={"seconds": 2}).json()["state"]
+    events = client.get(f"/api/runs/{run['run_id']}/events").json()["events"]
+    classified = [
+        e for e in events if e["kind"] == "ITEM_TRANSITION" and e["from_state"] == "UNKNOWN"
+    ]
+    localized = [item for item in state["items"] if item["state"] != "UNKNOWN"]
+    assert localized
+    assert {e["epc"] for e in classified} == {item["epc"] for item in localized}
+    assert all(e["to_state"] in {"ON_FIXTURE", "MISPLACED"} for e in classified)
+    # The classification is not a departure: no item has started a movement episode.
+    assert all(item["episode_start_s"] is None for item in localized)
+
+
+def test_episode_start_follows_a_pick_after_misplacement(client: TestClient) -> None:
+    from radiowave.contracts.tracks import ItemState
+    from radiowave.fusion.state_machine import Transition
+
+    run = _create(client, "01")
+    observatory_run = client.app.state.runs.get(run["run_id"])  # type: ignore[attr-defined]
+    log = observatory_run.pipeline.fusion.transitions
+    log.clear()
+
+    def transition(seconds: float, from_state: ItemState, to_state: ItemState) -> Transition:
+        return Transition(
+            epc=EPC_A, from_state=from_state, to_state=to_state, timestamp=_at(seconds), reason=""
+        )
+
+    log.extend(
+        [
+            transition(0.25, ItemState.UNKNOWN, ItemState.ON_FIXTURE),
+            transition(6.0, ItemState.ON_FIXTURE, ItemState.INTERACTION_CANDIDATE),
+            transition(7.0, ItemState.INTERACTION_CANDIDATE, ItemState.CARRIED),
+            transition(12.0, ItemState.CARRIED, ItemState.MISPLACED),
+            transition(20.0, ItemState.MISPLACED, ItemState.INTERACTION_CANDIDATE),
+            transition(21.0, ItemState.INTERACTION_CANDIDATE, ItemState.CARRIED),
+        ]
+    )
+    assert observatory_run._episode_starts() == {EPC_A: _at(20.0)}
+
+
+def test_timeline_marks_terminal_review(client: TestClient) -> None:
+    run = _create(client, "12")
+    client.post(f"/api/runs/{run['run_id']}/advance", json={"seconds": 3600})
+    timeline = client.get(f"/api/runs/{run['run_id']}/timeline").json()
+    decisions = [(m["label"], m["decision"]) for m in timeline["markers"]]
+    assert ("PICK", "REVIEW") in decisions
+    assert all(decision != "WAIT" for _, decision in decisions)

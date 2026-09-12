@@ -49,9 +49,10 @@ pre-generated observation list for its scenario:
   mutation and takes the snapshot under one lock; FastAPI serves sync handlers
   from worker threads and a response must describe its own request. Each
   mutation bumps `revision` and returns the complete snapshot (state, the full
-  event stream and the timeline) captured under that same lock; `GET
-  /runs/{id}/snapshot` serves the same shape for a fresh read. The UI publishes
-  only such snapshots, never independently fetched pieces.
+  event stream and the timeline) captured under that same lock, and so does
+  `POST /runs`; `GET /runs/{id}/snapshot` serves the same shape for a fresh
+  read. The UI publishes only such snapshots, never independently fetched
+  pieces.
 * `FoundationPipeline.advance_to()` normalizes its clock through the same
   `ensure_utc` rule as every contract: naive timestamps are rejected.
 * Scenarios flagged `duplicate_observation_stream` (scenario 10) are fed
@@ -102,9 +103,13 @@ Two derivations deserve a note:
   WAIT or REVIEW, or no carrier is assigned, every ranked candidate gets a dashed
   link whose weight and opacity follow its score.
 * Item trails are only drawn once the item is off its fixture and are trimmed to
-  the movement episode (`Item.episode_start_s`, derived from the state machine's
-  transition log so it survives settling as MISPLACED); on-fixture RFID jitter
-  is noise.
+  the movement episode (`Item.episode_start_s`: the last departure from any
+  resting state in the transition log, so it survives settling as MISPLACED and
+  a later re-pick); on-fixture RFID jitter is noise.
+* The event stream includes the initial `UNKNOWN -> ON_FIXTURE|MISPLACED`
+  classification of every localized item (fusion logs it as a transition), and
+  timeline markers cover COMMIT and terminal REVIEW decisions, never the
+  repetitive intermediate WAIT rows.
 
 ## Not included
 

@@ -253,10 +253,10 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
     if (!scenarioId) return;
     dispatch({ type: "playing", playing: false });
     await guarded(async () => {
-      const run = await api.createRun(scenarioId);
-      runIdRef.current = run.run_id;
+      const snapshot = await api.createRun(scenarioId);
+      runIdRef.current = snapshot.state.run_id;
       dispatch({ type: "select", selection: null });
-      applyRun(await api.getSnapshot(run.run_id));
+      applyRun(snapshot);
     });
   }, [applyRun, guarded, state.scenarioId]);
 

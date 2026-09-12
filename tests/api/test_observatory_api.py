@@ -21,7 +21,7 @@ def client() -> TestClient:
 def _create(client: TestClient, scenario_id: str = "01") -> dict:
     response = client.post("/api/runs", json={"scenario_id": scenario_id})
     assert response.status_code == 201, response.text
-    return response.json()
+    return response.json()["state"]
 
 
 def _strip_run_id(state: dict) -> dict:
