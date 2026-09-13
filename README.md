@@ -85,19 +85,45 @@ restarts: no database, broker or auth.
    from t = 0 so the state at any time is reproducible.
 4. Click a shopper, item, cart line or event row to open it in the inspector.
    Items show the ranked candidate table (distance, trend, velocity, temporal,
-   co-motion, zone, vision; `—` when a feature is not available) and the current
+   co-motion, zone, vision; `ï¿½` when a feature is not available) and the current
    COMMIT / WAIT / REVIEW decision with confidence, margin, pending duration and
    reason. Scenario 12 stays in WAIT and escalates to REVIEW; 12v resolves to
    COMMIT with vision evidence.
 5. Layer toggles switch zones, fixtures, sensors, grid, trajectories, labels,
    candidate lines and confidence labels on and off.
 
+### Live TI mmWave radar (Phase 3)
+
+The Observatory can also drive a real TI IWR6843-class radar instead of synthetic/replay data.
+Install the optional serial extra, probe the board, then launch with `RADIOWAVE_TI_CONFIG` set:
+
+```bash
+uv pip install -e ".[dev,api,hardware-ti]"   # or: pip install -e ".[dev,api,hardware-ti]"
+
+# probe the board directly (no Observatory needed)
+python -m radiowave.cli mmwave ti probe --config configs/examples/ti-iwr6843-lab.json --seconds 15
+
+# Windows PowerShell
+$env:RADIOWAVE_TI_CONFIG="configs\examples\ti-iwr6843-lab.json"; pnpm run dev
+# POSIX
+RADIOWAVE_TI_CONFIG=configs/examples/ti-iwr6843-lab.json pnpm run dev
+
+# headless capture / offline replay
+python -m radiowave.cli mmwave ti capture --config configs/examples/ti-iwr6843-lab.json --out data/captures/session.jsonl
+python -m radiowave.cli replay data/captures/session.jsonl
+```
+
+The Observatory shows a LIVE badge and radar status (STREAMING/STALE/DISCONNECTED/CONNECTING/
+ERROR) with Start/Stop/Reconnect controls. A missing/invalid config never breaks replay mode. See
+`docs/hardware/ti-iwr6843-first-bringup.md` for the full first-hardware procedure (port
+identification, firmware flashing, pose measurement, acceptance checks).
+
 ### Architecture
 
-- `radiowave/api/` — thin FastAPI layer over the existing pipeline: `runs.py`
+- `radiowave/api/` ï¿½ thin FastAPI layer over the existing pipeline: `runs.py`
   (in-memory `RunManager`, `ObservatoryRun` advance / step / seek / reset),
   `viewmodels.py` (explicit Pydantic view models), `routes/`.
-- `apps/observatory/` — React + TypeScript + Vite + Tailwind. `src/types/api.ts`
+- `apps/observatory/` ï¿½ React + TypeScript + Vite + Tailwind. `src/types/api.ts`
   mirrors the view models, `src/lib/geometry.ts` projects world metres to SVG
   pixels from the twin's floor bounds, `src/state/store.tsx` owns run state and
   the playback loop, `src/components/` renders the map, inspector, carts, event
