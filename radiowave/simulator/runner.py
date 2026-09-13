@@ -27,6 +27,20 @@ def scenario_observations(
     return list(merge_streams(people.observations(), items.observations(), vision.evidence()))
 
 
+def scenario_observation_stream(
+    scenario: Scenario, generator_config: GeneratorConfig | None = None
+) -> list[AnyObservation]:
+    """The observation stream a scenario is *fed*, as opposed to what it generates.
+
+    Scenarios flagged ``duplicate_observation_stream`` replay every observation twice in
+    canonical order so deduplication is exercised deterministically.
+    """
+    observations = scenario_observations(scenario, generator_config)
+    if not scenario.duplicate_observation_stream:
+        return observations
+    return sorted(observations + observations, key=lambda o: (o.timestamp, o.observation_id))
+
+
 def build_pipeline(
     scenario: Scenario,
     pipeline_config: PipelineConfig | None = None,
@@ -66,5 +80,5 @@ def run_scenario(
     generator_config: GeneratorConfig | None = None,
     recorder: Recorder | None = None,
 ) -> PipelineResult:
-    observations = scenario_observations(scenario, generator_config)
+    observations = scenario_observation_stream(scenario, generator_config)
     return run_observations(scenario, observations, pipeline_config, recorder)

@@ -96,9 +96,11 @@ def test_non_finite_coordinates_are_rejected() -> None:
 
 
 def test_unknown_recording_format_version_is_rejected() -> None:
+    # Version 2 became the current format with Observatory v0 (CLOCK / RUN_END /
+    # DUPLICATE_OBSERVATION); a version this reader does not understand is still refused.
     entry = RecordedEntry(sequence=0, timestamp=at(0), kind="GROUND_TRUTH", payload={})
-    with pytest.raises(ValidationError):
-        RecordedEntry.model_validate({**entry.model_dump(mode="json"), "format_version": 2})
+    with pytest.raises(ValidationError, match="unsupported recording format_version 3"):
+        RecordedEntry.model_validate({**entry.model_dump(mode="json"), "format_version": 3})
 
 
 def test_reversed_or_out_of_range_carries_are_rejected() -> None:

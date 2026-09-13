@@ -11,7 +11,12 @@ from radiowave.contracts import Decision, ItemState, RetailEventType, SessionSta
 from radiowave.contracts.tracks import PersonTrackState
 from radiowave.pipeline import PipelineResult
 from radiowave.simulator.library import load_scenario
-from radiowave.simulator.runner import run_observations, run_scenario, scenario_observations
+from radiowave.simulator.runner import (
+    run_observations,
+    run_scenario,
+    scenario_observation_stream,
+    scenario_observations,
+)
 from radiowave.simulator.stores import EPC_SHIRT_A, EPC_SHIRT_B, GTIN_BLACK_SHIRT_L
 
 PICK, CARRY, PUTBACK = RetailEventType.PICK, RetailEventType.CARRY, RetailEventType.PUTBACK
@@ -148,7 +153,8 @@ def test_scenario_09_radar_dropout_reacquires_same_shopper() -> None:
 def test_scenario_10_duplicate_observation_replay_is_idempotent() -> None:
     scenario = load_scenario("10")
     observations = scenario_observations(scenario)
-    doubled = sorted(observations + observations, key=lambda o: (o.timestamp, o.observation_id))
+    doubled = scenario_observation_stream(scenario)
+    assert len(doubled) == 2 * len(observations)
     r = run_observations(scenario, doubled)
     baseline = run("01")
     assert r.observations_dropped == len(observations)

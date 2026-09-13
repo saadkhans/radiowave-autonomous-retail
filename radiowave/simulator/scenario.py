@@ -128,6 +128,10 @@ class Scenario(ContractModel):
     radar_dropouts: list[Dropout] = Field(default_factory=list)
     rfid_dropouts: list[Dropout] = Field(default_factory=list)
     vision_enabled: bool = False
+    duplicate_observation_stream: bool = Field(
+        default=False,
+        description="Feed every observation twice; see runner.scenario_observation_stream",
+    )
     expected_events: list[GroundTruthEvent] = Field(default_factory=list)
 
     @model_validator(mode="after")

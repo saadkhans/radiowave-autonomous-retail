@@ -214,10 +214,20 @@ class BaselineFusionEngine:
                 self.ledger.reset(item.epc)
             self._handoff_since.pop(item.epc, None)
         if item.state == ItemState.UNKNOWN and item.rest_position is not None:
-            # First classification of a freshly seen item against the twin.
+            # First classification of a freshly seen item against the twin. Logged as a
+            # transition so replay viewers can account for every displayed state change.
             item.state = self.state_machine.classify_rest(item, item.rest_position)
             item.rest_state = item.state
             item.state_since = now
+            self.transitions.append(
+                Transition(
+                    epc=item.epc.value,
+                    from_state=ItemState.UNKNOWN,
+                    to_state=item.state,
+                    timestamp=now,
+                    reason="initial classification of the first localized rest position",
+                )
+            )
         carrier = self.persons.get(item.carrier_track_id) if item.carrier_track_id else None
         transition = self.state_machine.evaluate(
             item,

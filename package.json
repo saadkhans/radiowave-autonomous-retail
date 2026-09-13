@@ -2,11 +2,17 @@
   "name": "radiowave-autonomous-retail",
   "private": true,
   "scripts": {
-    "lint": "python -m ruff check .",
-    "typecheck": "python -m mypy radiowave scripts",
-    "test": "python -m pytest",
-    "build": "python -m compileall -q radiowave scripts && python scripts/export_schemas.py --check",
+    "lint": "python -m ruff check . && pnpm -C apps/observatory lint",
+    "typecheck": "python -m mypy radiowave scripts && pnpm -C apps/observatory typecheck",
+    "test": "python -m pytest && pnpm -C apps/observatory test",
+    "build": "python -m compileall -q radiowave scripts && python scripts/export_schemas.py --check && pnpm -C apps/observatory build",
     "schemas": "python scripts/export_schemas.py",
-    "security:secrets": "gitleaks detect --source . --no-banner"
+    "security:secrets": "gitleaks detect --source . --no-banner",
+    "dev:api": "python -m uvicorn radiowave.api.app:app --reload --port 8765",
+    "dev:observatory": "pnpm -C apps/observatory dev",
+    "dev": "concurrently -k -n api,web -c blue,magenta \"pnpm run dev:api\" \"pnpm run dev:observatory\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
   }
 }

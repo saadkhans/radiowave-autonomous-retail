@@ -19,12 +19,17 @@ from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
 
-from radiowave.contracts.recording import EntryKind, RecordedEntry
+from radiowave.contracts.recording import (
+    EntryKind,
+    RecordedEntry,
+    RecordingError,
+    validate_recording,
+)
 from radiowave.contracts.store import Store
 from radiowave.digital_twin.registry import StoreRegistry
 from radiowave.pipeline import FoundationPipeline, PipelineConfig, PipelineResult
 from radiowave.replay.clock import ReplayPacer
-from radiowave.replay.reader import observations_from, open_replay_source
+from radiowave.replay.reader import open_replay_source
 from radiowave.replay.recorder import InMemoryRecorder, JsonlRecorder, ParquetRecorder
 from radiowave.simulator.library import SCENARIOS, load_scenario
 from radiowave.simulator.runner import run_scenario
@@ -106,13 +111,27 @@ def _load_json_model[M: BaseModel](path: Path, model: type[M]) -> M:
         raise SystemExit(f"{path} is not a valid {model.__name__}: {exc}") from exc
 
 
+def _payload_error(entry: RecordedEntry, exc: ValidationError) -> str:
+    """One readable line for an embedded header payload the contract rejects."""
+    errors = exc.errors()
+    where = ".".join(str(part) for part in errors[0]["loc"]) if errors else ""
+    reason = errors[0]["msg"] if errors else "invalid"
+    return (
+        f"entry {entry.sequence}: {entry.kind.value} payload is invalid"
+        f"{f' at {where}' if where else ''}: {reason}"
+    )
+
+
 def _config_for(entries: list[RecordedEntry], args: argparse.Namespace) -> PipelineConfig:
     """The configuration the recording was produced with; never silently defaulted."""
     if args.config is not None:
         return _load_json_model(Path(args.config), PipelineConfig)
     for entry in entries:
         if entry.kind == EntryKind.PIPELINE_CONFIG:
-            return PipelineConfig.model_validate(entry.payload)
+            try:
+                return PipelineConfig.model_validate(entry.payload)
+            except ValidationError as exc:
+                raise RecordingError(_payload_error(entry, exc)) from exc
     msg = (
         "recording carries no PIPELINE_CONFIG entry; pass --config <pipeline.json> so replay "
         "uses the thresholds the recording was produced with"
@@ -128,7 +147,10 @@ def _store_for(entries: list[RecordedEntry], args: argparse.Namespace) -> Store:
         return load_scenario(args.scenario).store
     for entry in entries:
         if entry.kind == EntryKind.STORE_TWIN:
-            return Store.model_validate(entry.payload)
+            try:
+                return Store.model_validate(entry.payload)
+            except ValidationError as exc:
+                raise RecordingError(_payload_error(entry, exc)) from exc
     msg = (
         "recording carries no STORE_TWIN entry; pass --store <store.json> or "
         "--scenario <id> so replay uses the original digital twin"
@@ -160,10 +182,21 @@ def cmd_replay(args: argparse.Namespace) -> int:
     scenario_id = args.scenario or headers[0].scenario_id
     registry = StoreRegistry(store)
     pipeline = FoundationPipeline(registry, _config_for(headers, args), scenario_id=scenario_id)
-    entries = itertools.chain(headers, rest)
+    # One format version per recording and nothing after RUN_END, in either mode.
+    entries = validate_recording(itertools.chain(headers, rest))
     if args.step:
         print("step mode: press Enter to release the next observation, q to finish")
+        end_advance = True
         for entry in entries:
+            if entry.kind == EntryKind.CLOCK:
+                pipeline.advance_to(entry.timestamp)  # recorded clock boundary
+                continue
+            if entry.kind == EntryKind.RUN_END:
+                end_advance = entry.run_end_advance  # validated strict bool
+                continue  # keep consuming so a malformed trailer is still rejected
+            if entry.kind == EntryKind.DUPLICATE_OBSERVATION:
+                pipeline.replay_duplicate(entry)  # rejected again, clock untouched
+                continue
             if entry.kind != EntryKind.OBSERVATION:
                 continue
             observation = entry.to_observation()
@@ -173,12 +206,19 @@ def cmd_replay(args: argparse.Namespace) -> int:
             )
             answer = sys.stdin.readline()
             if answer.strip().lower() == "q":
+                # Operator abort: the stream contract (including a v2 RUN_END) is not
+                # checked past this point, so the summary describes a partial replay.
+                print(
+                    f"replay aborted at entry {entry.sequence} before the end of the "
+                    "recording; the summary below is a partial replay",
+                    file=sys.stderr,
+                )
                 break
             pipeline.ingest(observation)  # steps fusion across every boundary it crosses
-        result = pipeline.finish()
+        result = pipeline.finish(advance=end_advance)
     else:
         pacer = ReplayPacer(rate=args.rate) if args.rate > 0 else None
-        result = pipeline.run(observations_from(_paced(entries, pacer)))
+        result = pipeline.replay(_paced(entries, pacer))
     _print_summary(result)
     if (
         result.observations_rejected_unknown_sensor
@@ -230,7 +270,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    result: int = args.func(args)
+    try:
+        result: int = args.func(args)
+    except RecordingError as exc:
+        # A recording that violates the format contract (unsupported or mixed versions,
+        # a v2 file without RUN_END, entries after RUN_END, timestamp or sequence
+        # regressions, malformed control payloads, a duplicate that is not a duplicate)
+        # is refused with one readable line, never half-replayed.
+        raise SystemExit(f"invalid recording: {exc}") from exc
     return result
 
 
