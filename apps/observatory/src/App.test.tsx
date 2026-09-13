@@ -149,8 +149,10 @@ describe("App", () => {
     await selectAndRun();
     fireEvent.click(screen.getByRole("button", { name: "Step" }));
     await waitFor(() => expect(screen.getByTestId("sim-clock")).toHaveTextContent("t = 0.25s"));
-    // Seek by driving the timeline control.
+    // Seek by driving the timeline control, once the step has fully settled: the
+    // snapshot renders one settle before `busy` clears and the slider re-enables.
     const slider = screen.getByRole("slider", { name: "Timeline" });
+    await waitFor(() => expect(slider).toBeEnabled());
     fireEvent.change(slider, { target: { value: "9" } });
     fireEvent.mouseUp(slider);
     await waitFor(() => expect(screen.getByTestId("sim-clock")).toHaveTextContent("t = 9.00s"));

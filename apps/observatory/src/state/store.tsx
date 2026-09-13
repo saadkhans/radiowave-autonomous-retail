@@ -341,6 +341,10 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
   );
 
   const play = useCallback(() => {
+    // A run replacement or seek may be in flight; playback binds to the run
+    // that exists once it settles, so refuse to start while anything is
+    // queued or running rather than binding to a run about to be discarded.
+    if (pendingCountRef.current > 0) return;
     if (runIdRef.current && !state.run?.finished) dispatch({ type: "playing", playing: true });
   }, [state.run?.finished]);
   const pause = useCallback(() => dispatch({ type: "playing", playing: false }), []);
@@ -358,9 +362,16 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
   // still queued or running, so ticks never overlap.
   useEffect(() => {
     if (!state.playing) return;
-    const runId = runIdRef.current;
+    // Bind to the authoritative run identity from state (not a ref captured
+    // once): including it in the deps tears the interval down and recreates
+    // it whenever the active run changes, and clears it when run becomes
+    // null, so a settling run replacement can never leave a stale loop
+    // ticking the discarded run.
+    const runId = state.run?.run_id ?? null;
     if (!runId) return;
     const handle = window.setInterval(() => {
+      // Belt and braces: skip if the run changed since this interval was set up.
+      if (runIdRef.current !== runId) return;
       const seconds = (speedRef.current * TICK_MS) / 1000;
       void runExclusive(async () => {
         const generation = generationRef.current;
@@ -370,7 +381,7 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
       });
     }, TICK_MS);
     return () => window.clearInterval(handle);
-  }, [applyRun, runExclusive, state.playing]);
+  }, [applyRun, runExclusive, state.playing, state.run?.run_id]);
 
   const actions = useMemo<ObservatoryActions>(
     () => ({

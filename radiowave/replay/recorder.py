@@ -13,7 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from radiowave.contracts.observations import SensorObservation
-from radiowave.contracts.recording import EntryKind, RecordedEntry
+from radiowave.contracts.recording import (
+    CURRENT_RECORDING_FORMAT_VERSION,
+    EntryKind,
+    RecordedEntry,
+)
 
 _PARQUET_COLUMNS = (
     "sequence",
@@ -57,6 +61,7 @@ class InMemoryRecorder:
             kind=kind,
             sensor_id=sensor_id,
             scenario_id=scenario_id,
+            format_version=CURRENT_RECORDING_FORMAT_VERSION,
             payload=payload,
         )
         self._sequence += 1

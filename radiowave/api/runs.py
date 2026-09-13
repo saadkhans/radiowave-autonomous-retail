@@ -766,16 +766,44 @@ class RunManager:
         self._counter = 0
         self._lock = Lock()
 
-    def create(self, scenario_id: str, seed: int | None = None) -> ObservatoryRun:
+    def _build(
+        self, scenario_id: str, seed: int | None = None
+    ) -> tuple[ObservatoryRun, ObservatorySnapshot]:
+        """Allocate a run and capture its initial snapshot before publishing it.
+
+        A concurrent client that discovers or predicts a run id (``GET /runs``, sequential
+        ids) must never be able to step/seek/reset it before its t=0 snapshot has been
+        captured: that would let ``POST /runs`` observe a non-initial revision despite its
+        atomic-initial-snapshot contract. The run is only added to ``_runs`` (making it
+        visible to ``get``/``ids``, and therefore mutable by anyone else) after its
+        snapshot has already been read, so no other caller can ever reach it first. The
+        manager lock itself is only held for the id allocation and for the publish step,
+        never across ``run.snapshot()``: that call takes the run's own lock and can run
+        concurrently with unrelated ``get``/``ids`` calls on other runs. A ``delete`` of
+        the predicted id inside that window simply reports 404 (nothing to delete yet);
+        the guarantee is about mutation of the run's state, not about its id being
+        unguessable.
+        """
         scenario = load_scenario(scenario_id)
         if seed is not None:
             scenario = scenario.model_copy(update={"seed": seed})
         with self._lock:
             self._counter += 1
             run_id = f"run-{self._counter:04d}"
-            run = ObservatoryRun(run_id, scenario)
-            self._runs[run_id] = run
-        return run
+        run = ObservatoryRun(run_id, scenario)
+        snapshot = run.snapshot()  # captured before anyone can see the run
+        with self._lock:
+            self._runs[run_id] = run  # published only now
+        return run, snapshot
+
+    def create(self, scenario_id: str, seed: int | None = None) -> ObservatoryRun:
+        return self._build(scenario_id, seed)[0]
+
+    def create_with_snapshot(
+        self, scenario_id: str, seed: int | None = None
+    ) -> ObservatorySnapshot:
+        """Create a run and return its initial snapshot; the run is discoverable only after."""
+        return self._build(scenario_id, seed)[1]
 
     def get(self, run_id: str) -> ObservatoryRun | None:
         with self._lock:

@@ -26,6 +26,7 @@ from radiowave.contracts.confidence import ConfidenceDecision, ConfidenceThresho
 from radiowave.contracts.events import CartEvent, RetailEvent
 from radiowave.contracts.observations import AnyObservation, SensorObservation
 from radiowave.contracts.recording import (
+    CURRENT_RECORDING_FORMAT_VERSION,
     EntryKind,
     RecordedEntry,
     RecordingError,
@@ -182,6 +183,9 @@ class FoundationPipeline:
                 source_type=source_type,
                 sensor_id=sensor_id,
                 scenario_id=self.scenario_id,
+                # The writer version is always explicit; the model default is the
+                # legacy read default (v1) and must never leak into a new recording.
+                format_version=CURRENT_RECORDING_FORMAT_VERSION,
                 payload=payload,
             )
         )
@@ -214,10 +218,13 @@ class FoundationPipeline:
         * ``RUN_END`` (v2) finishes the run the way the original driver did.
 
         Header, event, decision, cart and ground-truth entries are outputs of the
-        original run and are skipped; they are regenerated. A recording without a
-        ``RUN_END`` entry (every v1 recording) finishes the default way. The stream
-        contract (one format version, nothing after ``RUN_END``) is enforced by
-        :func:`radiowave.contracts.recording.validate_recording`.
+        original run and are skipped; they are regenerated. A v1 recording predates
+        ``RUN_END`` and finishes the default way at EOF; a v2 recording that reaches EOF
+        without ``RUN_END`` is truncated and is refused before anything is finalized.
+        The stream contract (one format version, increasing sequence, chronological
+        envelopes, ``RUN_END`` terminal and mandatory for v2, typed control payloads) is
+        enforced by :func:`radiowave.contracts.recording.validate_recording` and the
+        entry model; replay consumes only validated values.
         """
         result: PipelineResult | None = None
         for entry in validate_recording(entries):
@@ -228,7 +235,9 @@ class FoundationPipeline:
             elif entry.kind == EntryKind.CLOCK:
                 self.advance_to(entry.timestamp)
             elif entry.kind == EntryKind.RUN_END:
-                result = self.finish(advance=bool(entry.payload.get("advance", True)))
+                result = self.finish(advance=entry.run_end_advance)
+        # Reaching this point means the validated stream is complete: either it ended
+        # with RUN_END (result set) or it is a v1 recording, which ends at EOF.
         return result if result is not None else self.finish()
 
     def replay_duplicate(self, entry: RecordedEntry) -> None:
@@ -434,6 +443,9 @@ class FoundationPipeline:
         # recorded after the steps it triggers so the recording stays in timestamp order.
         self._ensure_header(timestamp)
         self._advance_to(timestamp)
+        # Scheduled entries stamped between the last step boundary and this clock
+        # position belong before the CLOCK entry, or the recording would run backwards.
+        self._flush_scheduled(timestamp)
         self._record(timestamp, EntryKind.CLOCK, {"timestamp": timestamp.isoformat()})
 
     def _advance_to(self, timestamp: datetime) -> None:

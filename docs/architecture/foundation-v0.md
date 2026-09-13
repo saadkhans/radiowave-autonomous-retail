@@ -119,26 +119,15 @@ candidates there is nothing to disambiguate and margin is 1.0. Physical events
 * A localization gap longer than `reset_after_s` breaks motion continuity: a resting item
   re-initializes where it reappears (no PICK is inferred from the jump) and a carried item
   keeps its committed carrier. LOST shoppers are never re-scored from item-only updates.
-* Recordings carry `format_version`: **v1** (Foundation v0) contains observations, proposals,
-  decisions, cart events, ground truth, `STORE_TWIN` / `PIPELINE_CONFIG` header; ends with
-  the last observation and replays with the default final step. **v2** (Observatory v0) adds
-  input-side kinds `CLOCK` (explicit clock advance without observation), `DUPLICATE_OBSERVATION`
-  (ingress attempt the deduplicator rejected, so replay exercises deduplication again), and
-  `RUN_END` (terminal entry; nothing follows). Readers accept {1, 2}, refuse anything else
-  explicitly, refuse v2-only kinds inside a v1 entry, and refuse a stream that mixes versions
-  (`validate_recording`); a v1 recording is never reinterpreted as v2.
+* **v1 format** (Foundation v0 legacy): `format_version` may be absent (read default `LEGACY_RECORDING_FORMAT_VERSION` = 1) or explicit 1, contains observations/proposals/decisions/cart events/ground truth/STORE_TWIN/PIPELINE_CONFIG, ends at EOF. **v2 format** (Observatory v0 forward): explicit `format_version: 2`, mandatory `RUN_END` terminal entry; EOF without it signals truncation/corruption/still-being-written and replay refuses finalization. `RECORDING_FORMAT_VERSION` is an import alias for `CURRENT_RECORDING_FORMAT_VERSION` (v2). Readers accept {1, 2}, refuse others, and never reinterpret versions.
 * `RUN_END` is the final logical entry: `finish()` performs the terminal evaluation, flushes
   every scheduled entry, closes carts/sessions, then writes `RUN_END` and seals the pipeline
-  (second `finish()` is idempotent; `ingest` / `advance_to` / `schedule_entry` raise afterwards).
-  Nothing follows `RUN_END`; replay refuses a recording with entries after it.
-* A rejected duplicate ingress attempt is recorded as `DUPLICATE_OBSERVATION`, stamped with the
-  pipeline clock at rejection (so the file stays chronological even for a stale or future-stamped
-  duplicate) with the attempt's own payload; replay feeds it through intake again, where the
-  deduplicator must reject it again (otherwise the recording is refused as inconsistent). A duplicate
-  never moves the clock, live or on replay, so scenario 10's dropped-duplicate count round-trips
-  through JSONL and Parquet.
-* A JSONL or Parquet recording replays to the identical committed events, carts
-  and item states (`tests/integration/test_replay_matrix.py`, `tests/integration/test_pipeline_replay.py`).
+  (a second `finish()` is idempotent; `ingest` / `advance_to` / `schedule_entry` raise afterwards).
+* **Stream validation** (`validate_recording`): one format version per file (mixed versions rejected), `sequence` strictly increases, envelope timestamps never move backwards. A `DUPLICATE_OBSERVATION` is stamped with the pipeline clock at rejection (not the attempt's timestamp), so stale/future-stamped duplicates preserve chronology. `RUN_END` is terminal and mandatory for v2.
+* **Control payloads are typed**: `RUN_END` is exactly `{"advance": <bool>}` (never coerced); `CLOCK` payload `timestamp` must equal the envelope timestamp (the envelope is authoritative). Malformed rows fail on read with line/row detail; the CLI reports `invalid recording: <reason>` with a non-zero exit.
+* A rejected duplicate ingress attempt is recorded as `DUPLICATE_OBSERVATION`, stamped with the pipeline clock at rejection, carrying the attempt's payload; replay feeds it through intake again, where the deduplicator must reject it again (otherwise refused as inconsistent). Duplicates never move the clock live or in replay, so scenario 10's dropped-duplicate count round-trips through JSONL and Parquet.
+* A JSONL or Parquet recording replays to identical committed events, carts and item states
+  (`tests/integration/test_replay_matrix.py`, `tests/integration/test_pipeline_replay.py`).
   Every recording starts with `STORE_TWIN` and `PIPELINE_CONFIG` entries so replay uses the original
   twin and thresholds.
 * Observations older than the pipeline clock are dropped and counted, never applied.

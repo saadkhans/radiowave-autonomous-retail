@@ -111,13 +111,27 @@ def _load_json_model[M: BaseModel](path: Path, model: type[M]) -> M:
         raise SystemExit(f"{path} is not a valid {model.__name__}: {exc}") from exc
 
 
+def _payload_error(entry: RecordedEntry, exc: ValidationError) -> str:
+    """One readable line for an embedded header payload the contract rejects."""
+    errors = exc.errors()
+    where = ".".join(str(part) for part in errors[0]["loc"]) if errors else ""
+    reason = errors[0]["msg"] if errors else "invalid"
+    return (
+        f"entry {entry.sequence}: {entry.kind.value} payload is invalid"
+        f"{f' at {where}' if where else ''}: {reason}"
+    )
+
+
 def _config_for(entries: list[RecordedEntry], args: argparse.Namespace) -> PipelineConfig:
     """The configuration the recording was produced with; never silently defaulted."""
     if args.config is not None:
         return _load_json_model(Path(args.config), PipelineConfig)
     for entry in entries:
         if entry.kind == EntryKind.PIPELINE_CONFIG:
-            return PipelineConfig.model_validate(entry.payload)
+            try:
+                return PipelineConfig.model_validate(entry.payload)
+            except ValidationError as exc:
+                raise RecordingError(_payload_error(entry, exc)) from exc
     msg = (
         "recording carries no PIPELINE_CONFIG entry; pass --config <pipeline.json> so replay "
         "uses the thresholds the recording was produced with"
@@ -133,7 +147,10 @@ def _store_for(entries: list[RecordedEntry], args: argparse.Namespace) -> Store:
         return load_scenario(args.scenario).store
     for entry in entries:
         if entry.kind == EntryKind.STORE_TWIN:
-            return Store.model_validate(entry.payload)
+            try:
+                return Store.model_validate(entry.payload)
+            except ValidationError as exc:
+                raise RecordingError(_payload_error(entry, exc)) from exc
     msg = (
         "recording carries no STORE_TWIN entry; pass --store <store.json> or "
         "--scenario <id> so replay uses the original digital twin"
@@ -175,7 +192,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 pipeline.advance_to(entry.timestamp)  # recorded clock boundary
                 continue
             if entry.kind == EntryKind.RUN_END:
-                end_advance = bool(entry.payload.get("advance", True))
+                end_advance = entry.run_end_advance  # validated strict bool
                 continue  # keep consuming so a malformed trailer is still rejected
             if entry.kind == EntryKind.DUPLICATE_OBSERVATION:
                 pipeline.replay_duplicate(entry)  # rejected again, clock untouched
@@ -189,6 +206,13 @@ def cmd_replay(args: argparse.Namespace) -> int:
             )
             answer = sys.stdin.readline()
             if answer.strip().lower() == "q":
+                # Operator abort: the stream contract (including a v2 RUN_END) is not
+                # checked past this point, so the summary describes a partial replay.
+                print(
+                    f"replay aborted at entry {entry.sequence} before the end of the "
+                    "recording; the summary below is a partial replay",
+                    file=sys.stderr,
+                )
                 break
             pipeline.ingest(observation)  # steps fusion across every boundary it crosses
         result = pipeline.finish(advance=end_advance)
@@ -249,8 +273,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result: int = args.func(args)
     except RecordingError as exc:
-        # A recording that violates the format contract (mixed versions, entries after
-        # RUN_END, a duplicate that is not a duplicate) is refused, never half-replayed.
+        # A recording that violates the format contract (unsupported or mixed versions,
+        # a v2 file without RUN_END, entries after RUN_END, timestamp or sequence
+        # regressions, malformed control payloads, a duplicate that is not a duplicate)
+        # is refused with one readable line, never half-replayed.
         raise SystemExit(f"invalid recording: {exc}") from exc
     return result
 

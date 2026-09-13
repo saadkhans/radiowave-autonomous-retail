@@ -31,7 +31,12 @@ from pathlib import Path
 import pytest
 
 from radiowave.contracts.observations import AnyObservation
-from radiowave.contracts.recording import EntryKind, RecordedEntry, RecordingError
+from radiowave.contracts.recording import (
+    EntryKind,
+    RecordedEntry,
+    RecordingError,
+    validate_recording,
+)
 from radiowave.contracts.store import SourceType
 from radiowave.pipeline import FoundationPipeline, PipelineResult
 from radiowave.replay.reader import open_replay_source
@@ -54,6 +59,7 @@ def _fingerprint(result: PipelineResult) -> dict[str, object]:
     return {
         "observations_accepted": result.observations_accepted,
         "observations_dropped": result.observations_dropped,
+        "observations_out_of_order": result.observations_out_of_order,
         "steps": result.steps,
         "persons": [(p.track_id, p.state.value, p.observation_count) for p in result.person_tracks],
         "items": [(t.epc.value, t.state.value, t.carrier_track_id) for t in result.item_tracks],
@@ -223,6 +229,33 @@ CASE_BUILDERS: dict[str, Callable[[], tuple[Scenario, InMemoryRecorder, Pipeline
     "single observation then finish": _case_single_observation,
     "zero observations with scheduled ground truth": _case_zero_observations,
 }
+
+
+def test_explicit_clock_flushes_scheduled_entries_before_its_clock_entry() -> None:
+    """A scheduled entry (ground truth) stamped between the last step boundary and an
+    explicit clock advance is written before the CLOCK entry, so the recording the
+    pipeline writes is chronological and passes its own validator."""
+    scenario = load_scenario("01")
+    recorder = InMemoryRecorder()
+    pipeline = build_pipeline(scenario, recorder=recorder)
+    for observation in scenario_observation_stream(scenario):
+        pipeline.ingest(observation)
+    end = scenario.at(scenario.duration_s)
+    # Off the 0.25 s step grid on purpose: 2.13 s lies after the last boundary reached
+    # by an advance to +2.2 s, so only advance_to() itself can place it correctly.
+    pipeline.schedule_entry(end + timedelta(seconds=2.13), EntryKind.GROUND_TRUTH, {"t": 2.13})
+    pipeline.advance_to(end + timedelta(seconds=2.2))
+    pipeline.finish(advance=False)
+
+    entries = recorder.entries
+    kinds = [entry.kind for entry in entries]
+    truth_index = max(i for i, kind in enumerate(kinds) if kind == EntryKind.GROUND_TRUTH)
+    clock_index = max(i for i, kind in enumerate(kinds) if kind == EntryKind.CLOCK)
+    assert truth_index < clock_index
+    timestamps = [entry.timestamp for entry in entries]
+    assert timestamps == sorted(timestamps)
+    assert kinds[-1] == EntryKind.RUN_END
+    assert list(validate_recording(entries)) == entries
 
 
 @pytest.mark.parametrize("case_name", list(CASE_BUILDERS), ids=list(CASE_BUILDERS))
@@ -493,7 +526,7 @@ def test_explicit_clock_advance_replays_identically_in_both_file_formats(
 
 
 @pytest.mark.parametrize("driver", ["batch", "observatory"])
-@pytest.mark.parametrize("scenario_id", ["01", "03", "04", "05", "06", "10"])
+@pytest.mark.parametrize("scenario_id", ["01", "03", "04", "05", "06", "10", "12", "12v"])
 def test_live_vs_recorded_replay_matrix(scenario_id: str, driver: str) -> None:
     """Invariant 8: recorded + replayed result == live result, for every driver and scenario."""
     scenario = load_scenario(scenario_id)
@@ -505,3 +538,96 @@ def test_live_vs_recorded_replay_matrix(scenario_id: str, driver: str) -> None:
 
     replayed = _replay(scenario, recorder.entries)
     assert _fingerprint(replayed) == _fingerprint(live)
+
+
+# --------------------------------------------------------------------------- test I
+
+
+def test_duplicate_payload_timestamps_never_affect_physical_time() -> None:
+    """A rejected duplicate's own (future or stale) payload timestamp never mutates
+    physical state: dedup counters aside, the pipeline's clock, steps, session states,
+    pending events, cart state and person track states are all unaffected, and the
+    recorded DUPLICATE entries are stamped with the clock, not the attempt's own time.
+
+    ``ObservationDeduplicator.content_key`` hashes every normalized field except
+    ``observation_id`` (see ``radiowave/ingestion/deduplication.py``), which includes
+    ``timestamp``; a fresh-id attempt whose *payload timestamp also differs* from the
+    original is therefore new content, not a duplicate (it is rejected as
+    out-of-order instead, since it is stale relative to the clock). The two attempts
+    below are the two ways a duplicate is actually recognised: by id (whatever the
+    payload timestamp claims) and by content (a fresh id, identical content including
+    the original's own now-stale timestamp).
+    """
+    scenario = load_scenario("04")
+    recorder = InMemoryRecorder()
+    pipeline = build_pipeline(scenario, recorder=recorder)
+    stream = scenario_observation_stream(scenario)
+    half = len(stream) // 2
+    for observation in stream[:half]:
+        pipeline.ingest(observation)
+
+    accepted = stream[half - 1]
+    last_timestamp_before = pipeline._last_timestamp
+    dropped_before = pipeline.dedup.dropped
+    before = _fingerprint(pipeline.result())
+
+    future_duplicate = accepted.model_copy(
+        update={"timestamp": accepted.timestamp + timedelta(minutes=10)}
+    )
+    stale_content_duplicate = accepted.model_copy(
+        update={"observation_id": f"{accepted.observation_id}-fresh"}
+    )
+
+    assert pipeline.ingest(future_duplicate) is False
+    assert pipeline.ingest(stale_content_duplicate) is False
+    assert pipeline.dedup.dropped == dropped_before + 2
+    assert pipeline._last_timestamp == last_timestamp_before
+
+    after = _fingerprint(pipeline.result())
+    assert after["observations_dropped"] == before["observations_dropped"] + 2
+    for key in before:
+        if key == "observations_dropped":
+            continue
+        assert after[key] == before[key], key
+
+    duplicate_entries = [e for e in recorder.entries if e.kind == EntryKind.DUPLICATE_OBSERVATION]
+    assert len(duplicate_entries) == 2
+    assert all(e.timestamp == last_timestamp_before for e in duplicate_entries)
+
+    for observation in stream[half:]:
+        pipeline.ingest(observation)
+    live = pipeline.finish()
+
+    entries = recorder.entries
+    timestamps = [e.timestamp for e in entries]
+    assert timestamps == sorted(timestamps)
+
+    replayed = _replay(scenario, entries)
+    assert _fingerprint(replayed) == _fingerprint(live)
+
+
+# --------------------------------------------------------------------------- test J
+
+
+@pytest.mark.parametrize("fraction", [0.25, 0.5, 0.9])
+def test_truncated_v2_recording_never_yields_a_completed_replay(fraction: float) -> None:
+    """A v2 recording cut anywhere before its RUN_END is refused, never half-replayed."""
+    scenario = load_scenario("05")
+    recorder = InMemoryRecorder()
+    run_scenario(scenario, recorder=recorder)
+    entries = recorder.entries
+    assert entries[-1].kind == EntryKind.RUN_END
+
+    cutoff = int(len(entries) * fraction)
+    while cutoff > 0 and entries[cutoff - 1].kind == EntryKind.RUN_END:
+        cutoff -= 1
+    truncated = entries[:cutoff]
+    assert not any(e.kind == EntryKind.RUN_END for e in truncated)
+
+    with pytest.raises(RecordingError, match="ended without RUN_END"):
+        list(validate_recording(truncated))
+
+    pipeline = build_pipeline(scenario)
+    with pytest.raises(RecordingError, match="ended without RUN_END"):
+        pipeline.replay(truncated)
+    assert pipeline.finished is False

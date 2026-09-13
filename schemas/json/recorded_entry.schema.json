@@ -30,8 +30,8 @@
   "additionalProperties": false,
   "properties": {
     "format_version": {
-      "default": 2,
-      "description": "Recording format: 1 = Foundation v0, 2 = adds CLOCK, DUPLICATE_OBSERVATION and RUN_END; other versions are rejected on read",
+      "default": 1,
+      "description": "Recording format: 1 = Foundation v0 (the default when the field is absent, for legacy data), 2 = adds CLOCK, DUPLICATE_OBSERVATION and RUN_END (what every new writer declares explicitly); other versions are rejected on read",
       "enum": [
         1,
         2

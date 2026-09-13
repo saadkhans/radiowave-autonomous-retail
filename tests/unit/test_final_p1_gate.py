@@ -17,7 +17,11 @@ from radiowave.contracts import (
     Velocity,
     WorldCoordinate,
 )
-from radiowave.contracts.recording import EntryKind, RecordedEntry
+from radiowave.contracts.recording import (
+    CURRENT_RECORDING_FORMAT_VERSION,
+    EntryKind,
+    RecordedEntry,
+)
 from radiowave.digital_twin.registry import StoreRegistry
 from radiowave.ingestion.deduplication import ObservationDeduplicator
 from radiowave.pipeline import FoundationPipeline, PipelineConfig
@@ -245,11 +249,14 @@ def test_cli_replay_rejects_when_every_observation_is_spatially_inconsistent(tmp
     path = tmp_path / "spatially_inconsistent.jsonl"
     recorder = JsonlRecorder(path)
     header_timestamp = at(0.0)
+    # A new recording declares the writer version explicitly (the model default is
+    # the legacy v1 read default), like every entry from_observation() produces.
     recorder.record(
         RecordedEntry(
             sequence=0,
             timestamp=header_timestamp,
             kind=EntryKind.STORE_TWIN,
+            format_version=CURRENT_RECORDING_FORMAT_VERSION,
             payload=registry.store.model_dump(mode="json"),
         )
     )
@@ -258,12 +265,24 @@ def test_cli_replay_rejects_when_every_observation_is_spatially_inconsistent(tmp
             sequence=1,
             timestamp=header_timestamp,
             kind=EntryKind.PIPELINE_CONFIG,
+            format_version=CURRENT_RECORDING_FORMAT_VERSION,
             payload=config.model_dump(mode="json"),
         )
     )
     for i in range(3):
         obs = _item(i * 0.1, 6.0, 4.0, sensor="rfid-floor", zone="exit")
         recorder.record(RecordedEntry.from_observation(2 + i, obs))
+    # A v2 recording is complete only with its RUN_END; without it the CLI would refuse
+    # the file as truncated before ever reaching the spatial-consistency rejection.
+    recorder.record(
+        RecordedEntry(
+            sequence=5,
+            timestamp=at(0.2),
+            kind=EntryKind.RUN_END,
+            format_version=CURRENT_RECORDING_FORMAT_VERSION,
+            payload={"advance": True},
+        )
+    )
     recorder.close()
 
     assert main(["replay", str(path)]) == 1

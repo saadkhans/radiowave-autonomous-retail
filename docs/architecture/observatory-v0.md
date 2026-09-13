@@ -50,15 +50,17 @@ pre-generated observation list for its scenario:
   from worker threads and a response must describe its own request. Each
   mutation bumps `revision` and returns the complete snapshot (state, the full
   event stream and the timeline) captured under that same lock, and so does
-  `POST /runs`; `GET /runs/{id}/snapshot` serves the same shape for a fresh
-  read. The UI publishes only such snapshots, never independently fetched
-  pieces.
+  `POST /runs`. The run manager captures the initial snapshot before the run is
+  published (`RunManager.create_with_snapshot`), so `POST /runs` always returns
+  the t=0 snapshot and a concurrent client cannot mutate a run it cannot yet
+  discover. `GET /runs/{id}/snapshot` serves the same shape for a fresh read.
+  The UI publishes only such snapshots, never independently fetched pieces.
 * `FoundationPipeline.advance_to()` normalizes its clock through the same
   `ensure_utc` rule as every contract: naive timestamps are rejected. Recordings
-  produced this way are format v2, with every explicit advance recorded as a `CLOCK`
-  entry and the run ending with `RUN_END` (the terminal entry, written after the
-  terminal evaluation and every scheduled entry, stamped no earlier than anything
-  already recorded so it stays last in file order and in timestamp order).
+  produced this way are format v2 with mandatory `RUN_END`: every explicit advance
+  is recorded as a `CLOCK` entry and the run ends with `RUN_END` (the terminal entry,
+  written after the terminal evaluation and every scheduled entry, stamped no earlier
+  than anything already recorded so it stays last in file order and in timestamp order).
   Scenario-10 duplicate observations are recorded as `DUPLICATE_OBSERVATION` entries
   stamped at the rejection moment and replayed through deduplication. The CLI `replay`
   command honours `CLOCK`, `DUPLICATE_OBSERVATION` and `RUN_END`, so a recording
@@ -77,9 +79,14 @@ timeline seeks are queued strictly FIFO and start only after every earlier opera
 settled (the final displayed time is the last seek issued); `busy` stays true from
 the first enqueue until the last queued task settles; a failed request never poisons
 the queue; and a snapshot is dropped if its run id or request generation is stale
-(`isStaleSnapshot`). While playing, a 200 ms wall-clock interval asks the API for
-`speed × 0.2 s` of simulated time and re-renders the returned state; a tick request
-in flight suppresses the next tick, so a slow API slows playback instead of drifting.
+(`isStaleSnapshot`). The Play button is disabled while any request is queued or
+running (`busy`), and `play()` itself checks the executor before starting playback,
+refusing outright if exclusive work is pending. The playback loop is bound to the
+active run id (from `state.run?.run_id`) and is torn down when the run changes,
+so a replacement run can never be advanced by a loop started on the old one.
+While playing, a 200 ms wall-clock interval asks the API for `speed × 0.2 s` of
+simulated time and re-renders the returned state; a tick request in flight
+suppresses the next tick, so a slow API slows playback instead of drifting.
 
 ## View models
 

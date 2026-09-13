@@ -39,10 +39,13 @@ def list_runs(request: Request) -> list[str]:
 
 @router.post("/runs", response_model=ObservatorySnapshot, status_code=201)
 def create_run(request: Request, body: RunCreateRequest) -> ObservatorySnapshot:
-    """Create a run and return its initial snapshot so the client binds to it atomically."""
+    """Create a run and return its initial snapshot so the client binds to it atomically.
+
+    The snapshot is captured before the run is published, so it is the t=0 snapshot.
+    """
     if body.scenario_id not in SCENARIOS:
         raise HTTPException(status_code=404, detail=f"unknown scenario {body.scenario_id!r}")
-    return _manager(request).create(body.scenario_id, body.seed).snapshot()
+    return _manager(request).create_with_snapshot(body.scenario_id, body.seed)
 
 
 @router.delete("/runs/{run_id}", status_code=204)

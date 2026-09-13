@@ -12,7 +12,11 @@ export function ReplayControls() {
       <button
         type="button"
         className={`btn ${playing ? "btn-active" : ""}`}
-        disabled={!hasRun || finished}
+        // While a replacement run or seek is in flight (busy) and we are not
+        // already playing, Play must stay disabled: it would otherwise bind
+        // to a run that is about to be discarded. Pause must stay clickable
+        // while playing even if a tick is in flight (busy).
+        disabled={!hasRun || finished || (busy && !playing)}
         onClick={() => (playing ? pause() : play())}
         aria-label={playing ? "Pause" : "Play"}
       >
