@@ -170,18 +170,40 @@ function describe(error: unknown): string {
   return String(error);
 }
 
+/**
+ * True if a response was captured under a run/generation that is no longer
+ * current: either it belongs to a different run_id, or a newer exclusive
+ * action (selectScenario/startRun/reset) has started since the request was
+ * issued. Pure so it can be unit-tested without the provider.
+ */
+export function isStaleSnapshot(
+  currentRunId: string | null,
+  currentGeneration: number,
+  snapshot: Snapshot,
+  requestGeneration: number,
+): boolean {
+  return snapshot.state.run_id !== currentRunId || requestGeneration !== currentGeneration;
+}
+
 export function ObservatoryProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const runIdRef = useRef<string | null>(null);
-  const inflightRef = useRef<Promise<void> | null>(null);
+  // Serial executor state: queueTailRef is the promise chain every mutating
+  // action is threaded through (so requests never overlap), pendingCountRef
+  // counts enqueued-but-not-settled tasks (drives `busy`), and generationRef
+  // is bumped by exclusive actions that supersede anything already in flight.
+  const queueTailRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingCountRef = useRef(0);
+  const generationRef = useRef(0);
   const speedRef = useRef(state.speed);
   speedRef.current = state.speed;
 
   // Every mutation returns the complete snapshot (state, events and timeline
   // captured under the run's lock at one revision); the UI publishes exactly
-  // that, so a response always describes its own request.
-  const applyRun = useCallback((snapshot: Snapshot) => {
-    if (runIdRef.current !== snapshot.state.run_id) return;
+  // that, so a response always describes its own request - unless it is
+  // stale (superseded run or generation), in which case it is dropped.
+  const applyRun = useCallback((snapshot: Snapshot, generation: number) => {
+    if (isStaleSnapshot(runIdRef.current, generationRef.current, snapshot, generation)) return;
     dispatch({
       type: "snapshot",
       run: snapshot.state,
@@ -190,17 +212,14 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  const guarded = useCallback(
-    async (work: () => Promise<void>, options: { queue?: boolean } = {}) => {
-      if (inflightRef.current) {
-        if (!options.queue) return;
-        await inflightRef.current;
-      }
-      let release: () => void = () => {};
-      inflightRef.current = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      dispatch({ type: "busy", busy: true });
+  // Appends `work` to the serial queue. The wrapper never rejects (errors are
+  // caught and turned into the `error`/`playing` dispatches below), so a
+  // failed task can never poison the chain: task N+1 always starts once task
+  // N has fully settled, in strict FIFO order.
+  const enqueue = useCallback((work: () => Promise<void>) => {
+    pendingCountRef.current += 1;
+    if (pendingCountRef.current === 1) dispatch({ type: "busy", busy: true });
+    const task = queueTailRef.current.then(async () => {
       try {
         await work();
         dispatch({ type: "error", error: null });
@@ -208,13 +227,30 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "error", error: describe(error) });
         dispatch({ type: "playing", playing: false });
       } finally {
-        inflightRef.current = null;
-        release();
-        dispatch({ type: "busy", busy: false });
+        pendingCountRef.current -= 1;
+        if (pendingCountRef.current === 0) dispatch({ type: "busy", busy: false });
       }
+    });
+    // The wrapper above cannot reject, but the chain tail must survive even if it
+    // ever did: a rejected tail would poison every later task and wedge `busy`.
+    queueTailRef.current = task.catch(() => {});
+    return task;
+  }, []);
+
+  // Exclusive actions (selectScenario, startRun, step, reset, playback ticks)
+  // deliberately refuse outright while anything is queued or running, rather
+  // than piling up behind it.
+  const runExclusive = useCallback(
+    (work: () => Promise<void>) => {
+      if (pendingCountRef.current > 0) return Promise.resolve();
+      return enqueue(work);
     },
-    [],
+    [enqueue],
   );
+
+  // Queued actions (seek) always enqueue: queued seeks are strictly FIFO, so
+  // the final displayed time is whichever seek was issued last.
+  const runQueued = useCallback((work: () => Promise<void>) => enqueue(work), [enqueue]);
 
   useEffect(() => {
     let cancelled = false;
@@ -233,56 +269,75 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // A selection is ignored while a request is in flight (the selector is also
-  // disabled), so a run snapshot can never land under a newer scenario.
+  // A selection is ignored while a request is queued or in flight (the
+  // selector is also disabled), so a run snapshot can never land under a
+  // newer scenario. runExclusive owns that refusal; the placeholder dispatch
+  // and runIdRef clear below only take effect if the request is not refused.
   const selectScenario = useCallback(
-    async (scenarioId: string) => {
-      if (inflightRef.current) return;
-      runIdRef.current = null;
-      dispatch({ type: "scenario", scenarioId, scenario: null });
-      await guarded(async () => {
+    (scenarioId: string) => {
+      return runExclusive(async () => {
+        generationRef.current += 1;
+        runIdRef.current = null;
+        dispatch({ type: "scenario", scenarioId, scenario: null });
         const scenario = await api.getScenario(scenarioId);
         dispatch({ type: "scenario", scenarioId, scenario });
       });
     },
-    [guarded],
+    [runExclusive],
   );
 
-  const startRun = useCallback(async () => {
+  // Starting or replacing a run always stops playback, even when the start
+  // itself is refused because another request is still queued or running.
+  const startRun = useCallback(() => {
     const scenarioId = state.scenarioId;
-    if (!scenarioId) return;
+    if (!scenarioId) return Promise.resolve();
     dispatch({ type: "playing", playing: false });
-    await guarded(async () => {
+    return runExclusive(async () => {
+      generationRef.current += 1;
+      const generation = generationRef.current;
       const snapshot = await api.createRun(scenarioId);
       runIdRef.current = snapshot.state.run_id;
       dispatch({ type: "select", selection: null });
-      applyRun(snapshot);
+      applyRun(snapshot, generation);
     });
-  }, [applyRun, guarded, state.scenarioId]);
+  }, [applyRun, runExclusive, state.scenarioId]);
 
-  const step = useCallback(async () => {
+  const step = useCallback(() => {
     const runId = runIdRef.current;
-    if (!runId) return;
-    await guarded(async () => applyRun(await api.step(runId)));
-  }, [applyRun, guarded]);
+    if (!runId) return Promise.resolve();
+    return runExclusive(async () => {
+      const generation = generationRef.current;
+      applyRun(await api.step(runId), generation);
+    });
+  }, [applyRun, runExclusive]);
 
-  const reset = useCallback(async () => {
+  // Reset pauses first for the same reason as startRun; a refused reset still pauses.
+  const reset = useCallback(() => {
     const runId = runIdRef.current;
-    if (!runId) return;
+    if (!runId) return Promise.resolve();
     dispatch({ type: "playing", playing: false });
-    await guarded(async () => applyRun(await api.reset(runId)));
-  }, [applyRun, guarded]);
+    return runExclusive(async () => {
+      generationRef.current += 1;
+      const generation = generationRef.current;
+      applyRun(await api.reset(runId), generation);
+    });
+  }, [applyRun, runExclusive]);
 
-  // Seeking pauses playback and, if a tick is still in flight, waits for it
-  // instead of being dropped by the in-flight guard.
+  // Seeking pauses playback and always queues (runQueued): a seek issued
+  // while a tick or another seek is still in flight waits its turn instead of
+  // being dropped, and multiple queued seeks resolve strictly FIFO so the
+  // final displayed time is the last seek issued.
   const seek = useCallback(
-    async (timeS: number) => {
+    (timeS: number) => {
       const runId = runIdRef.current;
-      if (!runId) return;
+      if (!runId) return Promise.resolve();
       dispatch({ type: "playing", playing: false });
-      await guarded(async () => applyRun(await api.seek(runId, timeS)), { queue: true });
+      return runQueued(async () => {
+        const generation = generationRef.current;
+        applyRun(await api.seek(runId, timeS), generation);
+      });
     },
-    [applyRun, guarded],
+    [applyRun, runQueued],
   );
 
   const play = useCallback(() => {
@@ -298,22 +353,24 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
   );
 
   // Playback: each wall-clock tick advances SIMULATED time by speed * TICK_MS.
-  // The API owns the clock; the browser only paces requests.
+  // The API owns the clock; the browser only paces requests. runExclusive
+  // refuses a tick outright while a previous tick (or any other action) is
+  // still queued or running, so ticks never overlap.
   useEffect(() => {
     if (!state.playing) return;
     const runId = runIdRef.current;
     if (!runId) return;
     const handle = window.setInterval(() => {
-      if (inflightRef.current) return;
       const seconds = (speedRef.current * TICK_MS) / 1000;
-      void guarded(async () => {
+      void runExclusive(async () => {
+        const generation = generationRef.current;
         const snapshot = await api.advance(runId, seconds);
-        applyRun(snapshot);
+        applyRun(snapshot, generation);
         if (snapshot.state.finished) dispatch({ type: "playing", playing: false });
       });
     }, TICK_MS);
     return () => window.clearInterval(handle);
-  }, [applyRun, guarded, state.playing]);
+  }, [applyRun, runExclusive, state.playing]);
 
   const actions = useMemo<ObservatoryActions>(
     () => ({

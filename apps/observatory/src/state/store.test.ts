@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { filterEvents, initialState, reducer } from "@/state/store";
-import { EVENTS, runState, SCENARIO_DETAIL } from "@/test/fixtures";
+import { filterEvents, initialState, isStaleSnapshot, reducer } from "@/state/store";
+import { EVENTS, runState, SCENARIO_DETAIL, timeline } from "@/test/fixtures";
+import type { Snapshot } from "@/types/api";
 
 describe("filterEvents", () => {
   it("returns everything for ALL with no selection", () => {
@@ -50,5 +51,25 @@ describe("reducer", () => {
     expect(next.layers.sensors).toBe(true);
     expect(next.layers.zones).toBe(true);
     expect(reducer(next, { type: "layer", key: "sensors", value: false }).layers.sensors).toBe(false);
+  });
+});
+
+describe("isStaleSnapshot", () => {
+  const snapshot: Snapshot = {
+    state: runState({ run_id: "run-0001" }),
+    events: { run_id: "run-0001", epoch: 0, events: [], next_seq: 0, total: 0 },
+    timeline: timeline({ run_id: "run-0001" }),
+  };
+
+  it("is stale when the snapshot's run_id no longer matches the current run", () => {
+    expect(isStaleSnapshot("run-0002", 1, snapshot, 1)).toBe(true);
+  });
+
+  it("is stale when the run_id matches but a newer generation has started", () => {
+    expect(isStaleSnapshot("run-0001", 2, snapshot, 1)).toBe(true);
+  });
+
+  it("is not stale when both the run_id and the generation match", () => {
+    expect(isStaleSnapshot("run-0001", 1, snapshot, 1)).toBe(false);
   });
 });

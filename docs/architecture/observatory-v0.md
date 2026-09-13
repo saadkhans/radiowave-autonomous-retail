@@ -19,7 +19,7 @@ apps/observatory/              React 19 + TypeScript + Vite 7 + Tailwind 4 (pnpm
   src/types/api.ts             TypeScript mirror of the view models
   src/lib/api.ts               fetch wrapper over /api
   src/lib/geometry.ts          world (metres, y north) -> SVG (pixels, y down) projector
-  src/state/store.tsx          reducer + context + deterministic playback loop
+  src/state/store.tsx          reducer + context + serial request executor + deterministic playback loop
   src/components/StoreMap.tsx  SVG map: floor, grid, zones, fixtures, boundaries, sensors, trails, markers
   src/components/Inspector.tsx shopper / EPC details, candidate table, decision block
   src/components/CartPanel.tsx open and exited virtual carts
@@ -54,11 +54,15 @@ pre-generated observation list for its scenario:
   read. The UI publishes only such snapshots, never independently fetched
   pieces.
 * `FoundationPipeline.advance_to()` normalizes its clock through the same
-  `ensure_utc` rule as every contract: naive timestamps are rejected. Every
-  explicit advance is recorded as a `CLOCK` entry and the end of a run as
-  `RUN_END` (with its `advance` flag), and `FoundationPipeline.replay(entries)`
-  (also the CLI `replay` command) honours both, so a recording driven through a
-  trailing dropout replays to the identical result.
+  `ensure_utc` rule as every contract: naive timestamps are rejected. Recordings
+  produced this way are format v2, with every explicit advance recorded as a `CLOCK`
+  entry and the run ending with `RUN_END` (the terminal entry, written after the
+  terminal evaluation and every scheduled entry, stamped no earlier than anything
+  already recorded so it stays last in file order and in timestamp order).
+  Scenario-10 duplicate observations are recorded as `DUPLICATE_OBSERVATION` entries
+  stamped at the rejection moment and replayed through deduplication. The CLI `replay`
+  command honours `CLOCK`, `DUPLICATE_OBSERVATION` and `RUN_END`, so a recording
+  driven through a trailing dropout replays to the identical result.
 * `reset` (and a backward seek) bumps `epoch`; event sequence numbers are only
   comparable within one epoch and `GET /events?since=&epoch=` restarts at 0
   when the epoch is stale.
@@ -66,10 +70,16 @@ pre-generated observation list for its scenario:
   `runner.scenario_observation_stream()`, i.e. every observation twice, so the
   dropped-duplicate counter shows the idempotency the scenario exists to prove.
 
-The browser never advances the clock itself. While playing, a 200 ms wall-clock
-interval asks the API for `speed × 0.2 s` of simulated time and re-renders the
-returned state; a request in flight suppresses the next tick, so a slow API
-slows playback instead of drifting.
+The browser never advances the clock itself. Every mutating action goes through
+one serial executor (a promise chain): exclusive actions (scenario select, start,
+step, reset, playback tick) refuse outright while anything is queued or running;
+timeline seeks are queued strictly FIFO and start only after every earlier operation
+settled (the final displayed time is the last seek issued); `busy` stays true from
+the first enqueue until the last queued task settles; a failed request never poisons
+the queue; and a snapshot is dropped if its run id or request generation is stale
+(`isStaleSnapshot`). While playing, a 200 ms wall-clock interval asks the API for
+`speed × 0.2 s` of simulated time and re-renders the returned state; a tick request
+in flight suppresses the next tick, so a slow API slows playback instead of drifting.
 
 ## View models
 
@@ -95,6 +105,10 @@ Two derivations deserve a note:
 * `Item.decision` is the latest decision for the item's current episode
   (movement start, or rest start), so a COMMIT or REVIEW stays inspectable after
   the event leaves the pipeline's pending set.
+* `Person.cart_id` is the OPEN cart mapped (via `cart_sessions`) to the person's
+  current session; a re-entered shopper whose new session has not yet committed
+  a cart-affecting event shows no cart, and the previous session's EXITED cart
+  stays in the cart list only.
 * Carts map to sessions through the pipeline's `cart_sessions` record, falling
   back to the n-th session of the track for a cart that never committed.
 * `RunState.unresolved` lists committed physical events the cart engine could

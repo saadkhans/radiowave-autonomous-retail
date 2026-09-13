@@ -170,25 +170,42 @@ export function timeline(overrides: Partial<Timeline> = {}): Timeline {
 
 type Handler = (url: URL, init?: RequestInit) => unknown;
 
+interface RunRecord {
+  time: number;
+  steps: number;
+}
+
 /**
  * Minimal fake of the Observatory API behind global fetch. Simulated time only
  * advances through /advance, /step, /seek and /reset, exactly like the server.
  */
 export function installFakeApi() {
-  let time = 0;
-  let steps = 0;
+  const runs = new Map<string, RunRecord>();
+  let runSeq = 0;
   const calls: string[] = [];
   const failures = new Set<string>();
+  const holdQueues = new Map<string, Array<{ promise: Promise<void>; release: () => void }>>();
   const flags = { exitHold: false, unresolved: false };
-  const state = (): RunState =>
+
+  const runIdFromPath = (pathname: string): string => pathname.match(/^\/api\/runs\/([^/]+)/)?.[1] ?? "";
+  const recordFor = (runId: string): RunRecord => {
+    const existing = runs.get(runId);
+    if (existing) return existing;
+    const created: RunRecord = { time: 0, steps: 0 };
+    runs.set(runId, created);
+    return created;
+  };
+
+  const state = (runId: string, record: RunRecord): RunState =>
     runState({
-      time_s: time,
-      steps,
-      finished: time >= 18,
-      persons: time > 0 ? [person({ x: Math.min(1 + time, 9), updated_s: time })] : [],
-      items: [item({ state: time >= 8.5 ? "CARRIED" : "ON_FIXTURE", carrier_track_id: time >= 8.5 ? "P0001" : null })],
+      run_id: runId,
+      time_s: record.time,
+      steps: record.steps,
+      finished: record.time >= 18,
+      persons: record.time > 0 ? [person({ x: Math.min(1 + record.time, 9), updated_s: record.time })] : [],
+      items: [item({ state: record.time >= 8.5 ? "CARRIED" : "ON_FIXTURE", carrier_track_id: record.time >= 8.5 ? "P0001" : null })],
       carts:
-        time >= 8.5
+        record.time >= 8.5
           ? [
               {
                 cart_id: "cart-P0001",
@@ -201,34 +218,100 @@ export function installFakeApi() {
             ]
           : [],
       unresolved:
-        flags.unresolved && time >= 8.5
+        flags.unresolved && record.time >= 8.5
           ? [{ epc: "3034F0000000000000A001", short_epc: "00A001", gtin: "06281234567890", product_name: "Black shirt", reason: "PICK without an attributed shopper", source_event_id: "evt-1", t_s: 8.5 }]
           : [],
     });
-  const events = () => ({ run_id: "run-0001", epoch: 0, events: EVENTS.filter((entry) => entry.t_s <= time), next_seq: 0, total: 0 });
-  const snapshot = () => ({ state: state(), events: events(), timeline: timeline({ time_s: time }) });
+  const events = (runId: string, record: RunRecord) => ({
+    run_id: runId,
+    epoch: 0,
+    events: EVENTS.filter((entry) => entry.t_s <= record.time),
+    next_seq: 0,
+    total: 0,
+  });
+  const snapshot = (runId: string, record: RunRecord) => ({
+    state: state(runId, record),
+    events: events(runId, record),
+    timeline: timeline({ run_id: runId, time_s: record.time }),
+  });
 
   const routes: Array<[RegExp, string, Handler]> = [
     [/^\/api\/health$/, "GET", () => ({ status: "ok", engine: "foundation-v0", version: "0.1.0" })],
     [/^\/api\/scenarios$/, "GET", () => [SCENARIO_SUMMARY, { ...SCENARIO_SUMMARY, scenario_id: "12", name: "ambiguous two-shopper pickup" }]],
     [/^\/api\/scenarios\/01$/, "GET", () => SCENARIO_DETAIL],
     [/^\/api\/scenarios\/12$/, "GET", () => ({ ...SCENARIO_DETAIL, scenario_id: "12", name: "ambiguous two-shopper pickup", description: "Two shoppers reach for the same shirt." })],
-    [/^\/api\/runs$/, "POST", () => { time = 0; steps = 0; return snapshot(); }],
-    [/^\/api\/runs\/run-0001\/reset$/, "POST", () => { time = 0; steps = 0; return snapshot(); }],
-    [/^\/api\/runs\/run-0001\/step$/, "POST", () => { time = Math.min(time + 0.25, 18); steps += 1; return snapshot(); }],
-    [/^\/api\/runs\/run-0001\/advance$/, "POST", (_url, init) => { const body = JSON.parse(String(init?.body)) as { seconds: number }; time = Math.min(time + body.seconds, 18); steps += 1; return snapshot(); }],
-    [/^\/api\/runs\/run-0001\/seek$/, "POST", (_url, init) => { const body = JSON.parse(String(init?.body)) as { time_s: number }; time = Math.min(body.time_s, 18); return snapshot(); }],
-    [/^\/api\/runs\/run-0001\/state$/, "GET", () => state()],
-    [/^\/api\/runs\/run-0001\/events$/, "GET", () => events()],
-    [/^\/api\/runs\/run-0001\/timeline$/, "GET", () => timeline({ time_s: time })],
-    [/^\/api\/runs\/run-0001\/snapshot$/, "GET", () => snapshot()],
+    [
+      /^\/api\/runs$/,
+      "POST",
+      () => {
+        runSeq += 1;
+        const runId = `run-${String(runSeq).padStart(4, "0")}`;
+        const record = recordFor(runId);
+        return snapshot(runId, record);
+      },
+    ],
+    [
+      /^\/api\/runs\/[^/]+\/reset$/,
+      "POST",
+      (url) => {
+        const runId = runIdFromPath(url.pathname);
+        const record = recordFor(runId);
+        record.time = 0;
+        record.steps = 0;
+        return snapshot(runId, record);
+      },
+    ],
+    [
+      /^\/api\/runs\/[^/]+\/step$/,
+      "POST",
+      (url) => {
+        const runId = runIdFromPath(url.pathname);
+        const record = recordFor(runId);
+        record.time = Math.min(record.time + 0.25, 18);
+        record.steps += 1;
+        return snapshot(runId, record);
+      },
+    ],
+    [
+      /^\/api\/runs\/[^/]+\/advance$/,
+      "POST",
+      (url, init) => {
+        const runId = runIdFromPath(url.pathname);
+        const record = recordFor(runId);
+        const body = JSON.parse(String(init?.body)) as { seconds: number };
+        record.time = Math.min(record.time + body.seconds, 18);
+        record.steps += 1;
+        return snapshot(runId, record);
+      },
+    ],
+    [
+      /^\/api\/runs\/[^/]+\/seek$/,
+      "POST",
+      (url, init) => {
+        const runId = runIdFromPath(url.pathname);
+        const record = recordFor(runId);
+        const body = JSON.parse(String(init?.body)) as { time_s: number };
+        record.time = Math.min(body.time_s, 18);
+        return snapshot(runId, record);
+      },
+    ],
+    [/^\/api\/runs\/[^/]+\/state$/, "GET", (url) => state(runIdFromPath(url.pathname), recordFor(runIdFromPath(url.pathname)))],
+    [/^\/api\/runs\/[^/]+\/events$/, "GET", (url) => events(runIdFromPath(url.pathname), recordFor(runIdFromPath(url.pathname)))],
+    [/^\/api\/runs\/[^/]+\/timeline$/, "GET", (url) => timeline({ run_id: runIdFromPath(url.pathname), time_s: recordFor(runIdFromPath(url.pathname)).time })],
+    [/^\/api\/runs\/[^/]+\/snapshot$/, "GET", (url) => snapshot(runIdFromPath(url.pathname), recordFor(runIdFromPath(url.pathname)))],
   ];
 
   const fetchMock = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = new URL(String(input), "http://localhost");
     const method = init?.method ?? "GET";
-    calls.push(`${method} ${url.pathname}`);
-    if (failures.delete(`${method} ${url.pathname}`)) {
+    const key = `${method} ${url.pathname}`;
+    calls.push(key);
+    const queue = holdQueues.get(key);
+    if (queue && queue.length > 0) {
+      const pending = queue.shift()!;
+      await pending.promise;
+    }
+    if (failures.delete(key)) {
       return new Response(JSON.stringify({ detail: "injected failure" }), { status: 500, headers: { "Content-Type": "application/json" } });
     }
     const route = routes.find(([pattern, verb]) => verb === method && pattern.test(url.pathname));
@@ -243,9 +326,25 @@ export function installFakeApi() {
   globalThis.fetch = fetchMock as typeof fetch;
   return {
     calls,
-    time: () => time,
+    time: (runId = "run-0001") => runs.get(runId)?.time ?? 0,
     /** Make the next request matching "METHOD /path" fail with 500. */
     failNext: (route: string) => failures.add(route),
+    /**
+     * Arm a FIFO hold for the next request(s) matching "METHOD /path": the
+     * call is still logged in `calls` immediately, but the response is not
+     * computed/returned until the returned release function is invoked.
+     * Multiple holds for the same route queue in FIFO order.
+     */
+    hold: (route: string): (() => void) => {
+      let release: () => void = () => {};
+      const promise = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const queue = holdQueues.get(route) ?? [];
+      queue.push({ promise, release });
+      holdQueues.set(route, queue);
+      return release;
+    },
     /** Serve the cart line as an exit hold (candidate + exit event) on an OPEN cart. */
     set exitHold(value: boolean) {
       flags.exitHold = value;

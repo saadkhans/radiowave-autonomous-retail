@@ -19,7 +19,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
 
-from radiowave.contracts.recording import EntryKind, RecordedEntry
+from radiowave.contracts.recording import (
+    EntryKind,
+    RecordedEntry,
+    RecordingError,
+    validate_recording,
+)
 from radiowave.contracts.store import Store
 from radiowave.digital_twin.registry import StoreRegistry
 from radiowave.pipeline import FoundationPipeline, PipelineConfig, PipelineResult
@@ -160,7 +165,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
     scenario_id = args.scenario or headers[0].scenario_id
     registry = StoreRegistry(store)
     pipeline = FoundationPipeline(registry, _config_for(headers, args), scenario_id=scenario_id)
-    entries = itertools.chain(headers, rest)
+    # One format version per recording and nothing after RUN_END, in either mode.
+    entries = validate_recording(itertools.chain(headers, rest))
     if args.step:
         print("step mode: press Enter to release the next observation, q to finish")
         end_advance = True
@@ -170,7 +176,10 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 continue
             if entry.kind == EntryKind.RUN_END:
                 end_advance = bool(entry.payload.get("advance", True))
-                break
+                continue  # keep consuming so a malformed trailer is still rejected
+            if entry.kind == EntryKind.DUPLICATE_OBSERVATION:
+                pipeline.replay_duplicate(entry)  # rejected again, clock untouched
+                continue
             if entry.kind != EntryKind.OBSERVATION:
                 continue
             observation = entry.to_observation()
@@ -237,7 +246,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    result: int = args.func(args)
+    try:
+        result: int = args.func(args)
+    except RecordingError as exc:
+        # A recording that violates the format contract (mixed versions, entries after
+        # RUN_END, a duplicate that is not a duplicate) is refused, never half-replayed.
+        raise SystemExit(f"invalid recording: {exc}") from exc
     return result
 
 

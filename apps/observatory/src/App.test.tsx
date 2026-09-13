@@ -22,6 +22,10 @@ async function selectAndRun() {
   await screen.findByText(/A enters, walks to F1/);
   fireEvent.click(screen.getByRole("button", { name: /Run scenario 01/ }));
   await screen.findByText(/run run-0001/);
+  // The run id renders from the snapshot dispatch; `busy` clears one settle later.
+  // Wait for the controls to be enabled so interactions are never swallowed by
+  // a still-disabled slider.
+  await waitFor(() => expect(screen.getByRole("slider", { name: "Timeline" })).toBeEnabled());
 }
 
 describe("App", () => {

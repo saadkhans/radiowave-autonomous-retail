@@ -44,7 +44,7 @@ from radiowave.api.viewmodels import (
     ObservatoryZone,
     seconds_since_epoch,
 )
-from radiowave.cart.models import Cart, UnresolvedItem
+from radiowave.cart.models import Cart, CartStatus, UnresolvedItem
 from radiowave.contracts.confidence import ConfidenceDecision
 from radiowave.contracts.events import RetailEvent
 from radiowave.contracts.sessions import ShopperSession
@@ -316,10 +316,12 @@ class ObservatoryRun:
             self._cart_view(c, cart_sessions.get(c.cart_id))
             for c in result.cart_state.carts.values()
         ]
+        session_by_track = {p.track_id: p.session_id for p in result.person_tracks}
         cart_by_track = {
             cart.shopper_track_id: cart.cart_id
-            for cart in carts
-            if cart.cart_id == result.cart_state.current_cart_ids.get(cart.shopper_track_id)
+            for cart in result.cart_state.carts.values()
+            if cart.status == CartStatus.OPEN
+            and cart_sessions.get(cart.cart_id) == session_by_track.get(cart.shopper_track_id)
         }
         carried: dict[str, list[str]] = {}
         for item in result.item_tracks:

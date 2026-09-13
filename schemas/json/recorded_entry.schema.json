@@ -10,6 +10,7 @@
         "STORE_TWIN",
         "PIPELINE_CONFIG",
         "CLOCK",
+        "DUPLICATE_OBSERVATION",
         "RUN_END"
       ],
       "title": "EntryKind",
@@ -29,9 +30,12 @@
   "additionalProperties": false,
   "properties": {
     "format_version": {
-      "const": 1,
-      "default": 1,
-      "description": "Only version 1 is understood; other versions are rejected on read",
+      "default": 2,
+      "description": "Recording format: 1 = Foundation v0, 2 = adds CLOCK, DUPLICATE_OBSERVATION and RUN_END; other versions are rejected on read",
+      "enum": [
+        1,
+        2
+      ],
       "title": "Format Version",
       "type": "integer"
     },
@@ -84,6 +88,7 @@
       "default": null
     },
     "timestamp": {
+      "description": "Recording position: for input entries the observation timestamp, for a DUPLICATE_OBSERVATION the pipeline clock at rejection, so a recording is always chronological",
       "format": "date-time",
       "title": "Timestamp",
       "type": "string"
