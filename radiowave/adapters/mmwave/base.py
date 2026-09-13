@@ -9,9 +9,9 @@ no vendor detail leaks past this module.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Protocol
+from typing import Any, Protocol
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from radiowave.contracts._base import FrozenModel, UnitInterval, UtcDatetime
 from radiowave.contracts.geometry import SensorCoordinate, Velocity
@@ -31,6 +31,21 @@ class NativeRadarSample(FrozenModel):
     track_confidence: UnitInterval
     sigma_m: float = Field(ge=0.0, description="Reported 1-sigma position accuracy")
     snr_db: float | None = None
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Vendor-neutral native provenance (frame counters, stream generation, "
+        "firmware mode, raw native values) carried into the observation's metadata; JSON "
+        "values only, never used as identity",
+    )
+
+    @field_validator("metadata")
+    @classmethod
+    def _json_only(cls, value: dict[str, Any]) -> dict[str, Any]:
+        # Same rule as SensorObservation.metadata: every sample must be recordable.
+        from radiowave.contracts.observations import _require_json
+
+        _require_json(value, "metadata")
+        return value
 
 
 class MmWaveSource(Protocol):

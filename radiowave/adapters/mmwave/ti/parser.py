@@ -1,0 +1,424 @@
+"""Defensive, feed-based TI UART frame parser.
+
+Never raises on malformed input — only a programming error should raise. Garbage,
+truncation, and out-of-range lengths are all handled by discarding bytes and
+resynchronizing on the next magic word. There are no threads here: :meth:`feed`
+is a pure function of the bytes handed to it plus the parser's own buffer.
+"""
+
+from __future__ import annotations
+
+import math
+import struct
+from dataclasses import dataclass, field
+from enum import StrEnum
+
+from radiowave.adapters.mmwave.ti.models import TiFrame, TiPointCloudPoint, TiTarget, TiTargetHeight
+from radiowave.adapters.mmwave.ti.protocol import (
+    FRAME_HEADER_BYTES,
+    HEADER_STRUCT,
+    MAGIC_WORD,
+    TARGET_RECORD_LAYOUTS,
+    TI_3D_PEOPLE_COUNTING,
+    TLV_HEADER_STRUCT,
+    TargetRecordLayout,
+    TiFirmwareProfile,
+    TiTlvType,
+    target_record_layout_by_name,
+)
+
+
+class TiFrameRejectReason(StrEnum):
+    BAD_PACKET_LENGTH = "BAD_PACKET_LENGTH"
+    PACKET_TOO_LARGE = "PACKET_TOO_LARGE"
+    TOO_MANY_TLVS = "TOO_MANY_TLVS"
+    TRUNCATED_TLV = "TRUNCATED_TLV"
+    TLV_OVERRUN = "TLV_OVERRUN"
+    BAD_TLV_LENGTH = "BAD_TLV_LENGTH"
+    BAD_TARGET_RECORD = "BAD_TARGET_RECORD"
+    TOO_MANY_TARGETS = "TOO_MANY_TARGETS"
+    TOO_MANY_POINTS = "TOO_MANY_POINTS"
+    NON_FINITE_VALUE = "NON_FINITE_VALUE"
+
+
+@dataclass(frozen=True, slots=True)
+class TiParserLimits:
+    """Defensive caps. A stream that exceeds any of these is corrupt or hostile,
+    never merely "a big frame"."""
+
+    max_packet_bytes: int = 65_536
+    max_tlvs: int = 32
+    max_targets: int = 64
+    max_points: int = 4096
+    max_buffer_bytes: int = 262_144
+
+
+@dataclass(slots=True)
+class TiParserStats:
+    """Running counters for observability. ``reject_reasons`` behaves like a
+    ``Counter`` keyed by :class:`TiFrameRejectReason` value."""
+
+    bytes_received: int = 0
+    bytes_discarded: int = 0
+    frames_parsed: int = 0
+    frames_rejected: int = 0
+    resyncs: int = 0
+    unknown_tlv_count: int = 0
+    reject_reasons: dict[str, int] = field(default_factory=dict)
+
+
+class _FrameRejectedError(Exception):
+    """Internal signal: the packet under construction is invalid.
+
+    Caught by :meth:`TiFrameParser.feed`, which does the accounting and resync;
+    never escapes this module.
+    """
+
+    def __init__(self, reason: TiFrameRejectReason) -> None:
+        super().__init__(reason.value)
+        self.reason = reason
+
+
+# --- fixed-size TLV record shapes not covered by TARGET_RECORD_LAYOUTS -------------
+
+_DETECTED_POINT_STRUCT = struct.Struct("<4f")  # x, y, z, velocity (OOB SDK 3.x)
+_SIDE_INFO_STRUCT = struct.Struct("<2h")  # snr, noise; units 0.1 dB
+_TARGET_HEIGHT_STRUCT = struct.Struct("<Bff")  # tid, max_z, min_z
+_POINT_CLOUD_UNITS_STRUCT = struct.Struct("<5f")  # elevation, azimuth, doppler, range, snr units
+_POINT_CLOUD_RECORD_STRUCT = struct.Struct("<bbhHH")  # elevation, azimuth, doppler, range, snr
+_PRESENCE_STRUCT = struct.Struct("<I")
+
+
+def _select_target_layout(payload_len: int, profile: TiFirmwareProfile) -> TargetRecordLayout:
+    if profile.target_record_layout is not None:
+        layout = target_record_layout_by_name(profile.target_record_layout)
+        if layout is None or payload_len % layout.struct.size != 0:
+            raise _FrameRejectedError(TiFrameRejectReason.BAD_TARGET_RECORD)
+        return layout
+    for layout in TARGET_RECORD_LAYOUTS:
+        if payload_len % layout.struct.size == 0:
+            return layout
+    raise _FrameRejectedError(TiFrameRejectReason.BAD_TARGET_RECORD)
+
+
+def _require_finite(values: tuple[float, ...]) -> None:
+    if not all(math.isfinite(value) for value in values):
+        raise _FrameRejectedError(TiFrameRejectReason.NON_FINITE_VALUE)
+
+
+def _decode_targets(payload: bytes, layout: TargetRecordLayout) -> tuple[TiTarget, ...]:
+    targets: list[TiTarget] = []
+    for record in layout.struct.iter_unpack(payload):
+        if layout.name == "2d":
+            tid, x, y, vx, vy, ax, ay, *tail = record
+            z = vz = az = 0.0
+            error_covariance = tuple(tail[:9])
+            gating_gain = tail[9]
+            confidence = None
+        elif layout.name == "3d_v1":
+            tid, x, y, z, vx, vy, vz, ax, ay, az, *tail = record
+            error_covariance = tuple(tail[:9])
+            gating_gain = tail[9]
+            confidence = None
+        else:  # "3d_v2"
+            tid, x, y, z, vx, vy, vz, ax, ay, az, *tail = record
+            error_covariance = tuple(tail[:16])
+            gating_gain = tail[16]
+            confidence = tail[17]
+
+        checked = (x, y, z, vx, vy, vz, ax, ay, az, *error_covariance, gating_gain)
+        _require_finite(checked if confidence is None else (*checked, confidence))
+        targets.append(
+            TiTarget(
+                native_track_id=tid,
+                x=x,
+                y=y,
+                z=z,
+                vx=vx,
+                vy=vy,
+                vz=vz,
+                ax=ax,
+                ay=ay,
+                az=az,
+                error_covariance=error_covariance,
+                gating_gain=gating_gain,
+                confidence=confidence,
+            )
+        )
+    return tuple(targets)
+
+
+def _decode_oob_points(
+    xyzv_payload: bytes, side_info_payload: bytes | None
+) -> tuple[TiPointCloudPoint, ...]:
+    side_info = (
+        list(_SIDE_INFO_STRUCT.iter_unpack(side_info_payload))
+        if side_info_payload is not None
+        else []
+    )
+    points: list[TiPointCloudPoint] = []
+    for index, (x, y, z, velocity) in enumerate(_DETECTED_POINT_STRUCT.iter_unpack(xyzv_payload)):
+        range_m = math.sqrt(x * x + y * y + z * z)
+        azimuth_rad = math.atan2(x, y)
+        elevation_rad = math.asin(z / range_m) if range_m > 0.0 else 0.0
+        snr = side_info[index][0] * 0.1 if index < len(side_info) else 0.0
+        _require_finite((x, y, z, range_m, azimuth_rad, elevation_rad, velocity, snr))
+        points.append(
+            TiPointCloudPoint(
+                x=x,
+                y=y,
+                z=z,
+                range_m=range_m,
+                azimuth_rad=azimuth_rad,
+                elevation_rad=elevation_rad,
+                doppler_mps=velocity,
+                snr=snr,
+            )
+        )
+    return tuple(points)
+
+
+def _decode_point_cloud(payload: bytes) -> tuple[TiPointCloudPoint, ...]:
+    elevation_unit, azimuth_unit, doppler_unit, range_unit, snr_unit = (
+        _POINT_CLOUD_UNITS_STRUCT.unpack_from(payload, 0)
+    )
+    points: list[TiPointCloudPoint] = []
+    body = payload[_POINT_CLOUD_UNITS_STRUCT.size :]
+    for elevation_raw, azimuth_raw, doppler_raw, range_raw, snr_raw in (
+        _POINT_CLOUD_RECORD_STRUCT.iter_unpack(body)
+    ):
+        elevation_rad = elevation_raw * elevation_unit
+        azimuth_rad = azimuth_raw * azimuth_unit
+        doppler_mps = doppler_raw * doppler_unit
+        range_m = range_raw * range_unit
+        snr = snr_raw * snr_unit
+        x = range_m * math.sin(azimuth_rad) * math.cos(elevation_rad)
+        y = range_m * math.cos(azimuth_rad) * math.cos(elevation_rad)
+        z = range_m * math.sin(elevation_rad)
+        _require_finite((x, y, z, range_m, azimuth_rad, elevation_rad, doppler_mps, snr))
+        points.append(
+            TiPointCloudPoint(
+                x=x,
+                y=y,
+                z=z,
+                range_m=range_m,
+                azimuth_rad=azimuth_rad,
+                elevation_rad=elevation_rad,
+                doppler_mps=doppler_mps,
+                snr=snr,
+            )
+        )
+    return tuple(points)
+
+
+def _decode_heights(payload: bytes) -> tuple[TiTargetHeight, ...]:
+    heights: list[TiTargetHeight] = []
+    for tid, max_z, min_z in _TARGET_HEIGHT_STRUCT.iter_unpack(payload):
+        _require_finite((max_z, min_z))
+        heights.append(TiTargetHeight(native_track_id=tid, max_z=max_z, min_z=min_z))
+    return tuple(heights)
+
+
+def _parse_packet(
+    packet: bytes,
+    header: tuple[int, ...],
+    profile: TiFirmwareProfile,
+    limits: TiParserLimits,
+) -> TiFrame:
+    (
+        version,
+        total_packet_len,
+        platform,
+        frame_number,
+        time_cpu_cycles,
+        num_detected_objects,
+        num_tlvs,
+        subframe_number,
+    ) = header
+
+    targets: tuple[TiTarget, ...] = ()
+    layout_name: str | None = None
+    cloud_points: tuple[TiPointCloudPoint, ...] = ()
+    pending_detected_points: bytes | None = None
+    pending_side_info: bytes | None = None
+    target_indices: tuple[int, ...] = ()
+    heights: tuple[TiTargetHeight, ...] = ()
+    presence: int | None = None
+    unknown_tlvs: list[tuple[int, int]] = []
+
+    offset = FRAME_HEADER_BYTES
+    for _ in range(num_tlvs):
+        if offset + TLV_HEADER_STRUCT.size > total_packet_len:
+            raise _FrameRejectedError(TiFrameRejectReason.TRUNCATED_TLV)
+        tlv_type, declared_length = TLV_HEADER_STRUCT.unpack_from(packet, offset)
+        offset += TLV_HEADER_STRUCT.size
+
+        length = declared_length
+        if profile.tlv_length_includes_header:
+            length -= TLV_HEADER_STRUCT.size
+        if length < 0:
+            raise _FrameRejectedError(TiFrameRejectReason.BAD_TLV_LENGTH)
+        if offset + length > total_packet_len:
+            raise _FrameRejectedError(TiFrameRejectReason.TLV_OVERRUN)
+        payload = packet[offset : offset + length]
+
+        if tlv_type == TiTlvType.DETECTED_POINTS:
+            if length % _DETECTED_POINT_STRUCT.size != 0:
+                raise _FrameRejectedError(TiFrameRejectReason.BAD_TLV_LENGTH)
+            pending_detected_points = payload
+        elif tlv_type == TiTlvType.DETECTED_POINTS_SIDE_INFO:
+            if length % _SIDE_INFO_STRUCT.size != 0:
+                raise _FrameRejectedError(TiFrameRejectReason.BAD_TLV_LENGTH)
+            pending_side_info = payload
+        elif tlv_type == TiTlvType.TARGET_LIST_3D:
+            layout = _select_target_layout(length, profile)
+            layout_name = layout.name
+            targets = _decode_targets(payload, layout)
+            if len(targets) > limits.max_targets:
+                raise _FrameRejectedError(TiFrameRejectReason.TOO_MANY_TARGETS)
+        elif tlv_type == TiTlvType.TARGET_INDEX:
+            target_indices = tuple(payload)
+        elif tlv_type == TiTlvType.TARGET_HEIGHT:
+            if length % _TARGET_HEIGHT_STRUCT.size != 0:
+                raise _FrameRejectedError(TiFrameRejectReason.BAD_TLV_LENGTH)
+            heights = _decode_heights(payload)
+        elif tlv_type == TiTlvType.POINT_CLOUD_3D:
+            body_len = length - _POINT_CLOUD_UNITS_STRUCT.size
+            if body_len < 0 or body_len % _POINT_CLOUD_RECORD_STRUCT.size != 0:
+                raise _FrameRejectedError(TiFrameRejectReason.BAD_TLV_LENGTH)
+            cloud_points = _decode_point_cloud(payload)
+            if len(cloud_points) > limits.max_points:
+                raise _FrameRejectedError(TiFrameRejectReason.TOO_MANY_POINTS)
+        elif tlv_type == TiTlvType.PRESENCE_INDICATION:
+            if length != _PRESENCE_STRUCT.size:
+                raise _FrameRejectedError(TiFrameRejectReason.BAD_TLV_LENGTH)
+            (presence,) = _PRESENCE_STRUCT.unpack_from(payload)
+        else:
+            unknown_tlvs.append((tlv_type, length))
+
+        offset += length
+
+    oob_points: tuple[TiPointCloudPoint, ...] = ()
+    if pending_detected_points is not None:
+        oob_points = _decode_oob_points(pending_detected_points, pending_side_info)
+        if len(oob_points) > limits.max_points:
+            raise _FrameRejectedError(TiFrameRejectReason.TOO_MANY_POINTS)
+
+    return TiFrame(
+        version=version,
+        total_packet_len=total_packet_len,
+        platform=platform,
+        frame_number=frame_number,
+        time_cpu_cycles=time_cpu_cycles,
+        num_detected_objects=num_detected_objects,
+        num_tlvs=num_tlvs,
+        subframe_number=subframe_number,
+        targets=targets,
+        points=cloud_points + oob_points,
+        target_indices=target_indices,
+        heights=heights,
+        presence=presence,
+        unknown_tlvs=tuple(unknown_tlvs),
+        target_record_layout=layout_name,
+        padding_bytes=total_packet_len - offset,
+    )
+
+
+class TiFrameParser:
+    """Buffers raw UART bytes and yields fully decoded, validated
+    :class:`~radiowave.adapters.mmwave.ti.models.TiFrame` objects.
+
+    Feed it bytes in any chunking (a whole frame, a partial frame, several frames,
+    one byte at a time) and it produces the same frames either way.
+    """
+
+    def __init__(
+        self,
+        profile: TiFirmwareProfile = TI_3D_PEOPLE_COUNTING,
+        limits: TiParserLimits | None = None,
+    ) -> None:
+        self._profile = profile
+        self._limits = limits if limits is not None else TiParserLimits()
+        self._buffer = bytearray()
+        self.stats = TiParserStats()
+
+    @property
+    def buffered_bytes(self) -> int:
+        return len(self._buffer)
+
+    def reset(self) -> None:
+        """Drop buffered bytes, e.g. after a reconnect."""
+        self._buffer.clear()
+
+    def _consume(self, count: int) -> None:
+        del self._buffer[:count]
+
+    def _discard(self, count: int, *, resync: bool) -> None:
+        if count <= 0:
+            return
+        del self._buffer[:count]
+        self.stats.bytes_discarded += count
+        if resync:
+            self.stats.resyncs += 1
+
+    def _reject(self, reason: TiFrameRejectReason) -> None:
+        self.stats.frames_rejected += 1
+        self.stats.reject_reasons[reason.value] = self.stats.reject_reasons.get(reason.value, 0) + 1
+
+    def feed(self, data: bytes) -> list[TiFrame]:
+        self._buffer.extend(data)
+        self.stats.bytes_received += len(data)
+        frames: list[TiFrame] = []
+
+        while True:
+            magic_index = self._buffer.find(MAGIC_WORD)
+            if magic_index == -1:
+                # A magic word could straddle this feed and the next: keep the tail
+                # that might be its prefix, discard the rest.
+                keep_from = max(0, len(self._buffer) - (len(MAGIC_WORD) - 1))
+                self._discard(keep_from, resync=keep_from > 0)
+                break
+            if magic_index > 0:
+                self._discard(magic_index, resync=True)
+
+            if len(self._buffer) < FRAME_HEADER_BYTES:
+                break  # partial header: wait for more bytes
+
+            header = HEADER_STRUCT.unpack_from(self._buffer, len(MAGIC_WORD))
+            total_packet_len = header[1]
+            num_tlvs = header[6]
+
+            if total_packet_len < FRAME_HEADER_BYTES:
+                self._reject(TiFrameRejectReason.BAD_PACKET_LENGTH)
+                self._discard(1, resync=True)
+                continue
+            if total_packet_len > self._limits.max_packet_bytes:
+                self._reject(TiFrameRejectReason.PACKET_TOO_LARGE)
+                self._discard(1, resync=True)
+                continue
+            if num_tlvs > self._limits.max_tlvs:
+                self._reject(TiFrameRejectReason.TOO_MANY_TLVS)
+                self._discard(1, resync=True)
+                continue
+
+            if len(self._buffer) < total_packet_len:
+                break  # partial packet: wait (bounded by max_packet_bytes above)
+
+            packet = bytes(self._buffer[:total_packet_len])
+            try:
+                frame = _parse_packet(packet, header, self._profile, self._limits)
+            except _FrameRejectedError as exc:
+                self._reject(exc.reason)
+                self._discard(1, resync=True)
+                continue
+
+            frames.append(frame)
+            self.stats.frames_parsed += 1
+            self.stats.unknown_tlv_count += len(frame.unknown_tlvs)
+            self._consume(total_packet_len)
+
+        if len(self._buffer) > self._limits.max_buffer_bytes:
+            overflow = len(self._buffer) - self._limits.max_buffer_bytes
+            self._discard(overflow, resync=True)
+
+        return frames
