@@ -298,6 +298,7 @@ def scenario_10_duplicate_replay() -> Scenario:
         "scenario_id": "10",
         "name": "duplicate observation replay",
         "description": "Scenario 01 whose observation stream is fed twice.",
+        "duplicate_observation_stream": True,
     }
     return Scenario.model_validate({**base.model_dump(), **update})
 

@@ -21,11 +21,16 @@ from pydantic import Field
 from radiowave.cart.engine import InMemoryCartEngine
 from radiowave.cart.models import CartState
 from radiowave.confidence.engine import ThresholdConfidenceEngine
-from radiowave.contracts._base import ContractModel, FrozenModel
+from radiowave.contracts._base import ContractModel, FrozenModel, ensure_utc
 from radiowave.contracts.confidence import ConfidenceDecision, ConfidenceThresholds, Decision
 from radiowave.contracts.events import CartEvent, RetailEvent
 from radiowave.contracts.observations import AnyObservation, SensorObservation
-from radiowave.contracts.recording import EntryKind, RecordedEntry
+from radiowave.contracts.recording import (
+    EntryKind,
+    RecordedEntry,
+    RecordingError,
+    validate_recording,
+)
 from radiowave.contracts.sessions import SessionState, ShopperSession
 from radiowave.contracts.store import SourceType
 from radiowave.contracts.tracks import ItemTrack, PersonTrack, PersonTrackState
@@ -63,6 +68,9 @@ class PipelineResult(ContractModel):
     person_tracks: list[PersonTrack] = Field(default_factory=list)
     item_tracks: list[ItemTrack] = Field(default_factory=list)
     sessions: list[ShopperSession] = Field(default_factory=list)
+    cart_sessions: dict[str, str] = Field(
+        default_factory=dict, description="Cart id -> session id the cart was committed under"
+    )
     observations_accepted: int = 0
     observations_dropped: int = 0
     observations_out_of_order: int = 0
@@ -122,6 +130,8 @@ class FoundationPipeline:
         self._pending: dict[str, RetailEvent] = {}
         self._steps = 0
         self._next_step: datetime | None = None
+        self._last_step_at: datetime | None = None
+        self._ingested_since_step = False
         self._sequence = 0
         self._scheduled: list[tuple[datetime, int, EntryKind, dict[str, Any]]] = []
         self._last_timestamp: datetime | None = None
@@ -133,10 +143,23 @@ class FoundationPipeline:
         self.observations_rejected_spatially_inconsistent = 0
         self._first_input_at: datetime | None = None
         self._cart_session: dict[str, str] = {}  # cart_id -> session_id it was committed under
+        self._last_recorded_at: datetime | None = None
+        self._result: PipelineResult | None = None  # set once finish() has sealed the run
+
+    @property
+    def finished(self) -> bool:
+        """True once :meth:`finish` has run; no input or recording is accepted afterwards."""
+        return self._result is not None
+
+    def _require_open(self, action: str) -> None:
+        if self._result is not None:
+            msg = f"pipeline is finished: cannot {action} after finish(); RUN_END is terminal"
+            raise RuntimeError(msg)
 
     # ------------------------------------------------------------------ recording
     def schedule_entry(self, timestamp: datetime, kind: EntryKind, payload: dict[str, Any]) -> None:
         """Queue a non-observation entry (e.g. ground truth) to be recorded in timestamp order."""
+        self._require_open("schedule an entry")
         self._schedule_sequence += 1
         heapq.heappush(self._scheduled, (timestamp, self._schedule_sequence, kind, payload))
 
@@ -150,6 +173,7 @@ class FoundationPipeline:
     ) -> None:
         if self.recorder is None:
             return
+        self._last_recorded_at = timestamp
         self.recorder.record(
             RecordedEntry(
                 sequence=self._sequence,
@@ -179,12 +203,58 @@ class FoundationPipeline:
             self.ingest(observation)
         return self.finish()
 
+    def replay(self, entries: Iterable[RecordedEntry]) -> PipelineResult:
+        """Re-run a recording: every input-side entry, in recorded order.
+
+        * ``OBSERVATION`` entries are ingested;
+        * ``DUPLICATE_OBSERVATION`` entries (v2) are fed through intake again and must
+          be rejected by the deduplicator again, so the dropped-duplicate count and the
+          idempotency behaviour round-trip without the clock ever moving for them;
+        * ``CLOCK`` entries (v2) advance the clock explicitly;
+        * ``RUN_END`` (v2) finishes the run the way the original driver did.
+
+        Header, event, decision, cart and ground-truth entries are outputs of the
+        original run and are skipped; they are regenerated. A recording without a
+        ``RUN_END`` entry (every v1 recording) finishes the default way. The stream
+        contract (one format version, nothing after ``RUN_END``) is enforced by
+        :func:`radiowave.contracts.recording.validate_recording`.
+        """
+        result: PipelineResult | None = None
+        for entry in validate_recording(entries):
+            if entry.kind == EntryKind.OBSERVATION:
+                self.ingest(entry.to_observation())
+            elif entry.kind == EntryKind.DUPLICATE_OBSERVATION:
+                self.replay_duplicate(entry)
+            elif entry.kind == EntryKind.CLOCK:
+                self.advance_to(entry.timestamp)
+            elif entry.kind == EntryKind.RUN_END:
+                result = self.finish(advance=bool(entry.payload.get("advance", True)))
+        return result if result is not None else self.finish()
+
+    def replay_duplicate(self, entry: RecordedEntry) -> None:
+        """Feed a recorded duplicate ingress attempt through intake again.
+
+        The attempt must be rejected by the deduplicator exactly as it was originally;
+        a recording whose duplicate is accepted on replay is not self-consistent (the
+        original it duplicated is missing or reordered) and is refused rather than
+        replayed into a different physical history.
+        """
+        dropped_before = self.dedup.dropped
+        accepted = self.ingest(entry.to_observation())
+        if accepted or self.dedup.dropped != dropped_before + 1:
+            msg = (
+                f"entry {entry.sequence}: recorded DUPLICATE_OBSERVATION was not rejected as "
+                "a duplicate on replay; the recording is not self-consistent"
+            )
+            raise RecordingError(msg)
+
     def ingest(self, observation: SensorObservation) -> bool:
         """Feed one observation, stepping fusion for every step boundary it crosses.
 
         Observations must arrive in timestamp order; this is the single entry point
         used by batch runs, paced replay and step-by-step replay alike.
         """
+        self._require_open("ingest an observation")
         if self._first_input_at is None:
             self._first_input_at = observation.timestamp
         if (
@@ -203,8 +273,11 @@ class FoundationPipeline:
             return False
         if self.dedup.is_duplicate(observation):
             # A pure peek: dropping a duplicate must never mutate the dedup cache or
-            # advance fusion time, however stale or futuristic its timestamp is.
+            # advance fusion time, however stale or futuristic its timestamp is. The
+            # attempt itself is part of the run's input, so it is recorded (v2) at the
+            # clock's current position and replayed through this same rejection.
             self.dedup.dropped += 1
+            self._record_duplicate(observation)
             return False
         if self._last_timestamp is not None and observation.timestamp < self._last_timestamp:
             # Fusion time never moves backwards; late samples are dropped, not replayed
@@ -225,7 +298,29 @@ class FoundationPipeline:
             sensor_id=observation.sensor_id,
         )
         self.fusion.ingest(observation)
+        self._ingested_since_step = True
         return True
+
+    def _record_duplicate(self, observation: SensorObservation) -> None:
+        """Record a rejected duplicate ingress attempt without touching the clock.
+
+        The entry is stamped with the pipeline clock (the duplicate's original was
+        accepted at or before it), so the recording stays chronological even when the
+        attempt's own timestamp is stale or lies in the future; the payload keeps the
+        attempt exactly as it arrived so replay re-runs the same rejection.
+        """
+        if self.recorder is None:
+            return
+        # A duplicate presupposes an accepted original, which set the clock.
+        stamp = self._last_timestamp if self._last_timestamp is not None else observation.timestamp
+        self._ensure_header(stamp)
+        self._record(
+            stamp,
+            EntryKind.DUPLICATE_OBSERVATION,
+            observation.model_dump(mode="json"),
+            source_type=observation.source_type,
+            sensor_id=observation.sensor_id,
+        )
 
     def _spatially_consistent(self, observation: SensorObservation) -> bool:
         """A localized read's coordinate must fall inside its own claimed zone.
@@ -257,10 +352,32 @@ class FoundationPipeline:
             return False
         return sensor.modality == observation.source_type
 
-    def finish(self) -> PipelineResult:
-        """Run one final fusion step after the last observation and return the result."""
+    def finish(self, *, advance: bool = True) -> PipelineResult:
+        """Finalize the run and return the result.
+
+        By default one last fusion step runs after the last observation. A driver that
+        has already stepped the clock through the end of the run (``advance_to``) passes
+        ``advance=False``: nothing is evaluated past the advertised duration, but input
+        that arrived after the last step (a sample stamped exactly on the end, or a final
+        partial interval) is still evaluated once, at the clock's current time.
+
+        ``RUN_END`` is the final logical entry of a recording: it is written only after
+        the terminal evaluation, every scheduled entry and the terminal session/cart
+        lifecycle work, and it seals the pipeline. A second call is idempotent (it
+        returns the same result and records nothing); ``ingest``, ``advance_to`` and
+        ``schedule_entry`` are rejected afterwards.
+        """
+        if self._result is not None:
+            return self._result
         if self._next_step is not None:
-            self._step(self._next_step)
+            if advance:
+                self._step(self._next_step)
+            elif self._last_timestamp is not None and (
+                self._ingested_since_step
+                or self._last_step_at is None
+                or self._last_step_at < self._last_timestamp
+            ):
+                self._step(self._last_timestamp)
             self._next_step = None
         stamp = self._scheduled[0][0] if self._scheduled else self._first_input_at
         if stamp is not None:
@@ -274,7 +391,16 @@ class FoundationPipeline:
         self.cart.close_carts_with_exit_candidates(
             shopper_gone=self._lost_at_an_exit,
         )
-        return self.result()
+        # Seal the recording. The marker is stamped no earlier than anything already
+        # written (a scheduled entry may lie past the last clock position), so every
+        # reader, sorted or in file order, sees RUN_END last. A run that recorded
+        # nothing at all leaves an empty recording rather than a lone marker.
+        if self._twin_recorded:
+            stamps = [t for t in (self._last_timestamp, self._last_recorded_at) if t is not None]
+            if stamps:
+                self._record(max(stamps), EntryKind.RUN_END, {"advance": advance})
+        self._result = self.result()
+        return self._result
 
     def _ensure_header(self, timestamp: datetime) -> None:
         """Write the twin and the effective configuration once, before anything else.
@@ -292,6 +418,24 @@ class FoundationPipeline:
         self._record(first, EntryKind.PIPELINE_CONFIG, self.config.model_dump(mode="json"))
         self._twin_recorded = True
 
+    def advance_to(self, timestamp: datetime) -> None:
+        """Run fusion steps up to ``timestamp`` without any observation.
+
+        Lets an interactive driver (replay console, tests) move simulated time through
+        an observation-free interval such as a sensor dropout. Time never moves backwards.
+        """
+        self._require_open("advance the clock")
+        timestamp = ensure_utc(timestamp)  # naive clocks are rejected, offsets normalized
+        if self._last_timestamp is not None and timestamp < self._last_timestamp:
+            return
+        self._last_timestamp = timestamp
+        # The boundary is part of the run's input: a replay must advance the clock
+        # exactly here, or decisions taken during a trailing dropout would differ. It is
+        # recorded after the steps it triggers so the recording stays in timestamp order.
+        self._ensure_header(timestamp)
+        self._advance_to(timestamp)
+        self._record(timestamp, EntryKind.CLOCK, {"timestamp": timestamp.isoformat()})
+
     def _advance_to(self, timestamp: datetime) -> None:
         step = timedelta(seconds=self.config.step_interval_s)
         if self._next_step is None:
@@ -304,6 +448,8 @@ class FoundationPipeline:
     # ------------------------------------------------------------------ stepping
     def _step(self, now: datetime) -> None:
         self._steps += 1
+        self._last_step_at = now
+        self._ingested_since_step = False
         self._flush_scheduled(now)
         proposed_now: set[str] = set()
         for event in self.fusion.step(now):
@@ -417,6 +563,7 @@ class FoundationPipeline:
             person_tracks=self.fusion.person_tracks(),
             item_tracks=self.fusion.item_tracks(),
             sessions=[*self.fusion.session_history, *self.fusion.sessions.values()],
+            cart_sessions=dict(self._cart_session),
             observations_accepted=self.dedup.accepted,
             observations_dropped=self.dedup.dropped,
             observations_out_of_order=self.observations_out_of_order,

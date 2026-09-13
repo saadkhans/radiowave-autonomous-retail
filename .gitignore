@@ -41,5 +41,8 @@ coverage/
 # Python packaging metadata
 *.egg-info/
 
-# No Node dependencies in Foundation v0; pnpm is only a script runner
-pnpm-lock.yaml
+# Observatory (apps/observatory) build and test output
+apps/*/dist/
+apps/*/coverage/
+.playwright-mcp/
+*.tsbuildinfo

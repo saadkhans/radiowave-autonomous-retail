@@ -346,6 +346,7 @@ class ItemStateMachine:
         item.at_rest_since = None
         if movement_start_at is not None:
             item.movement_start_at = movement_start_at
+            item.last_movement_start_at = movement_start_at
         if clear_movement:
             item.movement_start_at = None
         if new_rest:
