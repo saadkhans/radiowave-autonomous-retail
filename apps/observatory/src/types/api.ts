@@ -249,12 +249,57 @@ export interface ScenarioDetail extends ScenarioSummary {
   store: ObservatoryStore;
 }
 
+export type RunMode = "REPLAY" | "LIVE";
+
+export type LiveState = "DISCONNECTED" | "CONNECTING" | "STREAMING" | "STALE" | "ERROR";
+
+/** Health of the live sensor feeding a LIVE run. Present only when `RunState.mode === "LIVE"`. */
+export interface LiveStatus {
+  sensor_id: string;
+  sensor_name: string | null;
+  state: LiveState;
+  message: string | null;
+  /** Stream generation; bumps on reconnect/restart. */
+  generation: number;
+  frames_received: number;
+  frames_parsed: number;
+  frames_rejected: number;
+  frames_duplicate: number;
+  observations_emitted: number;
+  /** Normalized observations dropped because the consumer fell behind. */
+  observations_dropped_overflow: number;
+  reconnect_count: number;
+  last_frame_age_s: number | null;
+  frame_rate_hz: number | null;
+  observation_rate_hz: number | null;
+  /** Normalized recording being written, when capture is on. */
+  capture_path: string | null;
+  /** Run start instant, ISO 8601 UTC (the live epoch). */
+  started_at: string;
+}
+
+/** Whether this API process can start a LIVE run, and with which sensor. */
+export interface LiveAvailability {
+  configured: boolean;
+  config_path: string | null;
+  sensor_id: string | null;
+  sensor_name: string | null;
+  data_port: string | null;
+  /** Whether the optional serial dependency imports. */
+  serial_support: boolean;
+  active_run_id: string | null;
+  /** Why a live run cannot start; null exactly when one can be started now. */
+  reason: string | null;
+}
+
 export interface RunState {
   run_id: string;
   /** Incremented by every mutation; equal across one atomic snapshot. */
   revision: number;
   /** Incremented when replay is rebuilt; event sequence numbers live within one epoch. */
   epoch: number;
+  /** REPLAY: deterministic scenario time; LIVE: wall-clock time from a sensor. */
+  mode: RunMode;
   scenario_id: string;
   scenario_name: string;
   seed: number;
@@ -273,6 +318,8 @@ export interface RunState {
   unresolved: Unresolved[];
   sessions: Session[];
   counters: Counters;
+  /** Sensor health; present only in LIVE mode. */
+  live: LiveStatus | null;
 }
 
 export interface TimelineMarker {

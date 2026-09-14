@@ -1,5 +1,7 @@
 import type {
   Item,
+  LiveAvailability,
+  LiveStatus,
   ObservatoryEvent,
   ObservatoryStore,
   Person,
@@ -29,6 +31,20 @@ export const STORE: ObservatoryStore = {
   sensors: [{ sensor_id: "radar-1", modality: "MMWAVE", x: 5, y: 5, z: 2.5, yaw: 0, name: null }],
   products: [{ gtin: "06281234567890", name: "Black shirt", sku: "SHIRT-BLK", home_fixture_id: "F1" }],
   items: [{ epc: "3034F0000000000000A001", short_epc: "00A001", gtin: "06281234567890", product_name: "Black shirt", home_fixture_id: "F1" }],
+};
+
+/** A live store twin: one sensor, no fixtures/products/items (mirrors a real live config). */
+export const LIVE_STORE: ObservatoryStore = {
+  store_id: "live-store",
+  name: "Live store",
+  units: "m",
+  floor: { min_x: 0, min_y: 0, max_x: 10, max_y: 5 },
+  zones: [],
+  fixtures: [],
+  boundaries: [],
+  sensors: [{ sensor_id: "radar-1", modality: "MMWAVE", x: 5, y: 5, z: 2.5, yaw: 0, name: "Test radar" }],
+  products: [],
+  items: [],
 };
 
 export const SCENARIO_SUMMARY: ScenarioSummary = {
@@ -105,6 +121,8 @@ export function runState(overrides: Partial<RunState> = {}): RunState {
     run_id: "run-0001",
     revision: 0,
     epoch: 0,
+    mode: "REPLAY",
+    live: null,
     scenario_id: "01",
     scenario_name: "one shopper picks one item",
     seed: 7,
@@ -168,6 +186,58 @@ export function timeline(overrides: Partial<Timeline> = {}): Timeline {
   return { run_id: "run-0001", time_s: 0, duration_s: 18, markers: [], ground_truth: SCENARIO_SUMMARY.ground_truth, ...overrides };
 }
 
+export function liveStatus(overrides: Partial<LiveStatus> = {}): LiveStatus {
+  return {
+    sensor_id: "radar-1",
+    sensor_name: "Test radar",
+    state: "STREAMING",
+    message: null,
+    generation: 1,
+    frames_received: 0,
+    frames_parsed: 0,
+    frames_rejected: 0,
+    frames_duplicate: 0,
+    observations_emitted: 0,
+    observations_dropped_overflow: 0,
+    reconnect_count: 0,
+    last_frame_age_s: 0.1,
+    frame_rate_hz: 10,
+    observation_rate_hz: 10,
+    capture_path: null,
+    started_at: "2026-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
+export function liveAvailability(overrides: Partial<LiveAvailability> = {}): LiveAvailability {
+  return {
+    configured: true,
+    config_path: "/config/live.json",
+    sensor_id: "radar-1",
+    sensor_name: "Test radar",
+    data_port: "/dev/ttyUSB0",
+    serial_support: true,
+    active_run_id: null,
+    reason: null,
+    ...overrides,
+  };
+}
+
+/** A LIVE run's initial RunState: scenario_id "live", empty timeline ground truth, live status attached. */
+export function liveRunState(overrides: Partial<RunState> = {}): RunState {
+  return runState({
+    run_id: "live-0001",
+    mode: "LIVE",
+    scenario_id: "live",
+    scenario_name: "Test radar",
+    seed: 0,
+    duration_s: 0,
+    observations_total: 0,
+    live: liveStatus(),
+    ...overrides,
+  });
+}
+
 type Handler = (url: URL, init?: RequestInit) => unknown;
 
 interface RunRecord {
@@ -175,17 +245,40 @@ interface RunRecord {
   steps: number;
 }
 
+interface LiveRunRecord {
+  time: number;
+  generation: number;
+  reconnects: number;
+  finished: boolean;
+  state: LiveStatus["state"];
+}
+
+/** Thrown by a route handler to produce a non-2xx response (e.g. 409 on start-live). */
+class RouteError extends Error {
+  constructor(
+    readonly status: number,
+    readonly detail: string,
+  ) {
+    super(detail);
+  }
+}
+
 /**
  * Minimal fake of the Observatory API behind global fetch. Simulated time only
  * advances through /advance, /step, /seek and /reset, exactly like the server.
+ * LIVE runs advance their own wall-clock-style time by one tick per poll of
+ * /runs/{id}/snapshot, mirroring how the real server's live edge grows.
  */
 export function installFakeApi() {
   const runs = new Map<string, RunRecord>();
+  const liveRuns = new Map<string, LiveRunRecord>();
   let runSeq = 0;
+  let liveRunSeq = 0;
   const calls: string[] = [];
   const failures = new Set<string>();
   const holdQueues = new Map<string, Array<{ promise: Promise<void>; release: () => void }>>();
   const flags = { exitHold: false, unresolved: false };
+  const live = { availability: liveAvailability() };
 
   const runIdFromPath = (pathname: string): string => pathname.match(/^\/api\/runs\/([^/]+)/)?.[1] ?? "";
   const recordFor = (runId: string): RunRecord => {
@@ -235,7 +328,37 @@ export function installFakeApi() {
     timeline: timeline({ run_id: runId, time_s: record.time }),
   });
 
-  const routes: Array<[RegExp, string, Handler]> = [
+  const liveState = (runId: string, record: LiveRunRecord): RunState =>
+    liveRunState({
+      run_id: runId,
+      time_s: record.time,
+      duration_s: record.time,
+      finished: record.finished,
+      observations_total: Math.round(record.time * 10),
+      live: liveStatus({
+        state: record.state,
+        generation: record.generation,
+        reconnect_count: record.reconnects,
+        frames_received: Math.round(record.time * 10),
+        frames_parsed: Math.round(record.time * 10),
+        observations_emitted: Math.round(record.time * 10),
+        last_frame_age_s: record.finished ? null : 0.1,
+        frame_rate_hz: record.finished ? null : 10,
+        observation_rate_hz: record.finished ? null : 10,
+      }),
+    });
+  const liveSnapshot = (runId: string, record: LiveRunRecord) => ({
+    state: liveState(runId, record),
+    events: { run_id: runId, epoch: 0, events: [], next_seq: 0, total: 0 },
+    timeline: timeline({ run_id: runId, time_s: record.time, duration_s: record.time, ground_truth: [] }),
+  });
+  /** Each poll of a live run's snapshot simulates one wall-clock tick of new frames. */
+  const tickLive = (record: LiveRunRecord): LiveRunRecord => {
+    if (!record.finished) record.time = Math.round((record.time + 0.25) * 100) / 100;
+    return record;
+  };
+
+  const routes: Array<[RegExp, string, Handler, number?]> = [
     [/^\/api\/health$/, "GET", () => ({ status: "ok", engine: "foundation-v0", version: "0.1.0" })],
     [/^\/api\/scenarios$/, "GET", () => [SCENARIO_SUMMARY, { ...SCENARIO_SUMMARY, scenario_id: "12", name: "ambiguous two-shopper pickup" }]],
     [/^\/api\/scenarios\/01$/, "GET", () => SCENARIO_DETAIL],
@@ -295,10 +418,102 @@ export function installFakeApi() {
         return snapshot(runId, record);
       },
     ],
-    [/^\/api\/runs\/[^/]+\/state$/, "GET", (url) => state(runIdFromPath(url.pathname), recordFor(runIdFromPath(url.pathname)))],
-    [/^\/api\/runs\/[^/]+\/events$/, "GET", (url) => events(runIdFromPath(url.pathname), recordFor(runIdFromPath(url.pathname)))],
-    [/^\/api\/runs\/[^/]+\/timeline$/, "GET", (url) => timeline({ run_id: runIdFromPath(url.pathname), time_s: recordFor(runIdFromPath(url.pathname)).time })],
-    [/^\/api\/runs\/[^/]+\/snapshot$/, "GET", (url) => snapshot(runIdFromPath(url.pathname), recordFor(runIdFromPath(url.pathname)))],
+    [
+      /^\/api\/runs\/[^/]+\/state$/,
+      "GET",
+      (url) => {
+        const runId = runIdFromPath(url.pathname);
+        const liveRecord = liveRuns.get(runId);
+        return liveRecord ? liveState(runId, liveRecord) : state(runId, recordFor(runId));
+      },
+    ],
+    [
+      /^\/api\/runs\/[^/]+\/events$/,
+      "GET",
+      (url) => {
+        const runId = runIdFromPath(url.pathname);
+        if (liveRuns.has(runId)) return { run_id: runId, epoch: 0, events: [], next_seq: 0, total: 0 };
+        return events(runId, recordFor(runId));
+      },
+    ],
+    [
+      /^\/api\/runs\/[^/]+\/timeline$/,
+      "GET",
+      (url) => {
+        const runId = runIdFromPath(url.pathname);
+        const liveRecord = liveRuns.get(runId);
+        if (liveRecord) {
+          return timeline({ run_id: runId, time_s: liveRecord.time, duration_s: liveRecord.time, ground_truth: [] });
+        }
+        return timeline({ run_id: runId, time_s: recordFor(runId).time });
+      },
+    ],
+    [
+      /^\/api\/runs\/[^/]+\/snapshot$/,
+      "GET",
+      (url) => {
+        const runId = runIdFromPath(url.pathname);
+        const liveRecord = liveRuns.get(runId);
+        // Every poll of a live run's snapshot simulates one wall-clock tick of new frames.
+        return liveRecord ? liveSnapshot(runId, tickLive(liveRecord)) : snapshot(runId, recordFor(runId));
+      },
+    ],
+    [
+      /^\/api\/runs\/[^/]+\/store$/,
+      "GET",
+      (url) => (liveRuns.has(runIdFromPath(url.pathname)) ? LIVE_STORE : STORE),
+    ],
+    [/^\/api\/live\/status$/, "GET", () => ({ ...live.availability })],
+    [
+      /^\/api\/runs\/live$/,
+      "POST",
+      (_url, init) => {
+        if (live.availability.reason) throw new RouteError(409, live.availability.reason);
+        liveRunSeq += 1;
+        const runId = `live-${String(liveRunSeq).padStart(4, "0")}`;
+        const body = init?.body ? (JSON.parse(String(init.body)) as { capture?: boolean }) : {};
+        const record: LiveRunRecord = { time: 0, generation: 1, reconnects: 0, finished: false, state: "STREAMING" };
+        liveRuns.set(runId, record);
+        live.availability = {
+          ...live.availability,
+          active_run_id: runId,
+          reason: `live run ${runId} is already using the sensor; stop it first`,
+        };
+        const snap = liveSnapshot(runId, record);
+        if (body.capture) snap.state.live = { ...snap.state.live!, capture_path: `data/captures/${runId}.jsonl` };
+        return snap;
+      },
+      201,
+    ],
+    [
+      /^\/api\/runs\/[^/]+\/stop$/,
+      "POST",
+      (url) => {
+        const runId = runIdFromPath(url.pathname);
+        const record = liveRuns.get(runId);
+        if (!record) throw new RouteError(409, `run ${runId} is not a LIVE run`);
+        record.finished = true;
+        record.state = "DISCONNECTED";
+        if (live.availability.active_run_id === runId) {
+          live.availability = { ...live.availability, active_run_id: null, reason: null };
+        }
+        return liveSnapshot(runId, record);
+      },
+    ],
+    [
+      /^\/api\/runs\/[^/]+\/reconnect$/,
+      "POST",
+      (url) => {
+        const runId = runIdFromPath(url.pathname);
+        const record = liveRuns.get(runId);
+        if (!record) throw new RouteError(409, `run ${runId} is not a LIVE run`);
+        record.generation += 1;
+        record.reconnects += 1;
+        record.state = "STREAMING";
+        record.finished = false;
+        return liveSnapshot(runId, record);
+      },
+    ],
   ];
 
   const fetchMock = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -318,8 +533,17 @@ export function installFakeApi() {
     if (!route) {
       return new Response(JSON.stringify({ detail: `no route ${method} ${url.pathname}` }), { status: 404, headers: { "Content-Type": "application/json" } });
     }
-    const body = route[2](url, init);
-    return new Response(JSON.stringify(body), { status: method === "POST" && url.pathname === "/api/runs" ? 201 : 200, headers: { "Content-Type": "application/json" } });
+    let body: unknown;
+    try {
+      body = route[2](url, init);
+    } catch (error) {
+      if (error instanceof RouteError) {
+        return new Response(JSON.stringify({ detail: error.detail }), { status: error.status, headers: { "Content-Type": "application/json" } });
+      }
+      throw error;
+    }
+    const status = route[3] ?? (method === "POST" && url.pathname === "/api/runs" ? 201 : 200);
+    return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
   };
 
   const original = globalThis.fetch;
@@ -327,6 +551,12 @@ export function installFakeApi() {
   return {
     calls,
     time: (runId = "run-0001") => runs.get(runId)?.time ?? 0,
+    /** Elapsed time of a LIVE run, advanced by every /snapshot poll (defaults to the first live run). */
+    liveTime: (runId = "live-0001") => liveRuns.get(runId)?.time ?? 0,
+    /** Patch the /live/status response, e.g. to set an unavailability `reason` before a test starts a run. */
+    setLiveAvailability: (overrides: Partial<LiveAvailability>) => {
+      live.availability = { ...live.availability, ...overrides };
+    },
     /** Make the next request matching "METHOD /path" fail with 500. */
     failNext: (route: string) => failures.add(route),
     /**

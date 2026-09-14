@@ -47,10 +47,10 @@ class ObservationNormalizer:
         velocity = (
             transform.velocity_to_world(sample.velocity) if sample.velocity is not None else None
         )
-        metadata: dict[str, Any] = {
-            NATIVE_TRACK_KEY: sample.native_track_id,
-            NATIVE_POSITION_KEY: sample.position.model_dump(),
-        }
+        # Adapter-supplied provenance first, so the canonical keys below always win.
+        metadata: dict[str, Any] = dict(sample.metadata)
+        metadata[NATIVE_TRACK_KEY] = sample.native_track_id
+        metadata[NATIVE_POSITION_KEY] = sample.position.model_dump()
         if sample.snr_db is not None:
             metadata["snr_db"] = sample.snr_db
         return PersonObservation(

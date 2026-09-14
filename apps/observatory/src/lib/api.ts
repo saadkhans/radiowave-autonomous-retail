@@ -1,5 +1,7 @@
 import type {
   EventPage,
+  LiveAvailability,
+  ObservatoryStore,
   RunState,
   ScenarioDetail,
   ScenarioSummary,
@@ -61,6 +63,13 @@ export const api = {
     ),
   getTimeline: (runId: string) => request<Timeline>(`/runs/${runId}/timeline`),
   getSnapshot: (runId: string) => request<Snapshot>(`/runs/${runId}/snapshot`),
+  getStore: (runId: string) => request<ObservatoryStore>(`/runs/${runId}/store`),
+  // LIVE mode: availability, start/stop/reconnect. The remaining /runs/{id}/... read
+  // routes above (snapshot/state/events/timeline/store) work for LIVE runs too.
+  liveStatus: () => request<LiveAvailability>("/live/status"),
+  createLiveRun: (capture: boolean) => post<Snapshot>("/runs/live", { capture }),
+  stopRun: (runId: string) => post<Snapshot>(`/runs/${runId}/stop`),
+  reconnectRun: (runId: string) => post<Snapshot>(`/runs/${runId}/reconnect`),
 };
 
 export type Api = typeof api;

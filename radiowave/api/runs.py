@@ -8,6 +8,7 @@ of calls always yields the same state.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -28,6 +29,7 @@ from radiowave.api.viewmodels import (
     ObservatoryFixture,
     ObservatoryGroundTruth,
     ObservatoryItem,
+    ObservatoryLiveStatus,
     ObservatoryPerson,
     ObservatoryPoint,
     ObservatoryProduct,
@@ -42,6 +44,7 @@ from radiowave.api.viewmodels import (
     ObservatoryTimelineMarker,
     ObservatoryUnresolved,
     ObservatoryZone,
+    RunMode,
     seconds_since_epoch,
 )
 from radiowave.cart.models import Cart, CartStatus, UnresolvedItem
@@ -62,6 +65,8 @@ from radiowave.simulator.library import SCENARIOS, load_scenario
 from radiowave.simulator.runner import build_pipeline, scenario_observation_stream
 from radiowave.simulator.scenario import SCENARIO_EPOCH, Scenario
 
+log = logging.getLogger(__name__)
+
 _RESTING = frozenset({ItemState.ON_FIXTURE, ItemState.MISPLACED, ItemState.UNKNOWN})
 TRAIL_POINTS = 40
 FEATURE_ORDER = (
@@ -79,9 +84,22 @@ def short_epc(epc: str) -> str:
     return epc[-6:]
 
 
-def _seconds(when: object) -> float:
-    value = seconds_since_epoch(when)  # type: ignore[arg-type]
+def _seconds(when: object, epoch: datetime = SCENARIO_EPOCH) -> float:
+    value = seconds_since_epoch(when, epoch)  # type: ignore[arg-type]
     return value if value is not None else 0.0
+
+
+class LiveModeError(RuntimeError):
+    """A replay-only control (step/advance/seek/reset) was requested on a LIVE run."""
+
+
+class LiveRunBusyError(RuntimeError):
+    """A live run is already active, or another admission is in flight.
+
+    One physical sensor has at most one live owner, including during creation
+    (invariant 15): this is raised both when a LIVE run is already streaming and
+    while another ``POST /runs/live`` is still constructing one.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -195,30 +213,79 @@ def list_scenarios() -> list[ObservatoryScenarioSummary]:
 # run
 # ---------------------------------------------------------------------------
 class ObservatoryRun:
+    """A deterministic REPLAY run over one scenario.
+
+    The scenario-specific parts (identity, duration, observation stream, ground truth)
+    are isolated behind small properties so a LIVE run (``radiowave.api.live``) can
+    reuse every projection, the lock discipline and the snapshot contract unchanged.
+    """
+
+    mode: RunMode = "REPLAY"
+
     def __init__(
         self,
         run_id: str,
         scenario: Scenario,
         pipeline_config: PipelineConfig | None = None,
     ) -> None:
-        self.run_id = run_id
         self.scenario = scenario
-        self.config = pipeline_config
-        self.registry = StoreRegistry(scenario.store)
         # What the scenario is *fed* (scenario 10 replays every observation twice).
         self.observations = scenario_observation_stream(scenario)
+        self._init_common(run_id, scenario.store, pipeline_config)
+        self.pipeline: FoundationPipeline = build_pipeline(scenario, pipeline_config)
+        self.reset()
+
+    def _init_common(
+        self, run_id: str, store: Store, pipeline_config: PipelineConfig | None
+    ) -> None:
+        self.run_id = run_id
+        self.config = pipeline_config
+        self.store = store
+        self.registry = StoreRegistry(store)
         # FastAPI runs sync handlers on worker threads; every mutation and every
         # snapshot of one run is serialized so replay stays deterministic.
         self._lock = RLock()
-        self._catalog = {i.epc.value: i for i in scenario.store.items}
-        self._products = {p.gtin: p for p in scenario.store.products}
-        self.pipeline: FoundationPipeline = build_pipeline(scenario, pipeline_config)
+        self._catalog = {i.epc.value: i for i in store.items}
+        self._products = {p.gtin: p for p in store.products}
+        # View-model times are seconds after this instant.
+        self.epoch_at: datetime = SCENARIO_EPOCH
         self.cursor = 0
         self.time_s = 0.0
         self.finished = False
         self.revision = 0
         self.epoch = 0
-        self.reset()
+
+    # ---------------------------------------------------------------- identity
+    @property
+    def scenario_id(self) -> str:
+        return self.scenario.scenario_id
+
+    @property
+    def scenario_name(self) -> str:
+        return self.scenario.name
+
+    @property
+    def seed(self) -> int:
+        return self.scenario.seed
+
+    @property
+    def observations_total(self) -> int:
+        return len(self.observations)
+
+    def _ground_truth_view(self) -> list[ObservatoryGroundTruth]:
+        return _ground_truth(self.scenario)
+
+    def _live_status(self) -> ObservatoryLiveStatus | None:
+        return None
+
+    def _t(self, when: object) -> float:
+        return _seconds(when, self.epoch_at)
+
+    def _t_opt(self, when: datetime | None) -> float | None:
+        return seconds_since_epoch(when, self.epoch_at)
+
+    def close(self) -> None:
+        """Release external resources; a replay run holds none."""
 
     # ----------------------------------------------------------------- control
     def reset(self) -> None:
@@ -337,17 +404,19 @@ class ObservatoryRun:
             run_id=self.run_id,
             revision=self.revision,
             epoch=self.epoch,
-            scenario_id=self.scenario.scenario_id,
-            scenario_name=self.scenario.name,
-            seed=self.scenario.seed,
+            mode=self.mode,
+            scenario_id=self.scenario_id,
+            scenario_name=self.scenario_name,
+            seed=self.seed,
             time_s=self.time_s,
             duration_s=self.duration_s,
             step_interval_s=self.step_interval_s,
             steps=result.steps,
             finished=self.finished,
             observations_cursor=self.cursor,
-            observations_total=len(self.observations),
+            observations_total=self.observations_total,
             events_total=len(self._events()),
+            live=self._live_status(),
             persons=persons,
             items=items,
             carts=carts,
@@ -383,7 +452,7 @@ class ObservatoryRun:
             add(
                 ObservatoryEvent(
                     seq=0,
-                    t_s=_seconds(person.created_at),
+                    t_s=self._t(person.created_at),
                     kind="PERSON_TRACK",
                     label="PERSON_TRACK_CREATED",
                     shopper_track_id=person.track_id,
@@ -394,7 +463,7 @@ class ObservatoryRun:
             add(
                 ObservatoryEvent(
                     seq=0,
-                    t_s=_seconds(transition.timestamp),
+                    t_s=self._t(transition.timestamp),
                     kind="ITEM_TRANSITION",
                     label=_transition_label(transition.from_state, transition.to_state),
                     epc=transition.epc,
@@ -407,7 +476,7 @@ class ObservatoryRun:
             add(
                 ObservatoryEvent(
                     seq=0,
-                    t_s=_seconds(decision.evaluated_at),
+                    t_s=self._t(decision.evaluated_at),
                     kind="RETAIL_EVENT",
                     label=event.event_type.value,
                     epc=event.epc.value,
@@ -424,7 +493,7 @@ class ObservatoryRun:
             add(
                 ObservatoryEvent(
                     seq=0,
-                    t_s=_seconds(session.entered_at),
+                    t_s=self._t(session.entered_at),
                     kind="SESSION",
                     label="SESSION_OPENED",
                     shopper_track_id=session.person_track_id,
@@ -435,7 +504,7 @@ class ObservatoryRun:
                 add(
                     ObservatoryEvent(
                         seq=0,
-                        t_s=_seconds(session.exited_at),
+                        t_s=self._t(session.exited_at),
                         kind="SESSION",
                         label=f"SESSION_{session.state.value}",
                         shopper_track_id=session.person_track_id,
@@ -468,14 +537,14 @@ class ObservatoryRun:
             time_s=self.time_s,
             duration_s=self.duration_s,
             markers=markers,
-            ground_truth=_ground_truth(self.scenario),
+            ground_truth=self._ground_truth_view(),
         )
 
     # ----------------------------------------------------------------- helpers
     def _trail(self, history: list[TrackPoint]) -> list[ObservatoryPoint]:
         recent = history[-TRAIL_POINTS:]
         return [
-            ObservatoryPoint(t_s=_seconds(p.timestamp), x=p.coordinate.x, y=p.coordinate.y)
+            ObservatoryPoint(t_s=self._t(p.timestamp), x=p.coordinate.x, y=p.coordinate.y)
             for p in recent
         ]
 
@@ -504,8 +573,8 @@ class ObservatoryRun:
             confidence=person.confidence,
             sigma_m=person.uncertainty.horizontal_sigma,
             observation_count=person.observation_count,
-            created_s=_seconds(person.created_at),
-            updated_s=_seconds(person.updated_at),
+            created_s=self._t(person.created_at),
+            updated_s=self._t(person.updated_at),
             sensor_ids=list(person.contributing_sensor_ids),
             cart_id=cart_by_track.get(person.track_id),
             carried_epcs=sorted(carried.get(person.track_id, [])),
@@ -565,7 +634,7 @@ class ObservatoryRun:
                 margin=decision.margin,
                 waited_s=decision.waited_seconds,
                 reason=decision.reason,
-                at_s=_seconds(decision.evaluated_at),
+                at_s=self._t(decision.evaluated_at),
             )
         return ObservatoryItem(
             epc=item.epc.value,
@@ -575,15 +644,15 @@ class ObservatoryRun:
             sku=product.sku if product else None,
             home_fixture_id=item.home_fixture_id,
             state=item.state.value,
-            state_since_s=seconds_since_epoch(item.state_since),
+            state_since_s=self._t_opt(item.state_since),
             x=item.position.x if item.position else None,
             y=item.position.y if item.position else None,
             sigma_m=item.uncertainty.horizontal_sigma if item.uncertainty else None,
             zone_id=item.zone_id,
             carrier_track_id=item.carrier_track_id,
-            movement_start_s=seconds_since_epoch(item.movement_start_at),
-            episode_start_s=seconds_since_epoch(episode_start),
-            last_seen_s=seconds_since_epoch(item.last_seen_at),
+            movement_start_s=self._t_opt(item.movement_start_at),
+            episode_start_s=self._t_opt(episode_start),
+            last_seen_s=self._t_opt(item.last_seen_at),
             observation_count=item.observation_count,
             candidates=self._candidates(item.epc),
             decision=decision_view,
@@ -601,7 +670,7 @@ class ObservatoryRun:
             product_name=product.name if product else None,
             reason=entry.reason,
             source_event_id=entry.source_event_id,
-            t_s=_seconds(entry.timestamp),
+            t_s=self._t(entry.timestamp),
         )
 
     def _cart_view(self, cart: Cart, session_id: str | None) -> ObservatoryCart:
@@ -614,9 +683,9 @@ class ObservatoryRun:
                     short_epc=short_epc(line.epc.value),
                     gtin=line.gtin,
                     product_name=product.name if product else None,
-                    added_s=_seconds(line.added_at),
+                    added_s=self._t(line.added_at),
                     final_ownership_candidate=line.final_ownership_candidate,
-                    exit_event_s=seconds_since_epoch(line.exit_event_at),
+                    exit_event_s=self._t_opt(line.exit_event_at),
                 )
             )
         lines.sort(key=lambda line: line.added_s)
@@ -625,18 +694,17 @@ class ObservatoryRun:
             shopper_track_id=cart.shopper_track_id,
             session_id=session_id,
             status=cart.status.value,
-            exited_s=seconds_since_epoch(cart.exited_at),
+            exited_s=self._t_opt(cart.exited_at),
             lines=lines,
         )
 
-    @staticmethod
-    def _session_view(session: ShopperSession) -> ObservatorySession:
+    def _session_view(self, session: ShopperSession) -> ObservatorySession:
         return ObservatorySession(
             session_id=session.session_id,
             track_id=session.person_track_id,
             state=session.state.value,
-            entered_s=_seconds(session.entered_at),
-            exited_s=seconds_since_epoch(session.exited_at),
+            entered_s=self._t(session.entered_at),
+            exited_s=self._t_opt(session.exited_at),
             entry_boundary_id=session.entry_boundary_id,
             exit_boundary_id=session.exit_boundary_id,
         )
@@ -765,6 +833,20 @@ class RunManager:
         self._runs: dict[str, ObservatoryRun] = {}
         self._counter = 0
         self._lock = Lock()
+        # The run id currently being constructed for a LIVE admission, if any; see
+        # ``build_live_exclusive``. Held only between reserving the slot and either
+        # publishing the run or releasing the slot on failure.
+        self._live_reservation: str | None = None
+        # The run object itself, once ``factory()`` has returned but before it is
+        # published to ``_runs``. Without this, a run whose construction is still in
+        # progress (session started, driver thread up, snapshot in flight) is
+        # invisible to ``close_all()``: shutdown would return with the reader thread
+        # still running, and the admission would go on to publish a run after the
+        # manager was already closed (invariant 16).
+        self._live_constructing: ObservatoryRun | None = None
+        # Set by ``close_all()``; once true no new LIVE admission may start, and any
+        # admission already past that point must close its run instead of publishing.
+        self._closed = False
 
     def _build(
         self, scenario_id: str, seed: int | None = None
@@ -787,10 +869,19 @@ class RunManager:
         scenario = load_scenario(scenario_id)
         if seed is not None:
             scenario = scenario.model_copy(update={"seed": seed})
+        return self.build_with(lambda run_id: ObservatoryRun(run_id, scenario))
+
+    def build_with(
+        self, factory: Callable[[str], ObservatoryRun]
+    ) -> tuple[ObservatoryRun, ObservatorySnapshot]:
+        """Allocate an id, build the run, snapshot it, then publish it (see ``_build``).
+
+        Shared by replay and live runs so both keep the atomic-initial-snapshot contract.
+        """
         with self._lock:
             self._counter += 1
             run_id = f"run-{self._counter:04d}"
-        run = ObservatoryRun(run_id, scenario)
+        run = factory(run_id)
         snapshot = run.snapshot()  # captured before anyone can see the run
         with self._lock:
             self._runs[run_id] = run  # published only now
@@ -805,13 +896,126 @@ class RunManager:
         """Create a run and return its initial snapshot; the run is discoverable only after."""
         return self._build(scenario_id, seed)[1]
 
+    def build_live_exclusive(
+        self, factory: Callable[[str], ObservatoryRun]
+    ) -> tuple[ObservatoryRun, ObservatorySnapshot]:
+        """Atomically admit at most one LIVE run: reserve the slot, build outside the
+        lock, then publish (see ``build_with``) — or release the slot on any failure.
+
+        ``build_with`` alone leaves a race for LIVE runs: two concurrent callers can
+        both pass an ``availability()`` pre-check and both start a
+        ``TiLiveSession`` for the same physical sensor before either is published
+        (invariant 15). The reservation closes that window: it is taken under the
+        manager lock *before* the (slow, thread-starting) factory call and is only
+        ever cleared after the run is published or immediately on failure, so a
+        partial construction failure never leaves the sensor permanently
+        unavailable (invariant 16). The manager lock itself is still never held
+        across ``factory()``/``run.snapshot()``, exactly as in ``build_with``.
+        """
+        with self._lock:
+            if self._closed:
+                msg = "manager is shutting down"
+                raise LiveRunBusyError(msg)
+            active = self._active_live_run_id_locked()
+            if active is not None:
+                msg = f"live run {active} is already using the sensor; stop it first"
+                raise LiveRunBusyError(msg)
+            if self._live_reservation is not None:
+                msg = "a live run is starting; try again shortly"
+                raise LiveRunBusyError(msg)
+            self._counter += 1
+            run_id = f"run-{self._counter:04d}"
+            self._live_reservation = run_id
+        run: ObservatoryRun | None = None
+        try:
+            run = factory(run_id)
+            # Visible to ``close_all()`` from the instant construction finishes, even
+            # though it is not yet in ``_runs``: a shutdown racing the snapshot below
+            # must still be able to stop it.
+            with self._lock:
+                self._live_constructing = run
+            snapshot = run.snapshot()  # captured before anyone can see the run
+        except BaseException:
+            if run is not None:
+                try:
+                    run.close()
+                except Exception:
+                    log.exception("failed to release live run %s after admission failure", run_id)
+            with self._lock:
+                self._live_reservation = None
+                self._live_constructing = None
+            raise
+        with self._lock:
+            if self._closed:
+                # Shutdown happened while the snapshot was in flight: never publish a
+                # run after the manager has promised no reader thread survives it.
+                self._live_reservation = None
+                self._live_constructing = None
+                shutting_down = True
+            else:
+                self._runs[run_id] = run  # published only now
+                self._live_reservation = None
+                self._live_constructing = None
+                shutting_down = False
+        if shutting_down:
+            try:
+                run.close()
+            except Exception:
+                log.exception("failed to release live run %s after manager shutdown", run_id)
+            msg = "manager is shutting down"
+            raise LiveRunBusyError(msg)
+        return run, snapshot
+
+    def live_reservation(self) -> str | None:
+        """The run id currently being constructed for a LIVE admission, if any."""
+        with self._lock:
+            return self._live_reservation
+
     def get(self, run_id: str) -> ObservatoryRun | None:
         with self._lock:
             return self._runs.get(run_id)
 
+    def _active_live_run_id_locked(self) -> str | None:
+        """First LIVE run that is not finished ("active" = not stopped); caller holds the lock."""
+        for run_id, run in sorted(self._runs.items()):
+            if run.mode == "LIVE" and not run.finished:
+                return run_id
+        return None
+
+    def live_run_ids(self) -> list[str]:
+        with self._lock:
+            return sorted(
+                run_id
+                for run_id, run in self._runs.items()
+                if run.mode == "LIVE" and not run.finished
+            )
+
     def delete(self, run_id: str) -> bool:
         with self._lock:
-            return self._runs.pop(run_id, None) is not None
+            run = self._runs.pop(run_id, None)
+        if run is None:
+            return False
+        run.close()  # outside the manager lock: a live run joins its threads here
+        return True
+
+    def close_all(self) -> None:
+        """Stop every run (live sessions included); used on application shutdown.
+
+        Also stops a LIVE run still under construction (``factory()`` has returned
+        but the admission has not published it yet) and refuses any further
+        admissions from now on, so shutdown never leaves a reader thread behind
+        (invariant 16) even when it races ``build_live_exclusive``.
+        """
+        with self._lock:
+            self._closed = True
+            runs = list(self._runs.values())
+            self._runs.clear()
+            constructing = self._live_constructing
+            self._live_constructing = None
+        for run in runs:
+            run.close()
+        if constructing is not None:
+            constructing.close()
 
     def ids(self) -> list[str]:
         with self._lock:

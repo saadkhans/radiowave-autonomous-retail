@@ -17,10 +17,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from radiowave.simulator.scenario import SCENARIO_EPOCH
 
 
-def seconds_since_epoch(when: datetime | None) -> float | None:
+def seconds_since_epoch(when: datetime | None, epoch: datetime = SCENARIO_EPOCH) -> float | None:
+    """Seconds after the run's epoch: the scenario epoch for replay, the start instant
+    for a live run."""
     if when is None:
         return None
-    return round((when - SCENARIO_EPOCH).total_seconds(), 3)
+    return round((when - epoch).total_seconds(), 3)
 
 
 class ViewModel(BaseModel):
@@ -269,6 +271,36 @@ class ObservatoryScenarioDetail(ObservatoryScenarioSummary):
     store: ObservatoryStore
 
 
+RunMode = Literal["REPLAY", "LIVE"]
+
+
+class ObservatoryLiveStatus(ViewModel):
+    """Health of the live sensor feeding a LIVE run. Vendor-neutral by construction: the
+    fields are the generic stream counters every hardware adapter reports."""
+
+    sensor_id: str
+    sensor_name: str | None = None
+    state: Literal["DISCONNECTED", "CONNECTING", "STREAMING", "STALE", "ERROR"]
+    message: str | None = None
+    generation: int = Field(ge=1, description="Stream generation; bumps on reconnect/restart")
+    frames_received: int
+    frames_parsed: int
+    frames_rejected: int
+    frames_duplicate: int
+    observations_emitted: int
+    observations_dropped_overflow: int = Field(
+        description="Normalized observations dropped because the consumer fell behind"
+    )
+    reconnect_count: int
+    last_frame_age_s: float | None
+    frame_rate_hz: float | None
+    observation_rate_hz: float | None
+    capture_path: str | None = Field(
+        default=None, description="Normalized recording being written, when capture is on"
+    )
+    started_at: str = Field(description="Run start instant, ISO 8601 UTC (the live epoch)")
+
+
 class ObservatoryRunState(ViewModel):
     run_id: str
     revision: int = Field(
@@ -279,11 +311,17 @@ class ObservatoryRunState(ViewModel):
         description="Incremented whenever replay is rebuilt (reset / backward seek); event"
         " sequence numbers are only comparable within one epoch",
     )
+    mode: RunMode = Field(
+        default="REPLAY",
+        description="REPLAY: deterministic scenario time; LIVE: wall-clock time from a sensor",
+    )
     scenario_id: str
     scenario_name: str
     seed: int
     time_s: float
-    duration_s: float
+    duration_s: float = Field(
+        description="Scenario length for REPLAY; for LIVE the elapsed time (the live edge)"
+    )
     step_interval_s: float
     steps: int
     finished: bool
@@ -298,6 +336,9 @@ class ObservatoryRunState(ViewModel):
     )
     sessions: list[ObservatorySession]
     counters: ObservatoryCounters
+    live: ObservatoryLiveStatus | None = Field(
+        default=None, description="Sensor health; present only in LIVE mode"
+    )
 
 
 class ObservatoryTimelineMarker(ViewModel):
@@ -321,6 +362,27 @@ class RunCreateRequest(ViewModel):
     seed: int | None = Field(
         default=None, ge=0, le=2**32 - 1, description="Override the scenario seed (numpy range)"
     )
+
+
+class LiveRunCreateRequest(ViewModel):
+    capture: bool = Field(
+        default=False,
+        description="Record the normalized observations (JSONL, format v2) so the session "
+        "replays without hardware",
+    )
+
+
+class ObservatoryLiveAvailability(ViewModel):
+    """Whether this API process can start a LIVE run, and with which sensor."""
+
+    configured: bool
+    config_path: str | None = None
+    sensor_id: str | None = None
+    sensor_name: str | None = None
+    data_port: str | None = None
+    serial_support: bool = Field(description="Whether the optional serial dependency imports")
+    active_run_id: str | None = None
+    reason: str | None = Field(default=None, description="Why a live run cannot start")
 
 
 class AdvanceRequest(ViewModel):
