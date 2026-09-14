@@ -25,6 +25,19 @@ from radiowave.contracts.store import SourceType, Store
 FirmwareProfileName = Literal["ti-3d-people-counting", "ti-oob-sdk3"]
 TargetRecordLayoutName = Literal["3d_v2", "3d_v1", "2d"]
 
+PEOPLE_TRACKING_PROFILES: frozenset[str] = frozenset({"ti-3d-people-counting"})
+"""Firmware profiles that emit a target list and so can back live people tracking.
+
+``ti-oob-sdk3`` is point-cloud-only (raw detected points, no target/track list) and
+is retained for offline parser support only; it must never back the Phase-3
+:class:`~radiowave.adapters.mmwave.ti.adapter.TiTargetNormalizer`/PeopleTracker path.
+"""
+
+
+def profile_supports_people_tracking(name: str) -> bool:
+    """Whether ``name`` is a firmware profile capable of target-list people tracking."""
+    return name in PEOPLE_TRACKING_PROFILES
+
 
 class TiSerialConfig(FrozenModel):
     """Serial ports of one IWR6843-class board.
@@ -231,6 +244,16 @@ class TiLiveConfig(FrozenModel):
                 return self
         msg = f"adapter.sensor_id {self.adapter.sensor_id!r} is not a sensor of the store twin"
         raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def _firmware_supports_live_people_tracking(self) -> TiLiveConfig:
+        if not profile_supports_people_tracking(self.adapter.firmware_profile):
+            msg = (
+                "ti-oob-sdk3 is point-cloud-only for this implementation; Phase 3 live "
+                "people tracking requires a target-list people-counting profile."
+            )
+            raise ValueError(msg)
+        return self
 
     @classmethod
     def load(cls, path: str | Path) -> TiLiveConfig:

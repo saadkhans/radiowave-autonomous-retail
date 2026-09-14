@@ -68,25 +68,44 @@ def live_config(
 
 class FakeTiming:
     """Deterministic clocks: every ``utc_now``/``monotonic`` call advances by ``step_s``;
-    ``wait`` never sleeps (it just reports whether the event is set)."""
+    ``wait`` never sleeps (it just reports whether the event is set).
 
-    def __init__(self, start: datetime = T0, step_s: float = 0.1) -> None:
+    Tests that need to inject an exact wall/monotonic sequence (e.g. a host wall-clock
+    regression) pass ``wall=[...]``/``monotonic=[...]``: each queued value is consumed,
+    in order, before falling back to the default per-call stepping above. The same
+    queues can be fed incrementally with ``set_wall``/``advance_monotonic``.
+    """
+
+    def __init__(
+        self,
+        start: datetime = T0,
+        step_s: float = 0.1,
+        *,
+        wall: list[datetime] | None = None,
+        monotonic: list[float] | None = None,
+    ) -> None:
         self._start = start
         self._step = step_s
         self._utc_calls = 0
         self._monotonic_calls = 0
         self._lock = threading.Lock()
+        self._wall_queue: list[datetime] = list(wall) if wall else []
+        self._monotonic_queue: list[float] = list(monotonic) if monotonic else []
 
     def utc_now(self) -> datetime:
         # Its own counter: the reader thread's stale checks (monotonic only) must not
         # perturb the UTC stamps, or captures would not be reproducible.
         with self._lock:
+            if self._wall_queue:
+                return self._wall_queue.pop(0)
             value = self._start + timedelta(seconds=self._utc_calls * self._step)
             self._utc_calls += 1
             return value
 
     def monotonic(self) -> float:
         with self._lock:
+            if self._monotonic_queue:
+                return self._monotonic_queue.pop(0)
             value = self._monotonic_calls * self._step
             self._monotonic_calls += 1
             return value
@@ -94,16 +113,33 @@ class FakeTiming:
     def wait(self, event: threading.Event, _seconds: float) -> bool:
         return event.is_set()
 
+    def set_wall(self, dt: datetime) -> None:
+        """Queue an explicit wall-clock value to be returned by the next ``utc_now``."""
+        with self._lock:
+            self._wall_queue.append(dt)
+
+    def advance_monotonic(self, seconds: float) -> None:
+        """Queue an explicit monotonic value to be returned by the next ``monotonic``."""
+        with self._lock:
+            self._monotonic_queue.append(seconds)
+
     def timing(self) -> SessionTiming:
         return SessionTiming(utc_now=self.utc_now, monotonic=self.monotonic, wait=self.wait)
 
 
 class HoldOpenStream:
-    """Serves chunks, then reports timeouts (``b""``) until closed, like an idle serial port."""
+    """Serves chunks, then reports timeouts (``b""``) until closed, like an idle serial port.
 
-    def __init__(self, chunks: list[bytes]) -> None:
+    With ``block_when_idle=True`` an idle read blocks until ``close()`` instead of timing
+    out. Each timeout triggers a stale check that reads the (auto-stepping) fake monotonic
+    clock, so a test comparing two runs stamp for stamp uses the blocking form: the number
+    of idle timeouts before the consumer ticks depends on thread timing, not on the input.
+    """
+
+    def __init__(self, chunks: list[bytes], *, block_when_idle: bool = False) -> None:
         self._chunks = list(chunks)
         self._closed = threading.Event()
+        self._block_when_idle = block_when_idle
         self.reads = 0
 
     def read(self, max_bytes: int) -> bytes:
@@ -116,6 +152,9 @@ class HoldOpenStream:
                 self._chunks.insert(0, chunk[max_bytes:])
                 return chunk[:max_bytes]
             return chunk
+        if self._block_when_idle:
+            self._closed.wait()
+            raise ByteStreamClosed("closed")
         self._closed.wait(0.005)
         return b""
 

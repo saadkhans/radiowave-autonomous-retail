@@ -3,8 +3,10 @@ stop/reconnect, capture path, and one-live-run-at-a-time."""
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -14,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from radiowave.api.app import create_app
 from radiowave.api.live import LiveObservatoryRun, LiveRuntime
+from radiowave.api.runs import LiveRunBusyError
 from tests.fixtures.ti_mmwave.builder import build_target_frame
 from tests.unit.mmwave_ti.support import (
     RADAR,
@@ -202,3 +205,233 @@ def test_replay_run_state_defaults_to_replay_mode(live_client: TestClient) -> No
     state = live_client.post("/api/runs", json={"scenario_id": "01"}).json()["state"]
     assert state["mode"] == "REPLAY"
     assert state["live"] is None
+
+
+def test_reconnect_after_stop_is_refused(live_client: TestClient) -> None:
+    """Invariant 12: a user STOP never resurrects automatically."""
+    run_id = live_client.post("/api/runs/live", json={}).json()["state"]["run_id"]
+    assert live_client.post(f"/api/runs/{run_id}/stop").status_code == 200
+    response = live_client.post(f"/api/runs/{run_id}/reconnect")
+    assert response.status_code == 409
+    assert "stopped" in response.json()["detail"]
+
+
+def test_concurrent_admission_exactly_one_run_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Invariant 15: one physical sensor has at most one live owner, including during
+    creation. Two racing ``POST /runs/live`` requests must admit exactly one run: the
+    manager reserves the slot before the (slow) factory call, so a second request that
+    arrives while the first is still constructing its session is refused immediately,
+    and ``GET /api/live/status`` explains why while the reservation is held.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+    stream_calls = {"n": 0}
+
+    def counting_stream_factory() -> HoldOpenStream:
+        stream_calls["n"] += 1
+        return HoldOpenStream(frames())
+
+    runtime = LiveRuntime(
+        config=live_config(),
+        stream_factory=counting_stream_factory,
+        timing=FakeTiming().timing(),
+        capture_dir=tmp_path,
+        autonomous=False,
+    )
+    with TestClient(create_app(runtime)) as client:
+        original_snapshot = LiveObservatoryRun.snapshot
+        calls = {"n": 0}
+
+        def blocking_snapshot(self: LiveObservatoryRun) -> Any:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                entered.set()
+                assert release.wait(5.0)
+            return original_snapshot(self)
+
+        monkeypatch.setattr(LiveObservatoryRun, "snapshot", blocking_snapshot)
+
+        results: dict[str, Any] = {}
+
+        def start_first() -> None:
+            results["first"] = client.post("/api/runs/live", json={"capture": False})
+
+        thread = threading.Thread(target=start_first)
+        thread.start()
+        try:
+            assert wait_until(lambda: entered.is_set())
+
+            status = client.get("/api/live/status").json()
+            assert status["reason"] is not None
+            assert "starting" in status["reason"]
+
+            blocked = client.post("/api/runs/live", json={"capture": False})
+            assert blocked.status_code == 409
+        finally:
+            release.set()
+            thread.join(5.0)
+
+        first_response = results["first"]
+        assert first_response.status_code == 201
+        assert stream_calls["n"] == 1  # exactly one session/stream was ever opened
+
+
+def test_partial_live_start_failure_releases_the_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Invariant 16: partial live creation failure releases every resource and
+    reservation. If the run's own initial snapshot fails after the session has
+    already started, the session must be stopped, the capture closed, the run must
+    never be published, and the slot must be free for a fresh start."""
+    runtime = LiveRuntime(
+        config=live_config(),
+        stream_factory=lambda: HoldOpenStream(frames()),
+        timing=FakeTiming().timing(),
+        capture_dir=tmp_path,
+        autonomous=False,
+    )
+    with TestClient(create_app(runtime)) as client:
+        original_snapshot = LiveObservatoryRun.snapshot
+        calls = {"n": 0}
+        failed_runs: list[LiveObservatoryRun] = []
+
+        def failing_snapshot(self: LiveObservatoryRun) -> Any:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                failed_runs.append(self)
+                raise RuntimeError("boom")
+            return original_snapshot(self)
+
+        monkeypatch.setattr(LiveObservatoryRun, "snapshot", failing_snapshot)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            client.post("/api/runs/live", json={"capture": True})
+
+        manager = client.app.state.runs  # type: ignore[attr-defined]
+        assert manager.live_run_ids() == []
+        assert manager.live_reservation() is None
+
+        failed_run = failed_runs[0]
+        assert not failed_run.session.running
+        assert not any(
+            t.name.startswith("ti-mmwave-") and t.is_alive() for t in threading.enumerate()
+        )
+        assert failed_run.capture_path is not None
+        assert failed_run._recorder is not None
+        assert failed_run._recorder._handle.closed
+
+        status = client.get("/api/live/status").json()
+        assert status["reason"] is None
+        assert status["active_run_id"] is None
+
+        retry = client.post("/api/runs/live", json={"capture": False})
+        assert retry.status_code == 201
+
+
+def test_close_all_stops_a_run_still_under_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Invariant 16 / shutdown never leaves a reader thread: a run whose ``factory()``
+    has already returned (session started) but whose initial snapshot is still in
+    flight is not yet in ``_runs``, so ``close_all()`` must reach it through
+    ``RunManager._live_constructing`` — otherwise shutdown would return with the
+    sensor's reader thread still running, and the admission would go on to publish a
+    run after the manager was already closed."""
+    runtime = LiveRuntime(
+        config=live_config(),
+        stream_factory=lambda: HoldOpenStream(frames()),
+        timing=FakeTiming().timing(),
+        capture_dir=tmp_path,
+        autonomous=False,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    original_snapshot = LiveObservatoryRun.snapshot
+    captured: dict[str, LiveObservatoryRun] = {}
+
+    def blocking_snapshot(self: LiveObservatoryRun) -> Any:
+        captured["run"] = self
+        entered.set()
+        assert release.wait(5.0)
+        return original_snapshot(self)
+
+    monkeypatch.setattr(LiveObservatoryRun, "snapshot", blocking_snapshot)
+
+    with TestClient(create_app(runtime)) as client:
+        manager = client.app.state.runs  # type: ignore[attr-defined]
+        results: dict[str, Any] = {}
+
+        def build() -> None:
+            try:
+                manager.build_live_exclusive(
+                    lambda run_id: LiveObservatoryRun(run_id, runtime, capture=False)
+                )
+            except Exception as exc:
+                results["error"] = exc
+
+        thread = threading.Thread(target=build)
+        thread.start()
+        try:
+            assert wait_until(lambda: entered.is_set())
+            manager.close_all()
+        finally:
+            release.set()
+            thread.join(5.0)
+
+        assert isinstance(results.get("error"), LiveRunBusyError)
+        assert not captured["run"].session.running
+        assert manager.live_run_ids() == []
+        assert manager.live_reservation() is None
+        assert not any(
+            t.name.startswith("ti-mmwave-") and t.is_alive() for t in threading.enumerate()
+        )
+
+
+def test_driver_thread_start_failure_stops_session_and_releases_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If anything after ``session.start()`` raises inside ``LiveObservatoryRun.__init__``
+    (here, the driver thread's own creation), the session must already be stopped
+    before the exception propagates out of the constructor: ``build_live_exclusive``
+    never gets a ``run`` reference to close in that case, so without this guard the
+    started session (and its reader thread) would leak. The reservation must still be
+    released so a subsequent admission succeeds."""
+    runtime = LiveRuntime(
+        config=live_config(),
+        stream_factory=lambda: HoldOpenStream(frames()),
+        timing=FakeTiming().timing(),
+        capture_dir=tmp_path,
+        autonomous=True,
+    )
+    original_start = threading.Thread.start
+    calls = {"n": 0}
+
+    def failing_start(self: threading.Thread) -> None:
+        if self.name.startswith("live-run-"):
+            calls["n"] += 1
+            raise RuntimeError("boom-driver-thread")
+        return original_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", failing_start)
+
+    with TestClient(create_app(runtime)) as client:
+        manager = client.app.state.runs  # type: ignore[attr-defined]
+        with pytest.raises(RuntimeError, match="boom-driver-thread"):
+            manager.build_live_exclusive(
+                lambda run_id: LiveObservatoryRun(run_id, runtime, capture=False)
+            )
+        assert calls["n"] == 1
+        assert manager.live_run_ids() == []
+        assert manager.live_reservation() is None
+        assert not any(
+            t.name.startswith("ti-mmwave-") and t.is_alive() for t in threading.enumerate()
+        )
+
+        monkeypatch.setattr(threading.Thread, "start", original_start)
+        run, _snapshot = manager.build_live_exclusive(
+            lambda run_id: LiveObservatoryRun(run_id, runtime, capture=False)
+        )
+        assert isinstance(run, LiveObservatoryRun)
+        run.close()

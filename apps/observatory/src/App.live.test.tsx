@@ -174,4 +174,100 @@ describe("LIVE mode", () => {
     // Cart/inspector panels tolerate an empty run without throwing.
     expect(within(screen.getByTestId("cart-panel")).getByText("No carts.")).toBeInTheDocument();
   });
+
+  it("invariant 17: starting a replay scenario while LIVE is active stops the live run first", async () => {
+    render(<App />);
+    // Scenario is selected before LIVE starts; the selection (and its "Run
+    // scenario" button) survives starting a live run untouched.
+    fireEvent.click(await screen.findByRole("option", { name: /one shopper picks one item/ }));
+    await screen.findByRole("button", { name: /Run scenario 01/ });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start live" }));
+    await waitFor(() => expect(screen.getByTestId("mode-badge")).toHaveTextContent("LIVE"));
+    // With a run active, the scenario panel's action relabels to "Restart" but
+    // still calls the same startRun().
+    await screen.findByRole("button", { name: /Restart scenario 01/ });
+
+    const releaseStop = fake.hold("POST /api/runs/live-0001/stop");
+    fireEvent.click(screen.getByRole("button", { name: /Restart scenario 01/ }));
+
+    await waitFor(() => expect(fake.calls).toContain("POST /api/runs/live-0001/stop"));
+    // The replay run is not created while the stop is still held.
+    expect(fake.calls).not.toContain("POST /api/runs");
+
+    releaseStop();
+    await waitFor(() => expect(screen.getByTestId("mode-badge")).toHaveTextContent("REPLAY"));
+    await screen.findByText(/run run-0001/);
+    expect(screen.queryByTestId("live-status-panel")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("live-controls")).not.toBeInTheDocument();
+
+    // The old live run's poll loop is torn down: no further snapshot polls for it.
+    const before = fake.calls.filter((call) => call === "GET /api/runs/live-0001/snapshot").length;
+    await sleep(LIVE_POLL_MS * 3);
+    const after = fake.calls.filter((call) => call === "GET /api/runs/live-0001/snapshot").length;
+    expect(after).toBe(before);
+  }, 10000);
+
+  it("invariant 17: a failed stop keeps the live run and never creates the replay run", async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByRole("option", { name: /one shopper picks one item/ }));
+    await screen.findByRole("button", { name: /Run scenario 01/ });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start live" }));
+    await waitFor(() => expect(screen.getByTestId("mode-badge")).toHaveTextContent("LIVE"));
+    await screen.findByRole("button", { name: /Restart scenario 01/ });
+
+    fake.failNext("POST /api/runs/live-0001/stop");
+    fireEvent.click(screen.getByRole("button", { name: /Restart scenario 01/ }));
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    expect(fake.calls).not.toContain("POST /api/runs");
+    expect(screen.getByTestId("mode-badge")).toHaveTextContent("LIVE");
+    expect(screen.getByText(/run live-0001/)).toBeInTheDocument();
+  });
+
+  it("invariant 18: a live store fetch failure stops the new live run and surfaces the error", async () => {
+    render(<App />);
+    await screen.findByRole("button", { name: "Start live" });
+    fake.failNext("GET /api/runs/live-0001/store");
+    fireEvent.click(screen.getByRole("button", { name: "Start live" }));
+
+    await waitFor(() => expect(fake.calls).toContain("POST /api/runs/live-0001/stop"));
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Start live" })).toBeEnabled());
+
+    // Mode never became LIVE, so no live polling ever starts.
+    expect(screen.queryByTestId("mode-badge")).not.toBeInTheDocument();
+    expect(fake.calls.filter((call) => call === "GET /api/runs/live-0001/snapshot")).toHaveLength(0);
+    await sleep(LIVE_POLL_MS * 3);
+    expect(fake.calls.filter((call) => call === "GET /api/runs/live-0001/snapshot")).toHaveLength(0);
+  }, 10000);
+
+  it("invariant 18: a live store fetch failure AND a failed stop surface the run id and both errors", async () => {
+    render(<App />);
+    await screen.findByRole("button", { name: "Start live" });
+    fake.failNext("GET /api/runs/live-0001/store");
+    fake.failNext("POST /api/runs/live-0001/stop");
+    fireEvent.click(screen.getByRole("button", { name: "Start live" }));
+
+    await waitFor(() => expect(fake.calls).toContain("POST /api/runs/live-0001/stop"));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("live run live-0001");
+    expect(alert).toHaveTextContent("could not be stopped after its store failed to load");
+    expect(alert).toHaveTextContent("stop failed");
+    expect(alert).toHaveTextContent("stop it manually");
+    // The queue is no longer stuck (not busy) and the Start panel is back -
+    // the injected stop failure means the fake server genuinely never
+    // released the sensor, so Start correctly stays disabled with a reason
+    // rather than silently pretending the run was cleaned up.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Start live" })).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Start live" })).toBeDisabled();
+    expect(await screen.findByTestId("live-unavailable-reason")).toBeInTheDocument();
+
+    // Mode never became LIVE, so no live polling ever starts.
+    expect(screen.queryByTestId("mode-badge")).not.toBeInTheDocument();
+    expect(fake.calls.filter((call) => call === "GET /api/runs/live-0001/snapshot")).toHaveLength(0);
+    await sleep(LIVE_POLL_MS * 3);
+    expect(fake.calls.filter((call) => call === "GET /api/runs/live-0001/snapshot")).toHaveLength(0);
+  }, 10000);
 });

@@ -293,13 +293,36 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // Invariant 17/18: stops the currently active LIVE run before it is
+  // replaced by a different run - a replay run (startRun/selectScenario) or a
+  // new LIVE run (startLiveRun). Awaited to completion before the caller
+  // proceeds: if the stop request fails, the exception propagates out of the
+  // exclusive task, so no replacement is created and the live run stays
+  // current with the error visible via the queue's normal error path. A
+  // successful stop is required before the caller bumps the generation /
+  // clears runIdRef, so a live poll response already in flight for the
+  // stopped run can never land on the run that replaces it (it is either
+  // refused outright by runExclusive while this task holds the queue, or
+  // dropped by isStaleSnapshot once the run/generation has moved on).
+  const stopActiveLiveRun = useCallback(async (activeRun: RunState | null) => {
+    if (activeRun?.mode !== "LIVE" || activeRun.finished) return;
+    const liveRunId = runIdRef.current;
+    if (!liveRunId) return;
+    await api.stopRun(liveRunId);
+  }, []);
+
   // A selection is ignored while a request is queued or in flight (the
   // selector is also disabled), so a run snapshot can never land under a
   // newer scenario. runExclusive owns that refusal; the placeholder dispatch
   // and runIdRef clear below only take effect if the request is not refused.
+  // Selecting a scenario while a LIVE run is active must not orphan it
+  // either (invariant 18): the same stop-first rule as startRun applies here
+  // before runIdRef is cleared.
   const selectScenario = useCallback(
     (scenarioId: string) => {
+      const activeRun = state.run;
       return runExclusive(async () => {
+        await stopActiveLiveRun(activeRun);
         generationRef.current += 1;
         runIdRef.current = null;
         dispatch({ type: "scenario", scenarioId, scenario: null });
@@ -307,16 +330,20 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "scenario", scenarioId, scenario });
       });
     },
-    [runExclusive],
+    [runExclusive, state.run, stopActiveLiveRun],
   );
 
   // Starting or replacing a run always stops playback, even when the start
   // itself is refused because another request is still queued or running.
+  // Invariant 17: if a LIVE run is active, it is stopped first (and that stop
+  // must succeed) before the replay run is created.
   const startRun = useCallback(() => {
     const scenarioId = state.scenarioId;
     if (!scenarioId) return Promise.resolve();
     dispatch({ type: "playing", playing: false });
+    const activeRun = state.run;
     return runExclusive(async () => {
+      await stopActiveLiveRun(activeRun);
       generationRef.current += 1;
       const generation = generationRef.current;
       const snapshot = await api.createRun(scenarioId);
@@ -324,7 +351,7 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
       dispatch({ type: "select", selection: null });
       applyRun(snapshot, generation);
     });
-  }, [applyRun, runExclusive, state.scenarioId]);
+  }, [applyRun, runExclusive, state.scenarioId, state.run, stopActiveLiveRun]);
 
   const step = useCallback(() => {
     const runId = runIdRef.current;
@@ -376,30 +403,50 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Starting a live run has no scenario to select: it replaces whatever run
-  // (if any) is active, the same way startRun replaces a replay run. Pauses
+  // (if any) is active, the same way startRun replaces a replay run - including
+  // an already-active LIVE run (invariant: LIVE -> LIVE replacement stops the
+  // old sensor session first rather than relying on the server's 409). Pauses
   // playback first for the same reason startRun/reset do.
+  //
+  // Invariant 18 (a failed live startup cannot leave an invisible running
+  // sensor): the run/store fetch is awaited and must succeed before the run
+  // becomes current. If it fails, this best-effort-stops the just-created run
+  // and rethrows so the queue's normal error path fires; no success path
+  // (dispatch/runIdRef/applyRun) runs, so runIdRef is left untouched (not
+  // pointing at the stopped run) and no live polling starts.
   const startLiveRun = useCallback(
     (capture: boolean) => {
       dispatch({ type: "playing", playing: false });
+      const activeRun = state.run;
       return runExclusive(async () => {
+        await stopActiveLiveRun(activeRun);
         generationRef.current += 1;
         const generation = generationRef.current;
         const snapshot = await api.createLiveRun(capture);
+        let liveStore: ObservatoryStore;
+        try {
+          liveStore = await api.getStore(snapshot.state.run_id);
+        } catch (error) {
+          try {
+            await api.stopRun(snapshot.state.run_id);
+          } catch (stopError) {
+            // The stop also failed: the run id is still running hardware and
+            // the operator would otherwise only see the store error, with no
+            // indication that manual intervention is required.
+            throw new Error(
+              `live run ${snapshot.state.run_id} could not be stopped after its store failed to load ` +
+                `(${describe(error)}; stop failed: ${describe(stopError)}); stop it manually`,
+            );
+          }
+          throw error;
+        }
         runIdRef.current = snapshot.state.run_id;
         dispatch({ type: "select", selection: null });
-        dispatch({ type: "liveStore", store: null });
+        dispatch({ type: "liveStore", store: liveStore });
         applyRun(snapshot, generation);
-        try {
-          const liveStore = await api.getStore(snapshot.state.run_id);
-          if (runIdRef.current === snapshot.state.run_id) {
-            dispatch({ type: "liveStore", store: liveStore });
-          }
-        } catch (error) {
-          dispatch({ type: "error", error: describe(error) });
-        }
       }).finally(() => void refreshLiveAvailability());
     },
-    [applyRun, refreshLiveAvailability, runExclusive],
+    [applyRun, refreshLiveAvailability, runExclusive, state.run, stopActiveLiveRun],
   );
 
   // Stop/reconnect are user-initiated hardware controls: unlike a playback

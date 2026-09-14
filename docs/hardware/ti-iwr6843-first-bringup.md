@@ -99,7 +99,7 @@ Also update `serial.data_port` (and `serial.cli_port` if used later) to the port
 
 Add `--raw-capture data/captures/raw.bin` to also dump raw UART bytes for parser debugging
 (`data/captures/` is git-ignored). Omit `--data-port` to use the port already in the config file.
-Once the probe output shows which layout the board emits (printed as part of the status), pin `adapter.target_record_layout` (`3d_v2`, `3d_v1` or `2d`) in the config, since auto-detection can be ambiguous for certain record counts.
+Once the probe output shows which layout the board emits (printed as part of the status), pin `adapter.target_record_layout` (`3d_v2`, `3d_v1` or `2d`) in the config — confirm it from the probe output rather than leaving it unset, since an unset layout is only auto-detected when exactly one candidate fits the record count; an ambiguous count is now rejected outright rather than guessed.
 
 ### 7. Confirm frames are received
 
@@ -122,6 +122,8 @@ Common causes if no frames arrive, and what each state means:
 | `DISCONNECTED` / repeated reconnects | Board unplugged, USB power issue, or OS reclaimed/renamed the port |
 | `ERROR` | Reconnect attempts exhausted (`reconnect.max_attempts`) or reconnect disabled; check the printed reason |
 | `frames_rejected` growing | Corrupted bytes, unsupported target-record length, or wrong firmware profile (`adapter.firmware_profile`) |
+| every frame rejected as `BAD_PACKET_ALIGNMENT` | The firmware does not pad packets to the 32-byte multiple the people-counting profile declares; confirm the firmware/profile pairing (the alignment is part of the profile, not a config knob) |
+| frames rejected as `AMBIGUOUS_TARGET_RECORD` | The target list length matches more than one record layout; pin `adapter.target_record_layout` to the layout the probe reports |
 
 ### 8. Start the live Observatory
 
@@ -179,7 +181,7 @@ headless without the frontend:
 .venv/bin/python -m radiowave.cli mmwave ti capture --config configs/examples/ti-iwr6843-lab.json --out data/captures/bringup-01.jsonl --seconds 60
 ```
 
-This records the normalized observation stream (format v2), not raw UART bytes.
+This records the normalized observation stream (format v2), not raw UART bytes; note that `--out` names a single-shot path, so an existing file there is overwritten.
 
 ### 12. Stop the session
 

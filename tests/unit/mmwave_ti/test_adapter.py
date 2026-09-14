@@ -16,6 +16,7 @@ from radiowave.adapters.mmwave.ti.adapter import (
     NATIVE_STREAM_GENERATION_KEY,
     NATIVE_TARGET_LAYOUT_KEY,
     NATIVE_TI_POSITION_KEY,
+    NATIVE_TI_TRACK_ID_KEY,
     TiTargetNormalizer,
 )
 from radiowave.adapters.mmwave.ti.config import TiCoordinateConvention, TiObservationPolicy
@@ -61,7 +62,7 @@ def target(
     )
 
 
-def frame(number: int, *targets: TiTarget, cycles: int = 12345) -> TiFrame:
+def frame(number: int, *targets: TiTarget, cycles: int = 12345, subframe: int = 0) -> TiFrame:
     return TiFrame(
         version=0x03060000,
         total_packet_len=0,
@@ -70,7 +71,7 @@ def frame(number: int, *targets: TiTarget, cycles: int = 12345) -> TiFrame:
         time_cpu_cycles=cycles,
         num_detected_objects=0,
         num_tlvs=1,
-        subframe_number=0,
+        subframe_number=subframe,
         targets=tuple(targets),
         points=(),
         target_indices=(),
@@ -121,7 +122,8 @@ def test_golden_ti_target_to_person_observation() -> None:
     assert observation.scenario_id is None
 
     metadata = observation.metadata
-    assert metadata[NATIVE_TRACK_KEY] == "3"
+    assert metadata[NATIVE_TRACK_KEY] == "g1:t3"
+    assert metadata[NATIVE_TI_TRACK_ID_KEY] == 3
     assert metadata[NATIVE_FRAME_NUMBER_KEY] == 17
     assert metadata[NATIVE_STREAM_GENERATION_KEY] == 1
     assert metadata[NATIVE_FIRMWARE_PROFILE_KEY] == "ti-3d-people-counting"
@@ -150,7 +152,7 @@ def test_golden_matches_the_parser_output_end_to_end() -> None:
     norm = normalizer(x=6.0, y=0.0, z=2.4, yaw=math.pi / 2)
     observation = one(norm.frame_to_observations(frames[0], received_at=T0))
     assert (observation.coordinate.x, observation.coordinate.y) == pytest.approx((7.0, 3.0))
-    assert observation.metadata[NATIVE_TRACK_KEY] == "3"
+    assert observation.metadata[NATIVE_TRACK_KEY] == "g1:t3"
 
 
 # --------------------------------------------------------------- rotations
@@ -282,7 +284,8 @@ def test_firmware_confidence_can_be_disabled() -> None:
 def test_native_track_id_is_metadata_only_and_a_string() -> None:
     norm = normalizer()
     observation = one(norm.frame_to_observations(frame(1, target(tid=42)), T0))
-    assert observation.metadata[NATIVE_TRACK_KEY] == "42"
+    assert observation.metadata[NATIVE_TRACK_KEY] == "g1:t42"
+    assert observation.metadata[NATIVE_TI_TRACK_ID_KEY] == 42
     assert "42" not in observation.observation_id
 
 
@@ -324,6 +327,63 @@ def test_explicit_reconnect_generation_resets_the_last_frame_number() -> None:
     assert norm.generation == 2
 
 
+def test_subframe_dedup_matrix() -> None:
+    """Invariant 7: frame identity is (generation, frame, subframe), not the frame number
+    alone, so two subframes of the same frame are both admitted and only a genuine repeat
+    is a duplicate; a restart still opens a new generation and is freshly accepted."""
+    norm = normalizer()
+    assert len(norm.frame_to_observations(frame(100, target(), subframe=0), T0)) == 1
+    assert len(norm.frame_to_observations(frame(100, target(), subframe=1), T0)) == 1
+    assert norm.frame_to_observations(frame(100, target(), subframe=1), T0) == []
+    assert norm.counters.frames_duplicate == 1
+    assert norm.counters.frames_restart == 0
+    assert norm.generation == 1
+
+    norm.new_generation("reconnect")
+    assert len(norm.frame_to_observations(frame(100, target(), subframe=1), T0)) == 1
+    assert norm.generation == 2
+
+    # Frame 99 after frame 100 -> restart -> new generation -> freshly accepted.
+    assert len(norm.frame_to_observations(frame(99, target(), subframe=0), T0)) == 1
+    assert norm.counters.frames_restart == 1
+    assert norm.generation == 3
+
+
+def test_equal_frame_numbers_across_subframes_are_not_a_restart() -> None:
+    """Invariant 7: subframes 0, 1, 2 of frame 100 must not trip the 'frame number went
+    backwards' restart heuristic (100 < 100 is False, so no generation bump, no dedup)."""
+    norm = normalizer()
+    assert len(norm.frame_to_observations(frame(100, target(), subframe=0), T0)) == 1
+    assert len(norm.frame_to_observations(frame(100, target(), subframe=1), T0)) == 1
+    assert len(norm.frame_to_observations(frame(100, target(), subframe=2), T0)) == 1
+    assert norm.counters.frames_restart == 0
+    assert norm.counters.frames_duplicate == 0
+    assert norm.generation == 1
+
+
+def test_native_track_hint_is_scoped_to_the_stream_generation() -> None:
+    """Invariants 5 & 6: a raw TI id is never globally stable identity, and a reconnect
+    opens a new native-hint namespace, so the same raw id in two generations must yield two
+    different fusion continuity hints (NATIVE_TRACK_KEY), while the raw id is preserved
+    unchanged as int provenance under NATIVE_TI_TRACK_ID_KEY and observation_id sequencing
+    is unaffected."""
+    norm = normalizer()
+    first = one(norm.frame_to_observations(frame(1, target(tid=3)), T0))
+    norm.new_generation("reconnect")
+    second = one(norm.frame_to_observations(frame(1, target(tid=3)), T0))
+
+    hint_a = first.metadata[NATIVE_TRACK_KEY]
+    hint_b = second.metadata[NATIVE_TRACK_KEY]
+    assert hint_a == "g1:t3"
+    assert hint_b == "g2:t3"
+    assert hint_a != hint_b
+    assert first.metadata[NATIVE_TI_TRACK_ID_KEY] == 3
+    assert second.metadata[NATIVE_TI_TRACK_ID_KEY] == 3
+    assert isinstance(first.metadata[NATIVE_TI_TRACK_ID_KEY], int)
+    assert first.observation_id == f"mmwave:{RADAR}:1"
+    assert second.observation_id == f"mmwave:{RADAR}:2"
+
+
 # ----------------------------------------------------------- fail safe
 
 
@@ -332,7 +392,7 @@ def test_implausible_targets_are_dropped_and_counted() -> None:
     observations = norm.frame_to_observations(
         frame(1, target(tid=1, y=50.0), target(tid=2, z=9.0), target(tid=3, y=2.0)), T0
     )
-    assert [o.metadata[NATIVE_TRACK_KEY] for o in observations] == ["3"]
+    assert [o.metadata[NATIVE_TRACK_KEY] for o in observations] == ["g1:t3"]
     assert norm.counters.targets_dropped_implausible == 2
     assert norm.counters.targets_seen == 3
 

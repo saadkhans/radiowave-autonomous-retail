@@ -76,7 +76,7 @@
   "adapter": {
     "sensor_id": "radar-ti-01",
     "firmware_profile": "ti-3d-people-counting",
-    "target_record_layout": null,
+    "target_record_layout": "3d_v2",
     "coordinates": {
       "forward_axis": "y",
       "lateral_positive": "right",

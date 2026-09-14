@@ -36,9 +36,12 @@ class TiFrameRejectReason(StrEnum):
     TLV_OVERRUN = "TLV_OVERRUN"
     BAD_TLV_LENGTH = "BAD_TLV_LENGTH"
     BAD_TARGET_RECORD = "BAD_TARGET_RECORD"
+    AMBIGUOUS_TARGET_RECORD = "AMBIGUOUS_TARGET_RECORD"
     TOO_MANY_TARGETS = "TOO_MANY_TARGETS"
     TOO_MANY_POINTS = "TOO_MANY_POINTS"
     NON_FINITE_VALUE = "NON_FINITE_VALUE"
+    BAD_PACKET_ALIGNMENT = "BAD_PACKET_ALIGNMENT"
+    DUPLICATE_TLV = "DUPLICATE_TLV"
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,17 +91,50 @@ _POINT_CLOUD_UNITS_STRUCT = struct.Struct("<5f")  # elevation, azimuth, doppler,
 _POINT_CLOUD_RECORD_STRUCT = struct.Struct("<bbhHH")  # elevation, azimuth, doppler, range, snr
 _PRESENCE_STRUCT = struct.Struct("<I")
 
+# TLV types this module actually decodes into combined frame outputs. A repeat of
+# any of these within one packet is ambiguous (which decode wins?) and the whole
+# packet is rejected rather than resolved by picking one; unknown types are not
+# decoded at all and may repeat freely.
+_DECODED_TLV_TYPES = frozenset(
+    {
+        TiTlvType.TARGET_LIST_3D,
+        TiTlvType.TARGET_INDEX,
+        TiTlvType.TARGET_HEIGHT,
+        TiTlvType.POINT_CLOUD_3D,
+        TiTlvType.PRESENCE_INDICATION,
+        TiTlvType.DETECTED_POINTS,
+        TiTlvType.DETECTED_POINTS_SIDE_INFO,
+    }
+)
 
-def _select_target_layout(payload_len: int, profile: TiFirmwareProfile) -> TargetRecordLayout:
+
+def _select_target_layout(
+    payload_len: int, profile: TiFirmwareProfile
+) -> TargetRecordLayout | None:
+    """Pick the target-record layout for a TARGET_LIST_3D payload, or ``None`` for an
+    unambiguous empty (0-length) target list.
+
+    A 0-length payload is compatible with every layout (0 records either way), so it
+    is never ambiguous and carries no layout. Otherwise, when the firmware profile
+    does not pin a layout, every :data:`TARGET_RECORD_LAYOUTS` entry whose record size
+    evenly divides ``payload_len`` is a candidate; more than one candidate means the
+    bytes are genuinely ambiguous and must be rejected rather than guessed.
+    """
+    if payload_len == 0:
+        return None
     if profile.target_record_layout is not None:
         layout = target_record_layout_by_name(profile.target_record_layout)
         if layout is None or payload_len % layout.struct.size != 0:
             raise _FrameRejectedError(TiFrameRejectReason.BAD_TARGET_RECORD)
         return layout
-    for layout in TARGET_RECORD_LAYOUTS:
-        if payload_len % layout.struct.size == 0:
-            return layout
-    raise _FrameRejectedError(TiFrameRejectReason.BAD_TARGET_RECORD)
+    compatible = [
+        layout for layout in TARGET_RECORD_LAYOUTS if payload_len % layout.struct.size == 0
+    ]
+    if len(compatible) == 1:
+        return compatible[0]
+    if len(compatible) == 0:
+        raise _FrameRejectedError(TiFrameRejectReason.BAD_TARGET_RECORD)
+    raise _FrameRejectedError(TiFrameRejectReason.AMBIGUOUS_TARGET_RECORD)
 
 
 def _require_finite(values: tuple[float, ...]) -> None:
@@ -249,6 +285,7 @@ def _parse_packet(
     heights: tuple[TiTargetHeight, ...] = ()
     presence: int | None = None
     unknown_tlvs: list[tuple[int, int]] = []
+    seen: set[int] = set()
 
     offset = FRAME_HEADER_BYTES
     for _ in range(num_tlvs):
@@ -266,6 +303,15 @@ def _parse_packet(
             raise _FrameRejectedError(TiFrameRejectReason.TLV_OVERRUN)
         payload = packet[offset : offset + length]
 
+        # A TLV type repeated within one packet is ambiguous, not something to
+        # resolve by picking a winner: reject the whole packet. Unknown TLV types
+        # are exempt — they are merely listed, never decoded into a combined output.
+        is_decoded_type = tlv_type in _DECODED_TLV_TYPES
+        if is_decoded_type:
+            if tlv_type in seen:
+                raise _FrameRejectedError(TiFrameRejectReason.DUPLICATE_TLV)
+            seen.add(tlv_type)
+
         if tlv_type == TiTlvType.DETECTED_POINTS:
             if length % _DETECTED_POINT_STRUCT.size != 0:
                 raise _FrameRejectedError(TiFrameRejectReason.BAD_TLV_LENGTH)
@@ -276,10 +322,14 @@ def _parse_packet(
             pending_side_info = payload
         elif tlv_type == TiTlvType.TARGET_LIST_3D:
             layout = _select_target_layout(length, profile)
-            layout_name = layout.name
-            targets = _decode_targets(payload, layout)
-            if len(targets) > limits.max_targets:
-                raise _FrameRejectedError(TiFrameRejectReason.TOO_MANY_TARGETS)
+            if layout is None:
+                layout_name = None
+                targets = ()
+            else:
+                layout_name = layout.name
+                targets = _decode_targets(payload, layout)
+                if len(targets) > limits.max_targets:
+                    raise _FrameRejectedError(TiFrameRejectReason.TOO_MANY_TARGETS)
         elif tlv_type == TiTlvType.TARGET_INDEX:
             target_indices = tuple(payload)
         elif tlv_type == TiTlvType.TARGET_HEIGHT:
@@ -307,6 +357,12 @@ def _parse_packet(
         oob_points = _decode_oob_points(pending_detected_points, pending_side_info)
         if len(oob_points) > limits.max_points:
             raise _FrameRejectedError(TiFrameRejectReason.TOO_MANY_POINTS)
+
+    # The bound applies to the combined cloud actually emitted on the frame, not just
+    # each contributing TLV in isolation: two TLVs individually within limits can
+    # still exceed it together.
+    if len(cloud_points) + len(oob_points) > limits.max_points:
+        raise _FrameRejectedError(TiFrameRejectReason.TOO_MANY_POINTS)
 
     return TiFrame(
         version=version,
@@ -402,6 +458,13 @@ class TiFrameParser:
                 continue
             if num_tlvs > self._limits.max_tlvs:
                 self._reject(TiFrameRejectReason.TOO_MANY_TLVS)
+                self._discard(1, resync=True)
+                continue
+            if (
+                self._profile.packet_alignment > 1
+                and total_packet_len % self._profile.packet_alignment != 0
+            ):
+                self._reject(TiFrameRejectReason.BAD_PACKET_ALIGNMENT)
                 self._discard(1, resync=True)
                 continue
 

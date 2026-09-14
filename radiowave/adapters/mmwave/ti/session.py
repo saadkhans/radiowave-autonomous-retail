@@ -23,7 +23,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from radiowave.adapters.mmwave.ti.adapter import TiTargetNormalizer
@@ -36,6 +36,7 @@ from radiowave.adapters.mmwave.ti.protocol import (
     TiFirmwareProfile,
 )
 from radiowave.adapters.mmwave.ti.transport import ByteStream, ByteStreamClosed, ByteStreamError
+from radiowave.contracts._base import ensure_utc
 from radiowave.contracts.observations import PersonObservation
 from radiowave.digital_twin.registry import StoreRegistry
 
@@ -147,7 +148,7 @@ class TiLiveSession:
         self._normalizer = TiTargetNormalizer(
             config.adapter,
             registry,
-            clock=self._timing.utc_now,
+            clock=self.clock_now,
             scenario_id=scenario_id,
         )
         self._parser = TiFrameParser(
@@ -155,7 +156,9 @@ class TiLiveSession:
         )
         self._queue: deque[PersonObservation] = deque(maxlen=queue_capacity)
         self._lock = threading.Lock()
+        self._lifecycle = threading.Lock()
         self._stop = threading.Event()
+        self._stopped = False
         self._reconnect_requested = threading.Event()
         self._thread: threading.Thread | None = None
         self._stream: ByteStream | None = None
@@ -165,6 +168,14 @@ class TiLiveSession:
         self._observation_rate = RateMeter()
         self._capture: RawByteCapture | None = None
         self._connections = 0
+        self._connection_had_frame = False
+        # One ordered pipeline clock per session; see ``clock_now``. Anchored lazily
+        # (before the reader ever stamps an observation) rather than here, so tests can
+        # inject the exact wall/monotonic reading the anchor is taken from.
+        self._clock_lock = threading.Lock()
+        self._clock_anchor_utc: datetime | None = None
+        self._clock_anchor_monotonic: float | None = None
+        self._clock_last_elapsed: float = 0.0
 
     # --------------------------------------------------------------- lifecycle
 
@@ -177,22 +188,30 @@ class TiLiveSession:
         return self._thread is not None and self._thread.is_alive()
 
     def start(self) -> None:
-        if self.running:
-            return
-        self._stop.clear()
-        raw = self._adapter_config.raw_capture
-        if raw.path is not None and self._capture is None:
-            self._capture = RawByteCapture(Path(raw.path), raw.max_bytes)
-        self._thread = threading.Thread(
-            target=self._run, name=f"ti-mmwave-{self.sensor_id}", daemon=True
-        )
-        self._thread.start()
+        with self._lifecycle:
+            if self.running:
+                return
+            self._stopped = False
+            self._stop.clear()
+            raw = self._adapter_config.raw_capture
+            if raw.path is not None and self._capture is None:
+                self._capture = RawByteCapture(Path(raw.path), raw.max_bytes)
+            self._thread = threading.Thread(
+                target=self._run, name=f"ti-mmwave-{self.sensor_id}", daemon=True
+            )
+            self._thread.start()
 
     def stop(self, timeout_s: float = 5.0) -> bool:
-        """Stop reading, close the transport and join the thread. True if it exited."""
-        self._stop.set()
-        self._close_stream()
-        thread = self._thread
+        """Stop reading, close the transport and join the thread. True if it exited.
+
+        A stopped session never resurrects itself: :meth:`request_reconnect` is a no-op
+        until an explicit :meth:`start` call clears the stopped flag again.
+        """
+        with self._lifecycle:
+            self._stopped = True
+            self._stop.set()
+            self._close_stream()
+            thread = self._thread
         if thread is not None:
             thread.join(timeout_s)
             exited = not thread.is_alive()
@@ -207,31 +226,101 @@ class TiLiveSession:
                 self._diagnostics.message = "stopped"
         return exited
 
-    def request_reconnect(self) -> None:
-        """Ask the reader to drop the current connection and open a new generation."""
-        self._reconnect_requested.set()
-        self._close_stream()
+    def request_reconnect(self) -> bool:
+        """Ask the session to drop its current connection and open a new generation.
+
+        If the reader thread is alive, this just signals it (existing behaviour): the
+        thread notices, closes the stream and reconnects on its own. If the thread has
+        already exited (ERROR after exhausted retries, or reconnect disabled) nothing
+        would otherwise consume the request, so a fresh reader thread is started with a
+        clean failure budget instead. A user ``stop()`` is never overridden: a stopped
+        session returns False and starts nothing until an explicit ``start()``. The
+        lifecycle lock makes concurrent callers agree on exactly one outcome: never two
+        reader threads for one session.
+        """
+        with self._lifecycle:
+            if self._stopped:
+                return False
+            thread = self._thread
+            if thread is not None and thread.is_alive():
+                self._reconnect_requested.set()
+                self._close_stream()
+                return True
+            # The reader already exited (ERROR, or reconnect disabled) or the session
+            # was never started: bring up a fresh reader rather than leaving the
+            # session stuck until an unrelated stop()/start() cycle.
+            self._reconnect_requested.clear()
+            self._stop.clear()
+            with self._lock:
+                self._diagnostics.state = TiStreamState.CONNECTING
+                self._diagnostics.message = None
+            self._thread = threading.Thread(
+                target=self._run, name=f"ti-mmwave-{self.sensor_id}", daemon=True
+            )
+            self._thread.start()
+            return True
 
     def drain(self, max_items: int | None = None) -> list[PersonObservation]:
-        """Observations in arrival order; the queue is emptied (or reduced by max_items)."""
+        """Observations in arrival order; the queue is emptied (or reduced by max_items).
+
+        Diagnostics/tests only: unlike :meth:`drain_with_clock` this does not read the
+        session clock atomically with the drain, so a consumer that advances a
+        downstream pipeline's clock from a separately-read clock value can be overtaken
+        by an observation still on its way into the queue.
+        """
         with self._lock:
             return self._drain_locked(max_items)
 
-    def drain_with_clock(
-        self, clock: Callable[[], datetime]
-    ) -> tuple[list[PersonObservation], datetime]:
-        """Drain the queue and read ``clock()`` in one critical section.
+    def drain_with_clock(self) -> tuple[list[PersonObservation], datetime]:
+        """Drain the queue and read :meth:`clock_now` in one critical section.
 
-        The reader stamps, normalizes and enqueues each frame under the same lock, so
-        every observation stamped before the returned instant is in the returned batch.
-        A consumer that advances the pipeline clock to that instant can therefore never
-        be overtaken by an older observation still on its way into the queue (which the
-        pipeline would have to drop as out-of-order).
+        This is the canonical consumer primitive: the reader stamps, normalizes and
+        enqueues each observation under the same queue lock, so every observation
+        stamped before the returned instant is in the returned batch. A consumer that
+        advances its pipeline clock to that instant can therefore never be overtaken by
+        an older observation still on its way into the queue (which the pipeline would
+        otherwise have to drop as out-of-order).
         """
         with self._lock:
             items = self._drain_locked(None)
-            now = clock()
+            now = self.clock_now()
         return items, now
+
+    def clock_now(self) -> datetime:
+        """The session's one ordered live clock, shared by every stamped observation and
+        by :meth:`drain_with_clock`.
+
+        Anchored lazily, at the first call (before the reader stamps its first
+        observation), to a real UTC instant; every later value is that anchor plus
+        elapsed monotonic time, so host wall-clock changes (NTP steps, DST, an operator
+        adjusting the system clock) can never move it backwards within the session. A
+        reconnect does not re-anchor: the clock keeps advancing across generations.
+        Device frame numbers and TI CPU cycles stay metadata only; they are never a
+        source of UTC time.
+        """
+        with self._clock_lock:
+            return self._clock_at_locked(self._timing.monotonic())
+
+    def _clock_at_locked(self, mono: float) -> datetime:
+        """Advance the clock from an already-sampled monotonic reading.
+
+        Caller holds ``self._clock_lock``. Split out from :meth:`clock_now` so
+        ``_handle_bytes`` can reuse the single monotonic reading it already takes for
+        staleness/rate tracking as the same instant used for the receive stamp, instead
+        of sampling the monotonic clock twice for what must be one ordered instant.
+        """
+        if self._clock_anchor_monotonic is None:
+            self._clock_anchor_utc = ensure_utc(self._timing.utc_now())
+            self._clock_anchor_monotonic = mono
+        elapsed = mono - self._clock_anchor_monotonic
+        if elapsed < self._clock_last_elapsed:
+            # Monotonic must never regress within a process, but clamp defensively
+            # rather than ever let the pipeline clock move backwards.
+            elapsed = self._clock_last_elapsed
+        self._clock_last_elapsed = elapsed
+        anchor = self._clock_anchor_utc
+        assert anchor is not None  # set on the branch above if it wasn't already
+        return anchor + timedelta(seconds=elapsed)
 
     def _drain_locked(self, max_items: int | None) -> list[PersonObservation]:
         if max_items is None or max_items >= len(self._queue):
@@ -333,16 +422,23 @@ class TiLiveSession:
             self._frame_rate.reset()
             self._observation_rate.reset()
             self._reconnect_requested.clear()
+            self._connection_had_frame = False
             self._set_state(TiStreamState.CONNECTING, "waiting for the first frame")
-            outcome = self._read_until_failure(stream)
+            reason, had_healthy_frame = self._read_until_failure(stream)
             self._close_stream()
             if self._stop.is_set():
                 return
-            if outcome is None:
+            if had_healthy_frame:
+                # ``failures`` counts CONSECUTIVE failures: a connection that produced
+                # at least one valid parsed frame was healthy, so the next outage starts
+                # a fresh retry budget instead of compounding onto failures from a
+                # connection that actually worked.
+                failures = 0
+            if reason is None:
                 failures = 0  # an explicit reconnect request is not a failure
                 continue
             failures += 1
-            if not self._should_retry(failures, outcome):
+            if not self._should_retry(failures, reason):
                 return
             if self._timing.wait(self._stop, self._backoff(failures)):
                 return
@@ -361,26 +457,32 @@ class TiLiveSession:
         self._set_state(TiStreamState.DISCONNECTED, f"{reason}; retry {failures}")
         return True
 
-    def _read_until_failure(self, stream: ByteStream) -> str | None:
-        """Read loop for one connection. Returns a failure reason, or None for a requested
-        reconnect / stop."""
+    def _read_until_failure(self, stream: ByteStream) -> tuple[str | None, bool]:
+        """Read loop for one connection.
+
+        Returns ``(reason, had_healthy_frame)``: ``reason`` is a failure reason, or
+        ``None`` for a requested reconnect / stop; ``had_healthy_frame`` is True once
+        this connection parsed at least one valid frame (see C1 in the session's
+        consecutive-failure budget in :meth:`_run`).
+        """
         chunk = self._config.serial.read_chunk_bytes
         while not self._stop.is_set() and not self._reconnect_requested.is_set():
             try:
                 data = stream.read(chunk)
             except ByteStreamClosed as exc:
-                return f"stream closed: {exc}" if str(exc) else "stream closed"
+                reason = f"stream closed: {exc}" if str(exc) else "stream closed"
+                return reason, self._connection_had_frame
             except ByteStreamError as exc:
-                return f"transport error: {exc}"
+                return f"transport error: {exc}", self._connection_had_frame
             except Exception as exc:  # a driver bug must not kill the API
                 log.exception("unexpected error reading %s", self.sensor_id)
-                return f"unexpected error: {type(exc).__name__}"
+                return f"unexpected error: {type(exc).__name__}", self._connection_had_frame
             if not data:
                 with self._lock:
                     self._refresh_stale(self._timing.monotonic())
                 continue
             self._handle_bytes(data)
-        return None
+        return None, self._connection_had_frame
 
     def _handle_bytes(self, data: bytes) -> None:
         try:
@@ -393,13 +495,19 @@ class TiLiveSession:
             return
         if not frames:
             return
+        self._connection_had_frame = True
         # Stamp, normalize and enqueue under the queue lock: the receive time is the
         # canonical observation timestamp, and a consumer draining the queue reads its
         # own clock under this same lock (``drain_with_clock``), so an observation can
         # never carry a stamp older than a clock position the consumer already applied.
         with self._lock:
-            received_at = self._timing.utc_now()
             now = self._timing.monotonic()
+            # One shared monotonic reading feeds both the pipeline clock (so observation
+            # and consumer clock are the same ordered clock) and staleness/rate
+            # tracking below, instead of sampling the monotonic clock twice for what
+            # must be one instant.
+            with self._clock_lock:
+                received_at = self._clock_at_locked(now)
             emitted: list[PersonObservation] = []
             for frame in frames:
                 try:

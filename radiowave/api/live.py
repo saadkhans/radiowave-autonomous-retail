@@ -22,9 +22,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
 from radiowave.adapters.mmwave.ti.config import TiLiveConfig
@@ -79,12 +77,28 @@ class LiveRuntime:
         return None
 
 
-def _utc_now(runtime: LiveRuntime) -> Callable[[], datetime]:
-    if runtime.timing is not None:
-        return runtime.timing.utc_now
-    from datetime import UTC
+def allocate_capture_path(directory: Path, sensor_id: str, run_id: str, stamp: str) -> Path:
+    """Reserve a unique capture file path and create it (empty) before anyone writes to it.
 
-    return lambda: datetime.now(UTC)
+    Two live runs whose stamps collide (same sensor, same microsecond, or a test that
+    mocks the clock) must never silently share a file: :class:`JsonlRecorder` opens its
+    path with truncating ``"w"``, so handing it a path that already holds another run's
+    data would erase that data (invariant 14: capture files never overwrite previous
+    experiments). Exclusive creation (``"x"``) makes the check-then-open atomic; on a
+    collision a bounded numeric suffix is tried instead of failing the run.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    base_name = f"live-{sensor_id}-{run_id}-{stamp}"
+    for attempt in range(1000):
+        name = f"{base_name}.jsonl" if attempt == 0 else f"{base_name}-{attempt}.jsonl"
+        candidate = directory / name
+        try:
+            candidate.open("x").close()
+        except FileExistsError:
+            continue
+        return candidate
+    msg = f"could not allocate a unique capture path for {base_name!r} after 1000 attempts"
+    raise RuntimeError(msg)
 
 
 class LiveObservatoryRun(ObservatoryRun):
@@ -92,9 +106,7 @@ class LiveObservatoryRun(ObservatoryRun):
 
     def __init__(self, run_id: str, runtime: LiveRuntime, *, capture: bool) -> None:
         self._runtime = runtime
-        self._utc_now = _utc_now(runtime)
         self._init_common(run_id, runtime.config.store, runtime.pipeline_config)
-        self.epoch_at = self._utc_now()
         self.session = TiLiveSession(
             runtime.config,
             self.registry,
@@ -102,14 +114,18 @@ class LiveObservatoryRun(ObservatoryRun):
             timing=runtime.timing,
             scenario_id=None,
         )
+        # Taken right after the session is constructed, before it starts reading: the
+        # same ordered clock the session stamps every observation with (invariant 9),
+        # so ``time_s`` (derived from ``epoch_at``) can never be ahead of or behind the
+        # clock the pipeline advances on in ``tick``.
+        self.epoch_at = self.session.clock_now()
         self.capture_path: Path | None = None
         recorder: Recorder | None = None
         if capture:
-            stamp = self.epoch_at.strftime("%Y%m%dT%H%M%SZ")
-            self.capture_path = (
-                runtime.capture_dir / f"live-{runtime.config.adapter.sensor_id}-{stamp}.jsonl"
+            stamp = self.epoch_at.strftime("%Y%m%dT%H%M%S.%fZ")
+            self.capture_path = allocate_capture_path(
+                runtime.capture_dir, runtime.config.adapter.sensor_id, run_id, stamp
             )
-            self.capture_path.parent.mkdir(parents=True, exist_ok=True)
             recorder = JsonlRecorder(self.capture_path)
         self._recorder = recorder
         self.pipeline = FoundationPipeline(
@@ -124,12 +140,25 @@ class LiveObservatoryRun(ObservatoryRun):
         # ``observations_total`` and ``_live_status`` (both consumed from within it)
         # never observe two different instants of the session's counters.
         self._diagnostics_cache: TiAdapterDiagnostics | None = None
+        # ``session.start()`` is the last step before the driver thread: everything
+        # that can fail on its own (recorder/capture-path allocation, pipeline
+        # construction) already happened above, so the only thing that can still
+        # raise after the sensor is reading is the driver thread's own creation.
+        # Guard exactly that: if it raises, ``__init__`` never returns, so
+        # ``build_live_exclusive`` never gets a ``run`` reference to close, and
+        # without this the started session (and its reader thread) would leak.
         self.session.start()
-        if runtime.autonomous:
-            self._driver = threading.Thread(
-                target=self._drive, name=f"live-run-{run_id}", daemon=True
-            )
-            self._driver.start()
+        try:
+            if runtime.autonomous:
+                self._driver = threading.Thread(
+                    target=self._drive, name=f"live-run-{run_id}", daemon=True
+                )
+                self._driver.start()
+        except BaseException:
+            self.session.stop()
+            if self._recorder is not None:
+                self._recorder.close()
+            raise
 
     # ---------------------------------------------------------------- identity
     @property
@@ -207,7 +236,9 @@ class LiveObservatoryRun(ObservatoryRun):
         # The queue is drained and ``now`` is read under the session's queue lock, so
         # every observation stamped before ``now`` is in this batch and the clock
         # advance below can never run ahead of an observation still being enqueued.
-        observations, now = self.session.drain_with_clock(self._utc_now)
+        # Both come from the session's one ordered clock (invariant 9): the pipeline
+        # never advances on a clock different from the one that stamped the samples.
+        observations, now = self.session.drain_with_clock()
         ingested = 0
         for observation in observations:
             try:
@@ -254,7 +285,21 @@ class LiveObservatoryRun(ObservatoryRun):
                 self.revision += 1
 
     def reconnect(self) -> None:
-        self.session.request_reconnect()
+        """Ask the session for a fresh connection generation.
+
+        A user STOP never resurrects automatically (invariant 12): once this run is
+        finalized (``stop()`` has set ``self.finished``) reconnect must not silently
+        start a new reader thread, so it is refused with the same 409-style error
+        replay-only controls use. While the run is still live, ``request_reconnect``
+        can itself report ``False`` if the session had already been stopped from under
+        it; that is refused the same way rather than pretending to succeed.
+        """
+        if self.finished:
+            msg = "live run is stopped; start a new run"
+            raise LiveModeError(msg)
+        if not self.session.request_reconnect():
+            msg = "live run is stopped; start a new run"
+            raise LiveModeError(msg)
         with self._lock:
             self.revision += 1
 

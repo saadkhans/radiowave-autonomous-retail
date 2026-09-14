@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -17,6 +19,7 @@ from radiowave.adapters.mmwave.ti.transport import (
     MemoryByteStream,
 )
 from radiowave.digital_twin.registry import StoreRegistry
+from radiowave.pipeline import FoundationPipeline
 from tests.fixtures.ti_mmwave.builder import build_target_frame
 from tests.unit.mmwave_ti.support import FakeTiming, HoldOpenStream, live_config, wait_until
 
@@ -269,12 +272,282 @@ def test_drain_with_clock_never_returns_an_instant_older_than_a_drained_observat
     session.start()
     try:
         assert wait_until(lambda: session.queued == 4)
-        observations, now = session.drain_with_clock(timing.utc_now)
+        observations, now = session.drain_with_clock()
         assert len(observations) == 4
         assert all(observation.timestamp <= now for observation in observations)
         assert session.queued == 0
         # An empty drain still yields a usable instant for the consumer's clock advance.
-        again, later = session.drain_with_clock(timing.utc_now)
+        again, later = session.drain_with_clock()
         assert again == [] and later >= now
     finally:
         assert session.stop()
+
+
+# --------------------------------------------------------------------------- invariant 8
+
+
+def test_canonical_timestamps_never_go_backwards_when_host_wall_time_does() -> None:
+    """Invariant 8: canonical live timestamps never go backwards because host wall time
+    changes. ``clock_now()`` is anchored to UTC only once (lazily, at first use) and is
+    then driven purely by the monotonic clock, so a host wall-clock regression seen
+    after that anchor is never used."""
+    wall = [
+        datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC),
+        datetime(2026, 3, 1, 12, 0, 1, tzinfo=UTC),
+        datetime(2026, 3, 1, 11, 59, 55, tzinfo=UTC),  # a backward NTP-style step
+    ]
+    timing = FakeTiming(wall=wall, monotonic=[100.0, 101.0, 102.0])
+    session = session_for([HoldOpenStream(frames(3))], timing=timing)
+    session.start()
+    try:
+        assert wait_until(lambda: session.queued == 3)
+        observations = session.drain()
+        stamps = [o.timestamp for o in observations]
+        assert stamps == [
+            datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC),
+            datetime(2026, 3, 1, 12, 0, 1, tzinfo=UTC),
+            datetime(2026, 3, 1, 12, 0, 2, tzinfo=UTC),
+        ]
+        assert stamps == sorted(stamps)  # strictly non-decreasing; no 11:59:55 anywhere
+        now = session.clock_now()
+        assert now >= stamps[-1]
+    finally:
+        assert session.stop()
+
+
+# --------------------------------------------------------------------------- invariant 9
+
+
+def test_observation_and_pipeline_clock_are_the_same_ordered_clock() -> None:
+    """Invariant 9: sensor observations and the pipeline clock use the same ordered
+    clock. A consumer that ingests a drained batch and then advances a
+    ``FoundationPipeline`` to ``drain_with_clock``'s instant never has its own
+    observations rejected as out of order, even across a host wall-clock regression."""
+    wall = [
+        datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC),
+        datetime(2026, 3, 1, 12, 0, 1, tzinfo=UTC),
+        datetime(2026, 3, 1, 11, 59, 50, tzinfo=UTC),  # a backward NTP-style step
+    ]
+    timing = FakeTiming(wall=wall, monotonic=[100.0, 101.0, 102.0])
+    config = live_config()
+    pending: list[ByteStream] = [HoldOpenStream(frames(3))]
+
+    def factory() -> ByteStream:
+        if not pending:
+            raise ByteStreamError("no more streams")
+        return pending.pop(0)
+
+    session = TiLiveSession(
+        config, StoreRegistry(config.store), stream_factory=factory, timing=timing.timing()
+    )
+    pipeline = FoundationPipeline(StoreRegistry(config.store))
+    session.start()
+    accepted = 0
+    try:
+        # The stream delivers all three frames almost immediately (no per-frame
+        # pacing), so wait for all of them, then drain/ingest/advance in a loop: later
+        # iterations simply see an empty batch and a clock that has not moved, which
+        # must be just as harmless as draining mid-stream.
+        assert wait_until(lambda: session.queued == 3)
+        for _ in range(3):
+            observations, now = session.drain_with_clock()
+            for observation in observations:
+                assert pipeline.ingest(observation)
+                accepted += 1
+            pipeline.advance_to(now)
+    finally:
+        assert session.stop()
+    assert accepted == 3
+    result = pipeline.result()
+    assert result.observations_out_of_order == 0
+
+
+# --------------------------------------------------------------------------- invariant 10 (C1)
+
+
+def test_a_healthy_connection_resets_the_consecutive_failure_budget() -> None:
+    """Invariant 10 / C1: a successful sensor connection resets consecutive retry
+    failures. Two failed opens, then a connection that emits a valid frame before
+    dropping, must report the *next* outage as retry 1 (not 3) and must not exhaust a
+    ``max_attempts=2`` budget that the pre-health failures would otherwise have used up.
+    """
+    healthy_stream = MemoryByteStream(frames(1))  # emits one frame, then raises closed
+    attempts = 0
+    healthy_seen = threading.Event()
+
+    def factory() -> ByteStream:
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 2:
+            raise ByteStreamError("port busy")
+        healthy_seen.set()
+        return healthy_stream
+
+    def wait(event: threading.Event, _seconds: float) -> bool:
+        # Before the healthy connection: never really sleep (matches FakeTiming).
+        # After it drops: block on the real stop event so the test has a window to
+        # observe the "retry 1" state before the reader tries to reconnect again.
+        if healthy_seen.is_set():
+            return event.wait(2.0)
+        return event.is_set()
+
+    fake = FakeTiming()
+    timing = replace(fake.timing(), wait=wait)
+    config = live_config(
+        reconnect=TiReconnectPolicy(
+            enabled=True, initial_delay_s=0.001, max_delay_s=0.001, max_attempts=2
+        )
+    )
+    session = TiLiveSession(
+        config, StoreRegistry(config.store), stream_factory=factory, timing=timing
+    )
+    session.start()
+    try:
+        assert wait_until(lambda: session.queued == 1)
+        assert wait_until(lambda: "retry 1" in (session.diagnostics().message or ""), timeout_s=2.0)
+        assert session.diagnostics().state != TiStreamState.ERROR
+    finally:
+        assert session.stop()
+
+
+# --------------------------------------------------------------------------- invariant 11/12 (C2)
+
+
+def test_reconnect_from_error_restarts_a_dead_reader() -> None:
+    """Invariant 11: reconnect from ERROR actually restarts a dead reader."""
+    pending: list[ByteStream] = []
+
+    def factory() -> ByteStream:
+        if not pending:
+            raise ByteStreamError("port unavailable")
+        return pending.pop(0)
+
+    config = live_config(
+        reconnect=TiReconnectPolicy(
+            enabled=True, initial_delay_s=0.001, max_delay_s=0.001, max_attempts=1
+        )
+    )
+    session = TiLiveSession(
+        config, StoreRegistry(config.store), stream_factory=factory, timing=FakeTiming().timing()
+    )
+    session.start()
+    try:
+        assert wait_until(lambda: session.diagnostics().state == TiStreamState.ERROR)
+        assert wait_until(lambda: not session.running)
+        pending.append(HoldOpenStream(frames(1)))
+        assert session.request_reconnect() is True
+        assert wait_until(lambda: session.running)
+        assert wait_until(lambda: session.queued == 1)
+        assert session.diagnostics().state == TiStreamState.STREAMING
+    finally:
+        session.stop()
+
+
+def test_reconnect_after_error_with_a_prior_connection_opens_a_new_generation() -> None:
+    """C2: a restarted reader still opens a new stream generation via the existing
+    ``_connections > 1`` rule, because ``_connections`` persists across restarts."""
+    pending: list[ByteStream] = [MemoryByteStream(frames(1))]
+
+    def factory() -> ByteStream:
+        if not pending:
+            raise ByteStreamError("port gone")
+        return pending.pop(0)
+
+    config = live_config(
+        reconnect=TiReconnectPolicy(
+            enabled=True, initial_delay_s=0.001, max_delay_s=0.001, max_attempts=1
+        )
+    )
+    session = TiLiveSession(
+        config, StoreRegistry(config.store), stream_factory=factory, timing=FakeTiming().timing()
+    )
+    session.start()
+    try:
+        assert wait_until(lambda: session.diagnostics().state == TiStreamState.ERROR)
+        assert session.diagnostics().generation == 1
+        pending.append(HoldOpenStream(frames(1, start=1)))
+        assert session.request_reconnect() is True
+        assert wait_until(lambda: session.queued >= 1)
+        observations = session.drain()
+        assert observations[-1].metadata["native_stream_generation"] == 2
+        assert session.diagnostics().generation == 2
+    finally:
+        session.stop()
+
+
+def test_reconnect_after_stop_is_rejected_and_never_resurrects() -> None:
+    """Invariant 12: user STOP never resurrects automatically."""
+    session = session_for([HoldOpenStream(frames(1))])
+    session.start()
+    try:
+        assert wait_until(lambda: session.queued == 1)
+    finally:
+        assert session.stop()
+    assert session.request_reconnect() is False
+    assert not session.running
+    assert not any(t.name == f"ti-mmwave-{session.sensor_id}" for t in threading.enumerate())
+
+
+def test_concurrent_reconnect_requests_spawn_exactly_one_reader() -> None:
+    """C2: a reconnect race (multiple concurrent callers) never spawns two threads."""
+    available = False
+
+    def factory() -> ByteStream:
+        # A fresh, never-failing stream every time the port is "available": some of
+        # the racing callers below force the eventual sole reader through more than
+        # one reconnect cycle (closing the stream it just opened), so the factory must
+        # never run out rather than accidentally driving the session into ERROR.
+        if not available:
+            raise ByteStreamError("port unavailable")
+        return HoldOpenStream(frames(1))
+
+    config = live_config(
+        reconnect=TiReconnectPolicy(
+            enabled=True, initial_delay_s=0.001, max_delay_s=0.001, max_attempts=1
+        )
+    )
+    session = TiLiveSession(
+        config, StoreRegistry(config.store), stream_factory=factory, timing=FakeTiming().timing()
+    )
+    session.start()
+    try:
+        assert wait_until(lambda: session.diagnostics().state == TiStreamState.ERROR)
+        assert wait_until(lambda: not session.running)
+        available = True
+        barrier = threading.Barrier(4)
+        results: list[bool] = []
+        results_lock = threading.Lock()
+
+        def call_reconnect() -> None:
+            barrier.wait(timeout=2.0)
+            outcome = session.request_reconnect()
+            with results_lock:
+                results.append(outcome)
+
+        callers = [threading.Thread(target=call_reconnect) for _ in range(4)]
+        for caller in callers:
+            caller.start()
+        for caller in callers:
+            caller.join(timeout=2.0)
+        assert len(results) == 4
+        assert all(results)
+        # At least one reconnect cycle got far enough to deliver a frame; how many of
+        # the racing calls each forced yet another cycle first is not deterministic.
+        assert wait_until(lambda: session.queued >= 1)
+        ti_threads = [
+            t for t in threading.enumerate() if t.name == f"ti-mmwave-{session.sensor_id}"
+        ]
+        assert len(ti_threads) == 1
+    finally:
+        session.stop()
+
+
+def test_no_zombie_threads_after_stop() -> None:
+    session = session_for([HoldOpenStream(frames(1))])
+    session.start()
+    try:
+        assert wait_until(lambda: session.queued == 1)
+    finally:
+        assert session.stop(timeout_s=2.0)
+    assert session.running is False
+    assert not any(t.name == f"ti-mmwave-{session.sensor_id}" for t in threading.enumerate())

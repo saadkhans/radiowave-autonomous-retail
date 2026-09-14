@@ -16,11 +16,10 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from radiowave.adapters.mmwave.ti.adapter import NATIVE_TI_POSITION_KEY
+from radiowave.adapters.mmwave.ti.adapter import NATIVE_TI_POSITION_KEY, NATIVE_TI_TRACK_ID_KEY
 from radiowave.adapters.mmwave.ti.config import (
     TiAdapterConfig,
     TiLiveConfig,
-    TiRawCaptureConfig,
     TiSerialConfig,
 )
 from radiowave.adapters.mmwave.ti.session import TiLiveSession
@@ -40,12 +39,10 @@ def load_live_config(args: argparse.Namespace) -> TiLiveConfig:
         serial = TiSerialConfig(**{**serial.model_dump(), "data_port": args.data_port})
     adapter: TiAdapterConfig = config.adapter
     if getattr(args, "raw_capture", None):
-        adapter = TiAdapterConfig(
-            **{
-                **adapter.model_dump(),
-                "raw_capture": TiRawCaptureConfig(path=args.raw_capture).model_dump(),
-            }
-        )
+        # model_copy() on these frozen models preserves every other field (notably
+        # max_bytes) instead of resetting it to the TiRawCaptureConfig default.
+        raw_capture = adapter.raw_capture.model_copy(update={"path": args.raw_capture})
+        adapter = adapter.model_copy(update={"raw_capture": raw_capture})
     return TiLiveConfig(store=config.store, serial=serial, adapter=adapter)
 
 
@@ -85,6 +82,9 @@ def cmd_probe(args: argparse.Namespace, out: Printer = print) -> int:
     try:
         while deadline is None or time.monotonic() < deadline:
             time.sleep(1.0)
+            # probe only prints; it never advances a pipeline clock, so the plain
+            # (non-atomic) drain() is fine here -- there is no downstream ordering
+            # invariant it could violate.
             batch = session.drain()
             total += len(batch)
             _describe(session, total, out)
@@ -93,7 +93,8 @@ def cmd_probe(args: argparse.Namespace, out: Printer = print) -> int:
                 local = observation.metadata.get(NATIVE_POSITION_KEY, {})
                 coordinate = observation.coordinate
                 out(
-                    f"  id={observation.metadata.get(NATIVE_TRACK_KEY)!s:<4} "
+                    f"  ti_id={observation.metadata.get(NATIVE_TI_TRACK_ID_KEY)!s:<4} "
+                    f"hint={observation.metadata.get(NATIVE_TRACK_KEY)!s:<8} "
                     f"ti=({_fmt(native.get('x'))}, {_fmt(native.get('y'))}, "
                     f"{_fmt(native.get('z'))}) "
                     f"sensor=({_fmt(local.get('x'))}, {_fmt(local.get('y'))}, "
@@ -127,17 +128,26 @@ def cmd_capture(args: argparse.Namespace, out: Printer = print) -> int:
     try:
         while not stop.is_set() and (deadline is None or time.monotonic() < deadline):
             time.sleep(0.2)
-            for observation in session.drain():
+            # Atomic primitive: the drain and the clock read happen under the same
+            # queue lock, so an observation stamped before ``now`` can never still be
+            # in flight into the queue when the pipeline clock advances to ``now``
+            # (invariant 9/13: same ordered clock, no observation lost to the race).
+            observations, now = session.drain_with_clock()
+            for observation in observations:
                 if pipeline.ingest(observation):
                     accepted += 1
-            pipeline.advance_to(datetime.now(UTC))
+            pipeline.advance_to(now)
     except KeyboardInterrupt:
         out("interrupted")
     finally:
         session.stop()
-        for observation in session.drain():
+        # Final flush uses the same atomic primitive so the terminal advance is on
+        # the same ordered clock as every advance during the loop.
+        observations, now = session.drain_with_clock()
+        for observation in observations:
             if pipeline.ingest(observation):
                 accepted += 1
+        pipeline.advance_to(now)
         result = pipeline.finish(advance=False)
         recorder.close()
     _describe(session, accepted, out)
@@ -164,7 +174,7 @@ def add_mmwave_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]
         parser.add_argument(
             "--raw-capture",
             help="also dump raw UART bytes to this file (parser debugging; keep under "
-            "data/captures/)",
+            "data/captures/); an existing file at this path is overwritten",
         )
 
     probe = actions.add_parser("probe", help="connect and print frames, targets and health")
@@ -181,7 +191,11 @@ def add_mmwave_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]
         "capture", help="record the normalized observation stream without the Observatory"
     )
     common(capture)
-    capture.add_argument("--out", required=True, help="JSONL recording path (git-ignored dir)")
+    capture.add_argument(
+        "--out",
+        required=True,
+        help="JSONL recording path (git-ignored dir); an existing file at this path is overwritten",
+    )
     capture.add_argument(
         "--seconds", type=float, default=0.0, help="how long to capture (0 = until Ctrl+C)"
     )

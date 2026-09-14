@@ -8,6 +8,7 @@ of calls always yields the same state.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -64,6 +65,8 @@ from radiowave.simulator.library import SCENARIOS, load_scenario
 from radiowave.simulator.runner import build_pipeline, scenario_observation_stream
 from radiowave.simulator.scenario import SCENARIO_EPOCH, Scenario
 
+log = logging.getLogger(__name__)
+
 _RESTING = frozenset({ItemState.ON_FIXTURE, ItemState.MISPLACED, ItemState.UNKNOWN})
 TRAIL_POINTS = 40
 FEATURE_ORDER = (
@@ -88,6 +91,15 @@ def _seconds(when: object, epoch: datetime = SCENARIO_EPOCH) -> float:
 
 class LiveModeError(RuntimeError):
     """A replay-only control (step/advance/seek/reset) was requested on a LIVE run."""
+
+
+class LiveRunBusyError(RuntimeError):
+    """A live run is already active, or another admission is in flight.
+
+    One physical sensor has at most one live owner, including during creation
+    (invariant 15): this is raised both when a LIVE run is already streaming and
+    while another ``POST /runs/live`` is still constructing one.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -821,6 +833,20 @@ class RunManager:
         self._runs: dict[str, ObservatoryRun] = {}
         self._counter = 0
         self._lock = Lock()
+        # The run id currently being constructed for a LIVE admission, if any; see
+        # ``build_live_exclusive``. Held only between reserving the slot and either
+        # publishing the run or releasing the slot on failure.
+        self._live_reservation: str | None = None
+        # The run object itself, once ``factory()`` has returned but before it is
+        # published to ``_runs``. Without this, a run whose construction is still in
+        # progress (session started, driver thread up, snapshot in flight) is
+        # invisible to ``close_all()``: shutdown would return with the reader thread
+        # still running, and the admission would go on to publish a run after the
+        # manager was already closed (invariant 16).
+        self._live_constructing: ObservatoryRun | None = None
+        # Set by ``close_all()``; once true no new LIVE admission may start, and any
+        # admission already past that point must close its run instead of publishing.
+        self._closed = False
 
     def _build(
         self, scenario_id: str, seed: int | None = None
@@ -870,9 +896,91 @@ class RunManager:
         """Create a run and return its initial snapshot; the run is discoverable only after."""
         return self._build(scenario_id, seed)[1]
 
+    def build_live_exclusive(
+        self, factory: Callable[[str], ObservatoryRun]
+    ) -> tuple[ObservatoryRun, ObservatorySnapshot]:
+        """Atomically admit at most one LIVE run: reserve the slot, build outside the
+        lock, then publish (see ``build_with``) — or release the slot on any failure.
+
+        ``build_with`` alone leaves a race for LIVE runs: two concurrent callers can
+        both pass an ``availability()`` pre-check and both start a
+        ``TiLiveSession`` for the same physical sensor before either is published
+        (invariant 15). The reservation closes that window: it is taken under the
+        manager lock *before* the (slow, thread-starting) factory call and is only
+        ever cleared after the run is published or immediately on failure, so a
+        partial construction failure never leaves the sensor permanently
+        unavailable (invariant 16). The manager lock itself is still never held
+        across ``factory()``/``run.snapshot()``, exactly as in ``build_with``.
+        """
+        with self._lock:
+            if self._closed:
+                msg = "manager is shutting down"
+                raise LiveRunBusyError(msg)
+            active = self._active_live_run_id_locked()
+            if active is not None:
+                msg = f"live run {active} is already using the sensor; stop it first"
+                raise LiveRunBusyError(msg)
+            if self._live_reservation is not None:
+                msg = "a live run is starting; try again shortly"
+                raise LiveRunBusyError(msg)
+            self._counter += 1
+            run_id = f"run-{self._counter:04d}"
+            self._live_reservation = run_id
+        run: ObservatoryRun | None = None
+        try:
+            run = factory(run_id)
+            # Visible to ``close_all()`` from the instant construction finishes, even
+            # though it is not yet in ``_runs``: a shutdown racing the snapshot below
+            # must still be able to stop it.
+            with self._lock:
+                self._live_constructing = run
+            snapshot = run.snapshot()  # captured before anyone can see the run
+        except BaseException:
+            if run is not None:
+                try:
+                    run.close()
+                except Exception:
+                    log.exception("failed to release live run %s after admission failure", run_id)
+            with self._lock:
+                self._live_reservation = None
+                self._live_constructing = None
+            raise
+        with self._lock:
+            if self._closed:
+                # Shutdown happened while the snapshot was in flight: never publish a
+                # run after the manager has promised no reader thread survives it.
+                self._live_reservation = None
+                self._live_constructing = None
+                shutting_down = True
+            else:
+                self._runs[run_id] = run  # published only now
+                self._live_reservation = None
+                self._live_constructing = None
+                shutting_down = False
+        if shutting_down:
+            try:
+                run.close()
+            except Exception:
+                log.exception("failed to release live run %s after manager shutdown", run_id)
+            msg = "manager is shutting down"
+            raise LiveRunBusyError(msg)
+        return run, snapshot
+
+    def live_reservation(self) -> str | None:
+        """The run id currently being constructed for a LIVE admission, if any."""
+        with self._lock:
+            return self._live_reservation
+
     def get(self, run_id: str) -> ObservatoryRun | None:
         with self._lock:
             return self._runs.get(run_id)
+
+    def _active_live_run_id_locked(self) -> str | None:
+        """First LIVE run that is not finished ("active" = not stopped); caller holds the lock."""
+        for run_id, run in sorted(self._runs.items()):
+            if run.mode == "LIVE" and not run.finished:
+                return run_id
+        return None
 
     def live_run_ids(self) -> list[str]:
         with self._lock:
@@ -891,12 +999,23 @@ class RunManager:
         return True
 
     def close_all(self) -> None:
-        """Stop every run (live sessions included); used on application shutdown."""
+        """Stop every run (live sessions included); used on application shutdown.
+
+        Also stops a LIVE run still under construction (``factory()`` has returned
+        but the admission has not published it yet) and refuses any further
+        admissions from now on, so shutdown never leaves a reader thread behind
+        (invariant 16) even when it races ``build_live_exclusive``.
+        """
         with self._lock:
+            self._closed = True
             runs = list(self._runs.values())
             self._runs.clear()
+            constructing = self._live_constructing
+            self._live_constructing = None
         for run in runs:
             run.close()
+        if constructing is not None:
+            constructing.close()
 
     def ids(self) -> list[str]:
         with self._lock:

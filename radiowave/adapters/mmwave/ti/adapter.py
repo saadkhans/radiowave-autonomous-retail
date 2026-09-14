@@ -10,12 +10,34 @@ Policies implemented here (see ``config.py`` and the Phase 3 doc):
 * **Timestamps.** The observation timestamp is the host's timezone-aware UTC receive
   time of the frame. TI frame numbers and CPU cycle counters are not a synchronized
   clock and are retained as native metadata only.
-* **Native ids are hints.** ``native_track_id`` is the TI tracker id as a string;
-  fusion assigns the canonical ``P0001`` identity and owns continuity/re-acquisition.
+* **Native ids are hints, scoped to the stream generation.** ``native_track_id``
+  passed to :class:`NativeRadarSample` (and so ``NATIVE_TRACK_KEY`` in the
+  observation) is ``f"g{generation}:t{tid}"``, never the raw TI tracker id alone.
+  A TI tracker id is only unique within one connection to the device; after a
+  restart or reconnect the firmware can hand the same small integer to a
+  completely different person, and fusion keys its continuity hint cache by
+  this string, so an unscoped id would let a recycled TI id inherit a stale
+  canonical track (``P0001``, its cart, its session) once it drifts back within
+  the spatial gate. Scoping the hint by generation makes that impossible: a
+  reused raw id after a restart always produces a different hint string, so
+  fusion treats it as a fresh continuity claim subject to the normal spatial
+  gates. Fusion assigns the canonical ``P0001`` identity and owns continuity
+  and re-acquisition; it never sees the raw TI id. The raw TI id is preserved,
+  unscoped, as provenance only under ``NATIVE_TI_TRACK_ID_KEY``.
 * **Stream generations.** A frame number that goes backwards means the device
-  restarted; the adapter opens a new *stream generation* so ``(generation, frame)``
-  stays a unique key. Reconnects also open a new generation. A frame seen twice in
-  one generation (UART re-read, buffered bytes after reconnect) is dropped and counted.
+  restarted; the adapter opens a new *stream generation* so ``(generation,
+  frame, subframe)`` stays a unique key and the native-id hint namespace above
+  is scoped to it. Reconnects also open a new generation. A frame+subframe
+  pair seen twice in one generation (UART re-read, buffered bytes after
+  reconnect) is dropped and counted; two different subframes sharing one frame
+  number are neither a restart nor a duplicate.
+* **Limitation: restart detection is backwards-motion-only.** A device restart
+  whose frame counter resumes at an equal or higher value (no reset, or
+  wrap-around) is not recognized as a new generation, and if its
+  ``(generation, frame, subframe)`` key collides with an entry still in the
+  seen-frame cache that frame is treated as a duplicate rather than as a fresh
+  stream. A reconnect, by contrast, always opens a new generation regardless
+  of the frame number it resumes at.
 * **Coordinates.** TI axes are mapped into the sensor frame explicitly
   (:meth:`TiCoordinateConvention.to_sensor_frame`); the store twin's pose does the
   rest through the existing rigid-transform path.
@@ -51,6 +73,11 @@ NATIVE_TARGET_LAYOUT_KEY = "native_target_layout"
 NATIVE_TIME_CPU_CYCLES_KEY = "native_time_cpu_cycles"
 NATIVE_CONFIDENCE_KEY = "native_confidence"
 NATIVE_TI_POSITION_KEY = "native_ti_position"
+#: Raw TI tracker id (an int), unscoped, kept as provenance only. Never used as a
+#: continuity hint: see the module docstring. Compare with ``NATIVE_TRACK_KEY``
+#: (in the observation metadata), which carries the generation-scoped hint string
+#: that fusion actually keys continuity on.
+NATIVE_TI_TRACK_ID_KEY = "native_ti_track_id"
 CONFIDENCE_SOURCE_KEY = "confidence_source"
 
 _SEEN_FRAMES_CAPACITY = 4096
@@ -70,6 +97,7 @@ class TiNormalizerCounters:
     confidence_from_firmware: int = 0
     confidence_from_baseline: int = 0
     last_frame_number: int | None = None
+    last_subframe_number: int | None = None
     last_frame_at: datetime | None = None
     restart_reasons: list[str] = field(default_factory=list)
 
@@ -85,6 +113,7 @@ class TiNormalizerCounters:
             "confidence_from_firmware": self.confidence_from_firmware,
             "confidence_from_baseline": self.confidence_from_baseline,
             "last_frame_number": self.last_frame_number,
+            "last_subframe_number": self.last_subframe_number,
             "last_frame_at": None if self.last_frame_at is None else self.last_frame_at.isoformat(),
         }
 
@@ -112,7 +141,7 @@ class TiTargetNormalizer:
         self._normalizer = ObservationNormalizer(registry, scenario_id)
         self._clock = clock or (lambda: datetime.now(UTC))
         self._sequence = 0
-        self._seen: OrderedDict[tuple[int, int], None] = OrderedDict()
+        self._seen: OrderedDict[tuple[int, int, int], None] = OrderedDict()
         self.counters = TiNormalizerCounters()
 
     @property
@@ -127,6 +156,7 @@ class TiTargetNormalizer:
         """Open a new stream generation (device restart or transport reconnect)."""
         self.counters.generation += 1
         self.counters.last_frame_number = None
+        self.counters.last_subframe_number = None
         self.counters.restart_reasons.append(reason)
         del self.counters.restart_reasons[:-16]
         return self.counters.generation
@@ -134,14 +164,21 @@ class TiTargetNormalizer:
     # ------------------------------------------------------------------ frames
 
     def _admit_frame(self, frame: TiFrame) -> bool:
-        """Apply the restart and duplicate rules; False means drop the frame."""
+        """Apply the restart and duplicate rules; False means drop the frame.
+
+        Restart detection compares frame numbers only (tracked once per frame, not
+        per subframe): two subframes sharing one frame number are not a restart.
+        Deduplication keys on ``(generation, frame_number, subframe_number)`` so a
+        genuine repeated subframe is dropped, but distinct subframes of the same
+        frame number are both admitted.
+        """
         counters = self.counters
         counters.frames_seen += 1
         last = counters.last_frame_number
         if last is not None and frame.frame_number < last:
             counters.frames_restart += 1
             self.new_generation(f"frame number went backwards ({last} -> {frame.frame_number})")
-        key = (counters.generation, frame.frame_number)
+        key = (counters.generation, frame.frame_number, frame.subframe_number)
         if key in self._seen:
             counters.frames_duplicate += 1
             return False
@@ -149,6 +186,7 @@ class TiTargetNormalizer:
         while len(self._seen) > _SEEN_FRAMES_CAPACITY:
             self._seen.popitem(last=False)
         counters.last_frame_number = frame.frame_number
+        counters.last_subframe_number = frame.subframe_number
         return True
 
     def frame_to_samples(
@@ -214,6 +252,9 @@ class TiTargetNormalizer:
         if math.hypot(x, y) > policy.max_range_m or abs(z) > policy.max_abs_height_m:
             return None
         confidence, source = self._confidence(target)
+        # Scoped to the stream generation: see the module docstring and
+        # NATIVE_TI_TRACK_ID_KEY for why the raw TI id alone must never be the hint.
+        native_hint = f"g{self.counters.generation}:t{target.native_track_id}"
         metadata: dict[str, Any] = {
             NATIVE_FRAME_NUMBER_KEY: frame.frame_number,
             NATIVE_STREAM_GENERATION_KEY: self.counters.generation,
@@ -226,6 +267,7 @@ class TiTargetNormalizer:
                 else None
             ),
             NATIVE_TI_POSITION_KEY: {"x": target.x, "y": target.y, "z": target.z},
+            NATIVE_TI_TRACK_ID_KEY: target.native_track_id,
             CONFIDENCE_SOURCE_KEY: source,
         }
         self._sequence += 1
@@ -233,7 +275,7 @@ class TiTargetNormalizer:
             sensor_id=config.sensor_id,
             sequence=self._sequence,
             timestamp=timestamp,
-            native_track_id=str(target.native_track_id),
+            native_track_id=native_hint,
             position=SensorCoordinate(x=x, y=y, z=z, frame_id=config.sensor_id),
             velocity=Velocity(vx=vx, vy=vy, vz=vz),
             track_confidence=confidence,

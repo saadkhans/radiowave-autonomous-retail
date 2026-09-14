@@ -7,9 +7,10 @@ fixture UART bytes -> TI parser -> native target -> PersonObservation -> Foundat
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 
-from radiowave.api.live import LiveObservatoryRun, LiveRuntime
+from radiowave.api.live import LiveObservatoryRun, LiveRuntime, allocate_capture_path
 from radiowave.cli import main as cli_main
 from radiowave.contracts.recording import EntryKind, RecordedEntry
 from radiowave.digital_twin.registry import StoreRegistry
@@ -18,6 +19,7 @@ from radiowave.replay.reader import JsonlReplaySource
 from tests.fixtures.ti_mmwave.builder import build_target_frame
 from tests.unit.mmwave_ti.support import (
     RADAR,
+    T0,
     FakeTiming,
     HoldOpenStream,
     live_config,
@@ -53,7 +55,10 @@ def make_run(tmp_path: Path, *, capture: bool, run_id: str = "run-0001") -> Live
     frames = walking_frames()
     runtime = LiveRuntime(
         config=config,
-        stream_factory=lambda: HoldOpenStream(frames),
+        # Idle reads block: a timing-out idle port would run stale checks that advance
+        # the auto-stepping fake clock a thread-timing-dependent number of times, and
+        # two captures of the same bytes must be stamp-for-stamp identical.
+        stream_factory=lambda: HoldOpenStream(frames, block_when_idle=True),
         timing=FakeTiming().timing(),
         capture_dir=tmp_path,
         autonomous=False,
@@ -136,7 +141,8 @@ def test_capture_replays_deterministically_without_hardware(tmp_path: Path) -> N
     assert all(entry.format_version == 2 for entry in entries)
     observation = next(e for e in entries if e.kind == EntryKind.OBSERVATION)
     assert observation.sensor_id == RADAR
-    assert observation.payload["metadata"]["native_track_id"] == "3"
+    assert observation.payload["metadata"]["native_track_id"] == "g1:t3"
+    assert observation.payload["metadata"]["native_ti_track_id"] == 3
     assert observation.payload["metadata"]["native_frame_number"] == 1
     assert observation.payload["metadata"]["native_firmware_profile"] == "ti-3d-people-counting"
 
@@ -176,3 +182,55 @@ def test_recorded_entries_validate_as_a_v2_stream(tmp_path: Path) -> None:
     assert run.capture_path is not None
     entries: list[RecordedEntry] = list(JsonlReplaySource(run.capture_path).entries())
     assert list(validate_recording(iter(entries))) == entries
+
+
+def test_allocate_capture_path_never_overwrites_a_previous_experiment(tmp_path: Path) -> None:
+    """Invariant 14: capture files never overwrite previous experiments.
+
+    Two allocations that land on the same sensor, run id and (mocked) microsecond
+    stamp must not resolve to the same file: the second gets a numeric suffix and the
+    first file's contents stay untouched.
+    """
+    stamp = "20260914T101530.123456Z"
+    first = allocate_capture_path(tmp_path, RADAR, "run-0042", stamp)
+    first.write_text("first run's data\n")
+
+    second = allocate_capture_path(tmp_path, RADAR, "run-0042", stamp)
+    assert second != first
+    assert first.read_text() == "first run's data\n"
+    assert second.exists()
+
+    # A capture from a different run in the same second gets its own file too.
+    third = allocate_capture_path(tmp_path, RADAR, "run-0043", stamp)
+    assert third not in (first, second)
+
+
+def test_live_tick_uses_the_session_clock_not_a_regressing_wall_clock(tmp_path: Path) -> None:
+    """Invariant 9: sensor observations and the pipeline clock share one ordered clock.
+
+    Before the fix, ``tick`` advanced the pipeline with a wall-clock read taken
+    independently of the session's own clock (the one that actually stamps every
+    observation), so a host wall-clock regression could make ``now`` fall behind
+    observations already stamped, producing spurious out-of-order drops. ``tick`` now
+    reads both the drained batch and ``now`` from ``session.drain_with_clock()``
+    alone, so a regressing wall clock fed to ``SessionTiming.utc_now`` (consumed only
+    once, to anchor the session clock) has no effect on ticking at all.
+    """
+    fixture_frames = walking_frames()
+    timing = FakeTiming(wall=[T0, T0 - timedelta(hours=1), T0 - timedelta(hours=2)]).timing()
+    runtime = LiveRuntime(
+        config=live_config(),
+        stream_factory=lambda: HoldOpenStream(fixture_frames),
+        timing=timing,
+        capture_dir=tmp_path,
+        autonomous=False,
+    )
+    run = LiveObservatoryRun("run-0001", runtime, capture=False)
+    try:
+        assert wait_until(lambda: run.session.queued == FRAMES)
+        for _ in range(5):
+            with run.lock:
+                run.tick()
+        assert run.pipeline.result().observations_out_of_order == 0
+    finally:
+        run.close()

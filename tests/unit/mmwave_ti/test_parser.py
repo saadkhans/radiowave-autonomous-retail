@@ -12,7 +12,12 @@ from radiowave.adapters.mmwave.ti.parser import (
     TiFrameRejectReason,
     TiParserLimits,
 )
-from radiowave.adapters.mmwave.ti.protocol import TI_OOB_SDK3, TiFirmwareProfile, TiTlvType
+from radiowave.adapters.mmwave.ti.protocol import (
+    TI_3D_PEOPLE_COUNTING,
+    TI_OOB_SDK3,
+    TiFirmwareProfile,
+    TiTlvType,
+)
 from tests.fixtures.ti_mmwave.builder import (
     build_frame,
     build_point_cloud_tlv,
@@ -334,6 +339,80 @@ def test_forced_target_record_layout_mismatch_is_rejected() -> None:
     assert parser.stats.reject_reasons[TiFrameRejectReason.BAD_TARGET_RECORD.value] == 1
 
 
+def test_explicit_target_record_layout_is_accepted() -> None:
+    """Invariant: a packet that matches the configured firmware profile's pinned
+    layout is decoded exactly with it, never re-derived by length-guessing."""
+    record = build_target_record(tid=1, x=1.0, y=2.0, z=3.0, vx=0.0, vy=0.0, vz=0.0, layout="3d_v1")
+    tlv = build_tlv(TiTlvType.TARGET_LIST_3D, record)
+    frame_bytes = build_frame(frame_number=1, tlvs=[tlv])
+    profile = TiFirmwareProfile(name="forced-3d-v1", target_record_layout="3d_v1")
+    parser = TiFrameParser(profile=profile)
+
+    frames = parser.feed(frame_bytes)
+
+    assert len(frames) == 1
+    assert frames[0].target_record_layout == "3d_v1"
+    assert len(frames[0].targets) == 1
+
+
+def test_ambiguous_target_record_length_is_rejected_when_layout_unset() -> None:
+    """Invariant: ambiguous sensor bytes never become canonical observations.
+
+    560 bytes is simultaneously 7 records of 3d_v1 (80 B) and 5 records of 3d_v2
+    (112 B); with no pinned layout the parser must refuse to guess.
+    """
+    records = b"".join(
+        build_target_record(tid=i, x=float(i), y=0.0, z=0.0, vx=0.0, vy=0.0, vz=0.0, layout="3d_v1")
+        for i in range(7)
+    )
+    assert len(records) == 560
+    tlv = build_tlv(TiTlvType.TARGET_LIST_3D, records)
+    frame_bytes = build_frame(frame_number=1, tlvs=[tlv])
+    parser = TiFrameParser()
+
+    frames = parser.feed(frame_bytes)
+
+    assert frames == []
+    assert parser.stats.frames_parsed == 0
+    assert parser.stats.reject_reasons[TiFrameRejectReason.AMBIGUOUS_TARGET_RECORD.value] == 1
+
+
+def test_ambiguous_length_decodes_correctly_once_layout_is_pinned() -> None:
+    """Same 560-byte payload as above, but pinning the layout removes the ambiguity
+    entirely and decodes all 7 records."""
+    records = b"".join(
+        build_target_record(tid=i, x=float(i), y=0.0, z=0.0, vx=0.0, vy=0.0, vz=0.0, layout="3d_v1")
+        for i in range(7)
+    )
+    tlv = build_tlv(TiTlvType.TARGET_LIST_3D, records)
+    frame_bytes = build_frame(frame_number=1, tlvs=[tlv])
+    profile = TiFirmwareProfile(name="forced-3d-v1", target_record_layout="3d_v1")
+    parser = TiFrameParser(profile=profile)
+
+    frames = parser.feed(frame_bytes)
+
+    assert len(frames) == 1
+    assert frames[0].target_record_layout == "3d_v1"
+    assert len(frames[0].targets) == 7
+    assert [t.native_track_id for t in frames[0].targets] == list(range(7))
+
+
+def test_parser_continues_with_next_valid_frame_after_an_ambiguous_one() -> None:
+    records = b"".join(
+        build_target_record(tid=i, x=float(i), y=0.0, z=0.0, vx=0.0, vy=0.0, vz=0.0, layout="3d_v1")
+        for i in range(7)
+    )
+    ambiguous_tlv = build_tlv(TiTlvType.TARGET_LIST_3D, records)
+    ambiguous_frame = build_frame(frame_number=50, tlvs=[ambiguous_tlv])
+    good_frame = build_target_frame(frame_number=51, targets=[{"tid": 1}])
+    parser = TiFrameParser()
+
+    frames = parser.feed(ambiguous_frame + good_frame)
+
+    assert [f.frame_number for f in frames] == [51]
+    assert parser.stats.reject_reasons[TiFrameRejectReason.AMBIGUOUS_TARGET_RECORD.value] == 1
+
+
 def test_tlv_length_includes_header_profile_variant_decodes_correctly() -> None:
     profile = TiFirmwareProfile(name="sdk2-style", tlv_length_includes_header=True)
     payload = struct.pack("<I", 1)
@@ -367,6 +446,69 @@ def test_oob_detected_points_tlv_decodes_to_point_cloud_points() -> None:
     assert point.snr == pytest.approx(0.0)  # no side-info TLV present
 
 
+def test_aligned_total_packet_len_is_accepted() -> None:
+    frame_bytes = build_target_frame(frame_number=1, targets=[{"tid": 1}])
+    assert len(frame_bytes) % TI_3D_PEOPLE_COUNTING.packet_alignment == 0
+    parser = TiFrameParser()
+
+    frames = parser.feed(frame_bytes)
+
+    assert len(frames) == 1
+    assert frames[0].frame_number == 1
+
+
+def test_misaligned_total_packet_len_is_rejected_and_next_frame_still_parses() -> None:
+    """Invariant: a packet that violates the configured firmware profile (here, its
+    packet alignment) is rejected before consuming future frames."""
+    tlv = build_tlv(
+        TiTlvType.TARGET_LIST_3D,
+        build_target_record(tid=1, x=0.0, y=0.0, z=0.0, vx=0.0, vy=0.0, vz=0.0),
+    )
+    bad_frame = build_frame(frame_number=70, tlvs=[tlv], total_len_override=45)
+    good_frame = build_target_frame(frame_number=71, targets=[{"tid": 2}])
+    parser = TiFrameParser()
+
+    frames = parser.feed(bad_frame + good_frame)
+
+    assert [f.frame_number for f in frames] == [71]
+    assert parser.stats.frames_parsed == 1
+    assert parser.stats.reject_reasons[TiFrameRejectReason.BAD_PACKET_ALIGNMENT.value] >= 1
+
+
+def test_combined_cloud_and_oob_points_over_limit_is_rejected() -> None:
+    """Invariant: parser bounds apply to the final combined outputs, not individual
+    TLVs only — 5 + 5 each fit ``max_points`` alone but not together."""
+    limits = TiParserLimits(max_points=8)
+    cloud_tlv = build_tlv(
+        TiTlvType.POINT_CLOUD_3D,
+        build_point_cloud_tlv([(0, 0, 10, 100, 50)] * 5),
+    )
+    oob_tlv = build_tlv(TiTlvType.DETECTED_POINTS, struct.pack("<4f", 1.0, 1.0, 0.0, 0.0) * 5)
+    frame_bytes = build_frame(frame_number=1, tlvs=[cloud_tlv, oob_tlv])
+    parser = TiFrameParser(limits=limits)
+
+    frames = parser.feed(frame_bytes)
+
+    assert frames == []
+    assert parser.stats.reject_reasons[TiFrameRejectReason.TOO_MANY_POINTS.value] == 1
+
+
+def test_combined_cloud_and_oob_points_at_limit_is_accepted() -> None:
+    limits = TiParserLimits(max_points=8)
+    cloud_tlv = build_tlv(
+        TiTlvType.POINT_CLOUD_3D,
+        build_point_cloud_tlv([(0, 0, 10, 100, 50)] * 4),
+    )
+    oob_tlv = build_tlv(TiTlvType.DETECTED_POINTS, struct.pack("<4f", 1.0, 1.0, 0.0, 0.0) * 4)
+    frame_bytes = build_frame(frame_number=1, tlvs=[cloud_tlv, oob_tlv])
+    parser = TiFrameParser(limits=limits)
+
+    frames = parser.feed(frame_bytes)
+
+    assert len(frames) == 1
+    assert len(frames[0].points) == 8
+
+
 def test_endless_garbage_never_raises_and_stays_within_buffer_limit() -> None:
     limits = TiParserLimits()
     parser = TiFrameParser(limits=limits)
@@ -388,3 +530,56 @@ def test_reset_clears_the_buffer() -> None:
     parser.reset()
 
     assert parser.buffered_bytes == 0
+
+
+def test_duplicate_target_list_tlv_in_one_packet_is_rejected_with_no_frame_emitted() -> None:
+    """Invariant: a TLV type repeated within one packet is ambiguous and must be
+    rejected, never resolved by picking a winner."""
+    first = build_tlv(
+        TiTlvType.TARGET_LIST_3D,
+        build_target_record(tid=1, x=0.0, y=0.0, z=0.0, vx=0.0, vy=0.0, vz=0.0),
+    )
+    second = build_tlv(
+        TiTlvType.TARGET_LIST_3D,
+        build_target_record(tid=2, x=1.0, y=1.0, z=0.0, vx=0.0, vy=0.0, vz=0.0),
+    )
+    frame_bytes = build_frame(frame_number=1, tlvs=[first, second])
+    parser = TiFrameParser()
+
+    frames = parser.feed(frame_bytes)
+
+    assert frames == []
+    assert parser.stats.reject_reasons[TiFrameRejectReason.DUPLICATE_TLV.value] == 1
+
+
+def test_duplicate_unknown_tlv_type_in_one_packet_still_parses() -> None:
+    """Unknown TLV types are never decoded into a combined output, so a repeat of
+    one is merely listed twice rather than rejected."""
+    unknown_a = build_tlv(9999, b"\x01\x02\x03\x04")
+    unknown_b = build_tlv(9999, b"\x05\x06\x07\x08")
+    frame_bytes = build_frame(frame_number=1, tlvs=[unknown_a, unknown_b])
+    parser = TiFrameParser()
+
+    frames = parser.feed(frame_bytes)
+
+    assert len(frames) == 1
+    assert frames[0].unknown_tlvs == ((9999, 4), (9999, 4))
+
+
+def test_next_valid_frame_after_a_duplicate_tlv_packet_is_parsed() -> None:
+    first = build_tlv(
+        TiTlvType.TARGET_LIST_3D,
+        build_target_record(tid=1, x=0.0, y=0.0, z=0.0, vx=0.0, vy=0.0, vz=0.0),
+    )
+    second = build_tlv(
+        TiTlvType.TARGET_LIST_3D,
+        build_target_record(tid=2, x=1.0, y=1.0, z=0.0, vx=0.0, vy=0.0, vz=0.0),
+    )
+    bad_frame = build_frame(frame_number=60, tlvs=[first, second])
+    good_frame = build_target_frame(frame_number=61, targets=[{"tid": 3}])
+    parser = TiFrameParser()
+
+    frames = parser.feed(bad_frame + good_frame)
+
+    assert [f.frame_number for f in frames] == [61]
+    assert parser.stats.reject_reasons[TiFrameRejectReason.DUPLICATE_TLV.value] == 1
