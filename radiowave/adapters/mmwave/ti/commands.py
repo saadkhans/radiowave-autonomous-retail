@@ -16,6 +16,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
+from radiowave.adapters.mmwave.ti.adapter import NATIVE_TI_POSITION_KEY
 from radiowave.adapters.mmwave.ti.config import (
     TiAdapterConfig,
     TiLiveConfig,
@@ -90,7 +91,7 @@ def cmd_probe(args: argparse.Namespace, out: Printer = print) -> int:
             total += len(batch)
             _describe(session, total, out)
             for observation in batch[-args.max_targets :]:
-                native = observation.metadata.get("native_ti_position", {})
+                native = observation.metadata.get(NATIVE_TI_POSITION_KEY, {})
                 local = observation.metadata.get(NATIVE_POSITION_KEY, {})
                 coordinate = observation.coordinate
                 out(

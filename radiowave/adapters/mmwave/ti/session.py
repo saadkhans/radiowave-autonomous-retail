@@ -87,21 +87,26 @@ class RawByteCapture:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = path.open("wb")
         self._remaining = max_bytes
+        self._lock = threading.Lock()
         self.path = path
         self.truncated = False
 
     def write(self, data: bytes) -> None:
-        if self._remaining <= 0:
-            self.truncated = True
-            return
-        chunk = data[: self._remaining]
-        self._handle.write(chunk)
-        self._remaining -= len(chunk)
-        if len(chunk) < len(data):
-            self.truncated = True
+        # The reader thread writes while stop() may close from another thread: the
+        # lock makes a late write a no-op instead of an exception out of the reader.
+        with self._lock:
+            if self._handle.closed or self._remaining <= 0:
+                self.truncated = self.truncated or self._remaining <= 0
+                return
+            chunk = data[: self._remaining]
+            self._handle.write(chunk)
+            self._remaining -= len(chunk)
+            if len(chunk) < len(data):
+                self.truncated = True
 
     def close(self) -> None:
-        self._handle.close()
+        with self._lock:
+            self._handle.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,9 +364,9 @@ class TiLiveSession:
         return None
 
     def _handle_bytes(self, data: bytes) -> None:
-        if self._capture is not None:
-            self._capture.write(data)
         try:
+            if self._capture is not None:
+                self._capture.write(data)
             frames = self._parser.feed(data)
         except Exception:  # parser bugs are counted, never fatal
             log.exception("parser failure on %s; resetting parser", self.sensor_id)
