@@ -86,9 +86,7 @@ def normalizer(
     *, x: float = 0.0, y: float = 0.0, z: float = 2.4, yaw: float = 0.0, **overrides: object
 ) -> TiTargetNormalizer:
     store = store_with_radar(x=x, y=y, z=z, yaw=yaw)
-    return TiTargetNormalizer(
-        adapter_config(**overrides), StoreRegistry(store), clock=lambda: T0
-    )
+    return TiTargetNormalizer(adapter_config(**overrides), StoreRegistry(store), clock=lambda: T0)
 
 
 def one(observations: list[PersonObservation]) -> PersonObservation:
@@ -197,17 +195,13 @@ def test_velocity_rotates_but_never_translates() -> None:
 
 
 def test_z_origin_sensor_convention_skips_the_height_offset() -> None:
-    norm = normalizer(
-        z=2.4, coordinates=TiCoordinateConvention(z_origin="sensor")
-    )
+    norm = normalizer(z=2.4, coordinates=TiCoordinateConvention(z_origin="sensor"))
     observation = one(norm.frame_to_observations(frame(1, target(z=-1.0)), T0))
     assert observation.coordinate.z == pytest.approx(1.4, abs=TOL)
 
 
 def test_forward_axis_x_and_lateral_left_conventions() -> None:
-    norm = normalizer(
-        coordinates=TiCoordinateConvention(forward_axis="x", lateral_positive="left")
-    )
+    norm = normalizer(coordinates=TiCoordinateConvention(forward_axis="x", lateral_positive="left"))
     observation = one(norm.frame_to_observations(frame(1, target(x=3.0, y=1.0)), T0))
     assert observation.coordinate.x == pytest.approx(3.0, abs=TOL)
     assert observation.coordinate.y == pytest.approx(1.0, abs=TOL)

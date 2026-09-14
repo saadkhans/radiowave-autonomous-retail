@@ -28,9 +28,15 @@ from datetime import datetime
 from pathlib import Path
 
 from radiowave.adapters.mmwave.ti.config import TiLiveConfig
+from radiowave.adapters.mmwave.ti.health import TiAdapterDiagnostics
 from radiowave.adapters.mmwave.ti.session import SessionTiming, StreamFactory, TiLiveSession
 from radiowave.api.runs import LiveModeError, ObservatoryRun
-from radiowave.api.viewmodels import ObservatoryGroundTruth, ObservatoryLiveStatus, RunMode
+from radiowave.api.viewmodels import (
+    ObservatoryGroundTruth,
+    ObservatoryLiveStatus,
+    ObservatoryRunState,
+    RunMode,
+)
 from radiowave.contracts.observations import SensorObservation
 from radiowave.fusion.interfaces import Recorder
 from radiowave.pipeline import FoundationPipeline, PipelineConfig
@@ -114,6 +120,10 @@ class LiveObservatoryRun(ObservatoryRun):
         self._driver: threading.Thread | None = None
         self.revision = 1
         self.epoch = 1
+        # One diagnostics() read per snapshot: set at the top of ``_state`` so
+        # ``observations_total`` and ``_live_status`` (both consumed from within it)
+        # never observe two different instants of the session's counters.
+        self._diagnostics_cache: TiAdapterDiagnostics | None = None
         self.session.start()
         if runtime.autonomous:
             self._driver = threading.Thread(
@@ -140,13 +150,31 @@ class LiveObservatoryRun(ObservatoryRun):
 
     @property
     def observations_total(self) -> int:
-        return self.session.diagnostics().observations_emitted
+        return self._diagnostics().observations_emitted
+
+    def _diagnostics(self) -> TiAdapterDiagnostics:
+        """The diagnostics read cached by ``_state`` for this snapshot, if any.
+
+        Falls back to a fresh read for callers outside a ``_state`` build (e.g. a
+        direct ``observations_total`` access), but within one ``_state`` call both
+        ``observations_total`` and ``_live_status`` see the same instant.
+        """
+        if self._diagnostics_cache is not None:
+            return self._diagnostics_cache
+        return self.session.diagnostics()
+
+    def _state(self) -> ObservatoryRunState:
+        self._diagnostics_cache = self.session.diagnostics()
+        try:
+            return super()._state()
+        finally:
+            self._diagnostics_cache = None
 
     def _ground_truth_view(self) -> list[ObservatoryGroundTruth]:
         return []
 
     def _live_status(self) -> ObservatoryLiveStatus:
-        diagnostics = self.session.diagnostics()
+        diagnostics = self._diagnostics()
         return ObservatoryLiveStatus(
             sensor_id=diagnostics.sensor_id,
             sensor_name=self._runtime.sensor_name,
@@ -176,9 +204,12 @@ class LiveObservatoryRun(ObservatoryRun):
         """
         if self.finished:
             return 0
-        now = self._utc_now()
+        # The queue is drained and ``now`` is read under the session's queue lock, so
+        # every observation stamped before ``now`` is in this batch and the clock
+        # advance below can never run ahead of an observation still being enqueued.
+        observations, now = self.session.drain_with_clock(self._utc_now)
         ingested = 0
-        for observation in self.session.drain():
+        for observation in observations:
             try:
                 if self.pipeline.ingest(observation):
                     ingested += 1
@@ -187,6 +218,10 @@ class LiveObservatoryRun(ObservatoryRun):
                 log.exception("live ingest failed for %s", observation.observation_id)
         self.pipeline.advance_to(now)
         self.time_s = max(self.time_s, round((now - self.epoch_at).total_seconds(), 3))
+        # ``observations_cursor`` (read straight from ``self.cursor`` by ``_state``,
+        # same as REPLAY) tracks how many observations the pipeline has accepted so
+        # far, distinct from ``observations_total`` (everything the sensor emitted).
+        self.cursor += ingested
         self.revision += 1
         return ingested
 

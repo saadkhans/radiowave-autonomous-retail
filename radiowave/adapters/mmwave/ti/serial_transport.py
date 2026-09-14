@@ -12,8 +12,7 @@ from typing import Protocol
 from radiowave.adapters.mmwave.ti.transport import ByteStreamClosed, ByteStreamError
 
 _MISSING_DEPENDENCY_MESSAGE = (
-    "TI serial support not installed; install radiowave-autonomous-retail[hardware-ti] "
-    "(pyserial)"
+    "TI serial support not installed; install radiowave-autonomous-retail[hardware-ti] (pyserial)"
 )
 
 

@@ -108,6 +108,43 @@ def test_live_run_snapshot_has_live_mode_and_canonical_person(live_client: TestC
     assert [s["sensor_id"] for s in store["sensors"]] == [RADAR]
 
 
+def test_live_observations_cursor_tracks_pipeline_ingestion(live_client: TestClient) -> None:
+    created = live_client.post("/api/runs/live", json={"capture": False}).json()
+    run_id = created["state"]["run_id"]
+    assert created["state"]["observations_cursor"] == 0
+
+    _drive(live_client, run_id)
+    snapshot = live_client.get(f"/api/runs/{run_id}/snapshot").json()
+    state = snapshot["state"]
+    # Every fixture frame carries one target and none duplicate, so all FRAMES
+    # observations are accepted by the pipeline.
+    assert state["observations_cursor"] == FRAMES
+    assert state["observations_total"] >= FRAMES
+
+
+def test_live_snapshot_reads_session_diagnostics_once(
+    live_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = live_client.post("/api/runs/live", json={}).json()["state"]["run_id"]
+    run = _run(live_client, run_id)
+    _drive(live_client, run_id)
+
+    calls = {"count": 0}
+    original = run.session.diagnostics
+
+    def counting_diagnostics() -> object:
+        calls["count"] += 1
+        return original()
+
+    monkeypatch.setattr(run.session, "diagnostics", counting_diagnostics)
+
+    run.snapshot()
+    assert calls["count"] == 1
+
+    run.snapshot()
+    assert calls["count"] == 2
+
+
 def test_replay_controls_are_409_in_live_mode(live_client: TestClient) -> None:
     run_id = live_client.post("/api/runs/live", json={}).json()["state"]["run_id"]
     assert live_client.post(f"/api/runs/{run_id}/step").status_code == 409

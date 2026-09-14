@@ -17,9 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from radiowave.simulator.scenario import SCENARIO_EPOCH
 
 
-def seconds_since_epoch(
-    when: datetime | None, epoch: datetime = SCENARIO_EPOCH
-) -> float | None:
+def seconds_since_epoch(when: datetime | None, epoch: datetime = SCENARIO_EPOCH) -> float | None:
     """Seconds after the run's epoch: the scenario epoch for replay, the start instant
     for a live run."""
     if when is None:

@@ -85,7 +85,7 @@ restarts: no database, broker or auth.
    from t = 0 so the state at any time is reproducible.
 4. Click a shopper, item, cart line or event row to open it in the inspector.
    Items show the ranked candidate table (distance, trend, velocity, temporal,
-   co-motion, zone, vision; `�` when a feature is not available) and the current
+   co-motion, zone, vision; `—` when a feature is not available) and the current
    COMMIT / WAIT / REVIEW decision with confidence, margin, pending duration and
    reason. Scenario 12 stays in WAIT and escalates to REVIEW; 12v resolves to
    COMMIT with vision evidence.
@@ -120,10 +120,10 @@ identification, firmware flashing, pose measurement, acceptance checks).
 
 ### Architecture
 
-- `radiowave/api/` � thin FastAPI layer over the existing pipeline: `runs.py`
+- `radiowave/api/` — thin FastAPI layer over the existing pipeline: `runs.py`
   (in-memory `RunManager`, `ObservatoryRun` advance / step / seek / reset),
   `viewmodels.py` (explicit Pydantic view models), `routes/`.
-- `apps/observatory/` � React + TypeScript + Vite + Tailwind. `src/types/api.ts`
+- `apps/observatory/` — React + TypeScript + Vite + Tailwind. `src/types/api.ts`
   mirrors the view models, `src/lib/geometry.ts` projects world metres to SVG
   pixels from the twin's floor bounds, `src/state/store.tsx` owns run state and
   the playback loop, `src/components/` renders the map, inspector, carts, event

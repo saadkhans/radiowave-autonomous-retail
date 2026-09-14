@@ -85,9 +85,7 @@ class TiNormalizerCounters:
             "confidence_from_firmware": self.confidence_from_firmware,
             "confidence_from_baseline": self.confidence_from_baseline,
             "last_frame_number": self.last_frame_number,
-            "last_frame_at": None
-            if self.last_frame_at is None
-            else self.last_frame_at.isoformat(),
+            "last_frame_at": None if self.last_frame_at is None else self.last_frame_at.isoformat(),
         }
 
 
@@ -177,8 +175,7 @@ class TiTargetNormalizer:
     ) -> list[PersonObservation]:
         """Store-frame observations for one frame, through the shared normalizer."""
         observations = [
-            self._normalizer.person(sample)
-            for sample in self.frame_to_samples(frame, received_at)
+            self._normalizer.person(sample) for sample in self.frame_to_samples(frame, received_at)
         ]
         self.counters.observations_emitted += len(observations)
         return observations

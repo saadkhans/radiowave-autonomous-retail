@@ -215,11 +215,30 @@ class TiLiveSession:
     def drain(self, max_items: int | None = None) -> list[PersonObservation]:
         """Observations in arrival order; the queue is emptied (or reduced by max_items)."""
         with self._lock:
-            if max_items is None or max_items >= len(self._queue):
-                items = list(self._queue)
-                self._queue.clear()
-            else:
-                items = [self._queue.popleft() for _ in range(max_items)]
+            return self._drain_locked(max_items)
+
+    def drain_with_clock(
+        self, clock: Callable[[], datetime]
+    ) -> tuple[list[PersonObservation], datetime]:
+        """Drain the queue and read ``clock()`` in one critical section.
+
+        The reader stamps, normalizes and enqueues each frame under the same lock, so
+        every observation stamped before the returned instant is in the returned batch.
+        A consumer that advances the pipeline clock to that instant can therefore never
+        be overtaken by an older observation still on its way into the queue (which the
+        pipeline would have to drop as out-of-order).
+        """
+        with self._lock:
+            items = self._drain_locked(None)
+            now = clock()
+        return items, now
+
+    def _drain_locked(self, max_items: int | None) -> list[PersonObservation]:
+        if max_items is None or max_items >= len(self._queue):
+            items = list(self._queue)
+            self._queue.clear()
+        else:
+            items = [self._queue.popleft() for _ in range(max_items)]
         return items
 
     @property
@@ -374,15 +393,19 @@ class TiLiveSession:
             return
         if not frames:
             return
-        received_at = self._timing.utc_now()
-        now = self._timing.monotonic()
-        emitted: list[PersonObservation] = []
-        for frame in frames:
-            try:
-                emitted.extend(self._normalizer.frame_to_observations(frame, received_at))
-            except Exception:  # one bad frame must not stop the stream
-                log.exception("normalization failure on %s frame %s", self.sensor_id, frame)
+        # Stamp, normalize and enqueue under the queue lock: the receive time is the
+        # canonical observation timestamp, and a consumer draining the queue reads its
+        # own clock under this same lock (``drain_with_clock``), so an observation can
+        # never carry a stamp older than a clock position the consumer already applied.
         with self._lock:
+            received_at = self._timing.utc_now()
+            now = self._timing.monotonic()
+            emitted: list[PersonObservation] = []
+            for frame in frames:
+                try:
+                    emitted.extend(self._normalizer.frame_to_observations(frame, received_at))
+                except Exception:  # one bad frame must not stop the stream
+                    log.exception("normalization failure on %s frame %s", self.sensor_id, frame)
             self._last_frame_monotonic = now
             self._frame_rate.tick(now, len(frames))
             self._observation_rate.tick(now, len(emitted))

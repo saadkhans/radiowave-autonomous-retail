@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -238,3 +239,42 @@ def test_canonical_health_projection() -> None:
         assert health.last_observation_at is not None
     finally:
         session.stop()
+
+
+def test_receive_time_is_stamped_under_the_queue_lock() -> None:
+    """The canonical timestamp is taken inside the same critical section that enqueues
+    the observation, so a consumer using ``drain_with_clock`` cannot observe a clock
+    instant that an observation still on its way into the queue predates."""
+    timing = FakeTiming()
+    session = session_for([HoldOpenStream(frames(3))], timing=timing)
+    locked_at_stamp: list[bool] = []
+    original_utc_now = session._timing.utc_now
+
+    def stamping_clock():  # type: ignore[no-untyped-def]
+        locked_at_stamp.append(session._lock.locked())
+        return original_utc_now()
+
+    session._timing = replace(session._timing, utc_now=stamping_clock)
+    session.start()
+    try:
+        assert wait_until(lambda: session.queued == 3)
+    finally:
+        assert session.stop()
+    assert locked_at_stamp and all(locked_at_stamp)
+
+
+def test_drain_with_clock_never_returns_an_instant_older_than_a_drained_observation() -> None:
+    timing = FakeTiming()
+    session = session_for([HoldOpenStream(frames(4))], timing=timing)
+    session.start()
+    try:
+        assert wait_until(lambda: session.queued == 4)
+        observations, now = session.drain_with_clock(timing.utc_now)
+        assert len(observations) == 4
+        assert all(observation.timestamp <= now for observation in observations)
+        assert session.queued == 0
+        # An empty drain still yields a usable instant for the consumer's clock advance.
+        again, later = session.drain_with_clock(timing.utc_now)
+        assert again == [] and later >= now
+    finally:
+        assert session.stop()

@@ -41,9 +41,7 @@ class MemoryByteStream:
     next read. Once exhausted it raises ``fail_after`` if given, else
     :class:`ByteStreamClosed`."""
 
-    def __init__(
-        self, chunks: Iterable[bytes], *, fail_after: BaseException | None = None
-    ) -> None:
+    def __init__(self, chunks: Iterable[bytes], *, fail_after: BaseException | None = None) -> None:
         self._chunks: deque[bytes] = deque(chunks)
         self._fail_after = fail_after
         self._closed = False

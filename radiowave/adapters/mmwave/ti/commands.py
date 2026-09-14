@@ -60,8 +60,7 @@ def _describe(session: TiLiveSession, observations: int, out: Printer) -> None:
         f"rejected={d.frames_rejected} dup={d.frames_duplicate} "
         f"fps={_fmt(d.frame_rate_hz, 1)} obs/s={_fmt(d.observation_rate_hz, 1)} "
         f"age={_fmt(d.last_frame_age_s)}s observations={observations} "
-        f"reconnects={d.reconnect_count}"
-        + (f"  {d.message}" if d.message else "")
+        f"reconnects={d.reconnect_count}" + (f"  {d.message}" if d.message else "")
     )
 
 
@@ -78,8 +77,7 @@ def cmd_probe(args: argparse.Namespace, out: Printer = print) -> int:
         f"z={sensor.pose.position.z} yaw={sensor.pose.yaw:.3f} rad"
     )
     out(
-        "columns: native id | native TI xyz (m) | sensor-frame xyz (m) | world xyz (m) | "
-        "confidence"
+        "columns: native id | native TI xyz (m) | sensor-frame xyz (m) | world xyz (m) | confidence"
     )
     session.start()
     total = 0
@@ -162,9 +160,7 @@ def add_mmwave_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]
             required=True,
             help="TiLiveConfig JSON (see configs/examples/ti-iwr6843-lab.json)",
         )
-        parser.add_argument(
-            "--data-port", help="override the data UART, e.g. COM6 or /dev/ttyUSB1"
-        )
+        parser.add_argument("--data-port", help="override the data UART, e.g. COM6 or /dev/ttyUSB1")
         parser.add_argument(
             "--raw-capture",
             help="also dump raw UART bytes to this file (parser debugging; keep under "

@@ -75,9 +75,7 @@ def test_point_cloud_target_index_height_and_presence_frame() -> None:
     index_tlv = build_tlv(TiTlvType.TARGET_INDEX, bytes([0, 1]))
     height_tlv = build_tlv(TiTlvType.TARGET_HEIGHT, struct.pack("<Bff", 0, 1.8, 0.1))
     presence_tlv = build_tlv(TiTlvType.PRESENCE_INDICATION, struct.pack("<I", 1))
-    frame_bytes = build_frame(
-        frame_number=3, tlvs=[cloud_tlv, index_tlv, height_tlv, presence_tlv]
-    )
+    frame_bytes = build_frame(frame_number=3, tlvs=[cloud_tlv, index_tlv, height_tlv, presence_tlv])
 
     frames = TiFrameParser().feed(frame_bytes)
 
@@ -294,9 +292,7 @@ def test_empty_target_list_tlv_yields_zero_targets() -> None:
 
 
 def test_2d_layout_is_auto_detected_from_payload_length() -> None:
-    record = build_target_record(
-        tid=1, x=1.0, y=2.0, z=0.0, vx=0.0, vy=0.0, vz=0.0, layout="2d"
-    )
+    record = build_target_record(tid=1, x=1.0, y=2.0, z=0.0, vx=0.0, vy=0.0, vz=0.0, layout="2d")
     tlv = build_tlv(TiTlvType.TARGET_LIST_3D, record)
     frame_bytes = build_frame(frame_number=1, tlvs=[tlv])
 
@@ -312,9 +308,7 @@ def test_2d_layout_is_auto_detected_from_payload_length() -> None:
 
 
 def test_3d_v1_layout_is_auto_detected_from_payload_length() -> None:
-    record = build_target_record(
-        tid=1, x=1.0, y=2.0, z=3.0, vx=0.0, vy=0.0, vz=0.0, layout="3d_v1"
-    )
+    record = build_target_record(tid=1, x=1.0, y=2.0, z=3.0, vx=0.0, vy=0.0, vz=0.0, layout="3d_v1")
     tlv = build_tlv(TiTlvType.TARGET_LIST_3D, record)
     frame_bytes = build_frame(frame_number=1, tlvs=[tlv])
 
@@ -328,9 +322,7 @@ def test_3d_v1_layout_is_auto_detected_from_payload_length() -> None:
 
 
 def test_forced_target_record_layout_mismatch_is_rejected() -> None:
-    record = build_target_record(
-        tid=1, x=0.0, y=0.0, z=0.0, vx=0.0, vy=0.0, vz=0.0, layout="2d"
-    )
+    record = build_target_record(tid=1, x=0.0, y=0.0, z=0.0, vx=0.0, vy=0.0, vz=0.0, layout="2d")
     tlv = build_tlv(TiTlvType.TARGET_LIST_3D, record)
     frame_bytes = build_frame(frame_number=1, tlvs=[tlv])
     profile = TiFirmwareProfile(name="forced-3d-v2", target_record_layout="3d_v2")

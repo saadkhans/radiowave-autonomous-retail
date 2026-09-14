@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
-from radiowave.contracts._base import FrozenModel, UnitInterval
+from radiowave.contracts._base import FrozenModel
 from radiowave.contracts.store import SourceType, Store
 
 FirmwareProfileName = Literal["ti-3d-people-counting", "ti-oob-sdk3"]
@@ -109,7 +109,7 @@ class TiObservationPolicy(FrozenModel):
         le=5.0,
         description="1-sigma position uncertainty (metres) reported for every target",
     )
-    baseline_confidence: UnitInterval = Field(
+    baseline_confidence: Annotated[float, Field(ge=0.0, lt=1.0)] = Field(
         default=0.6,
         description="Confidence used when the firmware provides no usable quality value",
     )
@@ -117,7 +117,7 @@ class TiObservationPolicy(FrozenModel):
         default=True,
         description="Use the target list's confidence level when present and inside [0, 1]",
     )
-    confidence_ceiling: UnitInterval = Field(
+    confidence_ceiling: Annotated[float, Field(ge=0.0, lt=1.0)] = Field(
         default=0.9,
         description="Upper bound on any firmware-derived confidence; a radar track is never "
         "certain evidence of a person",
@@ -138,6 +138,13 @@ class TiObservationPolicy(FrozenModel):
         gt=0.0,
         description="Seconds without a parsed frame before the stream is reported STALE",
     )
+
+    @model_validator(mode="after")
+    def _confidence_bounds_ordered(self) -> TiObservationPolicy:
+        if self.baseline_confidence > self.confidence_ceiling:
+            msg = "baseline_confidence must be <= confidence_ceiling"
+            raise ValueError(msg)
+        return self
 
 
 class TiReconnectPolicy(FrozenModel):
@@ -177,6 +184,16 @@ class TiParserLimitsConfig(FrozenModel):
     max_targets: int = Field(default=64, ge=1, le=1024)
     max_points: int = Field(default=4096, ge=1, le=65_536)
     max_buffer_bytes: int = Field(default=262_144, ge=1024, le=8_388_608)
+
+    @model_validator(mode="after")
+    def _packet_fits_in_buffer(self) -> TiParserLimitsConfig:
+        if self.max_packet_bytes > self.max_buffer_bytes:
+            msg = (
+                f"max_packet_bytes ({self.max_packet_bytes}) must be <= max_buffer_bytes "
+                f"({self.max_buffer_bytes}); a packet larger than the buffer could never complete"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class TiAdapterConfig(FrozenModel):

@@ -184,9 +184,13 @@ def _decode_point_cloud(payload: bytes) -> tuple[TiPointCloudPoint, ...]:
     )
     points: list[TiPointCloudPoint] = []
     body = payload[_POINT_CLOUD_UNITS_STRUCT.size :]
-    for elevation_raw, azimuth_raw, doppler_raw, range_raw, snr_raw in (
-        _POINT_CLOUD_RECORD_STRUCT.iter_unpack(body)
-    ):
+    for (
+        elevation_raw,
+        azimuth_raw,
+        doppler_raw,
+        range_raw,
+        snr_raw,
+    ) in _POINT_CLOUD_RECORD_STRUCT.iter_unpack(body):
         elevation_rad = elevation_raw * elevation_unit
         azimuth_rad = azimuth_raw * azimuth_unit
         doppler_mps = doppler_raw * doppler_unit

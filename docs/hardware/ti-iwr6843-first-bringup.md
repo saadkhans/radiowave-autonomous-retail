@@ -83,6 +83,8 @@ matches the physically measured mount:
   north (its boresight along +y) is `yaw = pi/2` (`1.5707963267948966`), as in the example config.
   Measure with a compass/protractor against your store frame's axes, not by eye.
 
+When the TI firmware's `sensorPosition <height> <azimuthTilt> <elevationTilt>` configuration already gravity-aligns the output (the 3D people counting demo reports floor-referenced coordinates when this is set), `pose.pitch` and `pose.roll` must stay 0 — the firmware applies the tilt transformation and entering it again in the pose would apply it twice. Only yaw and position are entered in the twin for this firmware. If a firmware reports raw sensor-relative coordinates instead, set `z_origin: "sensor"` in the adapter config and then the measured tilt belongs in the pose.
+
 Also update `serial.data_port` (and `serial.cli_port` if used later) to the ports found in step 3.
 
 ### 6. Run probe
@@ -97,6 +99,7 @@ Also update `serial.data_port` (and `serial.cli_port` if used later) to the port
 
 Add `--raw-capture data/captures/raw.bin` to also dump raw UART bytes for parser debugging
 (`data/captures/` is git-ignored). Omit `--data-port` to use the port already in the config file.
+Once the probe output shows which layout the board emits (printed as part of the status), pin `adapter.target_record_layout` (`3d_v2`, `3d_v1` or `2d`) in the config, since auto-detection can be ambiguous for certain record counts.
 
 ### 7. Confirm frames are received
 
@@ -220,3 +223,5 @@ each as **NOT RUN** until performed; do not mark a check as passing from reasoni
 Raw and normalized captures belong under `data/captures/`, which is git-ignored. Never commit
 captures, and never capture real customer/biometric/payment data — lab/synthetic data only, per
 `README.md` and `CLAUDE.md`.
+
+The host receive time is stamped once per serial read, so several frames coalesced into one read share a single timestamp; inter-frame timing at high frame rates is therefore flattened, which is deterministic and documented as a Phase 3 limitation.
