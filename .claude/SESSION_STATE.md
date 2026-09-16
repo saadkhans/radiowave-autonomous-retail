@@ -46,36 +46,45 @@ from git and `gh`.
 
 **Phase 3 — TI IWR6843 mmWave live people tracking.**
 - Branch: `claude/ti-mmwave-live-v0` → PR **#3** into `dev`. Never merge.
-- Local HEAD == `origin/claude/ti-mmwave-live-v0` == `9677b53` ("fix(mmwave): harden live
-  sensor integrity and lifecycle"). CI green on that head.
-- Loop: `/codex-auto-loop` (`.claude/commands/codex-auto-loop.md`), **cycle 2 of 3**.
-- Codex review round 2 (review id `5197521431`, submitted 2026-09-14T12:17Z against `9677b53`):
-  **7 findings — 2 P1 + 5 P2**, listed below.
+- Local HEAD == `origin/claude/ti-mmwave-live-v0` == `0a0aca7`. Working tree clean.
+  - `6455378` fix(mmwave): close the round-2 live-boundary gaps
+  - `0a0aca7` chore(claude): session state file + codex-loop tightening
+- Loop: `/codex-auto-loop` (`.claude/commands/codex-auto-loop.md`), **cycle 2 of 3 complete**.
 
-### Uncommitted work (would be lost — this is the round-2 fix set)
+### Cycle 2 — done (2026-09-16)
+Codex review round 2 (review id `5197521431`, against `9677b53`) raised 7 findings (2 P1 +
+5 P2). All 7 fixed in `6455378`, each thread replied to with the fixing SHA + regression test
+names and resolved individually.
 
 | Codex finding | Where fixed |
 |---|---|
-| P1 target-height TLV 1012 record layout | `ti/parser.py` (`<B3xff`, 12-byte record), `ti/protocol.py` (rationale: uint8 id + 3 pad bytes, **deliberately not** Codex's uint32 reading), `docs/hardware/ti-iwr6843-first-bringup.md` (confirm against real bytes at bring-up) |
-| P1 live ownership released before teardown finished | `api/runs.py` (`_closing_live_run_id`, held across `delete()`'s `run.close()` in a `finally`), `api/routes/live.py` (distinct "a live run is stopping" reason) |
-| P2 TARGET_INDEX unbounded by `max_points` | `ti/parser.py` |
-| P2 reconnect/stop-triggered stream close counted as transport failure | `ti/session.py` (`ByteStreamClosed` **and** `ByteStreamError` treated as benign when a stop/reconnect is pending) |
-| P2 `session.start()` outside constructor cleanup | `api/live.py` (start inside the `try`), `ti/session.py` (close a just-opened raw capture and restore `_stopped` if thread start raises) |
-| P2 no shared `PeopleTracker` boundary | `ti/session.py` (`observations()`), `adapters/mmwave/base.py` (`LivePeopleSource` protocol; full vendor-neutral diagnostics extraction deliberately deferred and documented) |
-| P2 active live run unrecoverable after browser reload | `apps/observatory/src/state/store.tsx` (`adoptLiveRun`), `components/LiveControls.tsx` ("Resume live run" control) |
+| P1 target-height TLV 1012 record layout | `ti/parser.py` (`<B3xff`, 12-byte record), `ti/protocol.py`, `docs/hardware/ti-iwr6843-first-bringup.md` |
+| P1 live ownership released before teardown finished | `api/runs.py` (`_closing_live_run_id`), `api/routes/live.py` |
+| P2 TARGET_INDEX / TARGET_HEIGHT unbounded | `ti/parser.py` |
+| P2 reconnect/stop-triggered stream close counted as transport failure | `ti/session.py` |
+| P2 `session.start()` outside constructor cleanup | `api/live.py`, `ti/session.py` |
+| P2 no shared `PeopleTracker` boundary | `ti/session.py` (`observations()`), `adapters/mmwave/base.py` (`LivePeopleSource`) |
+| P2 active live run unrecoverable after browser reload | `store.tsx` (`adoptLiveRun`), `LiveControls.tsx` |
 
-Regression tests added alongside: `tests/unit/mmwave_ti/test_parser.py`,
-`tests/unit/mmwave_ti/test_session.py`, `tests/api/test_live_runs.py`,
-`apps/observatory/src/App.live.test.tsx`.
+Gate: all 5 checks PASS (598 tests); `final-reviewer` `VERDICT: PASS`. Its three non-blocking
+notes were fixed before push (stale test docstring, overclaiming `protocol.py` sentence, and a
+missing `ByteStreamError`-with-pending-request test — the new test was mutation-checked to
+confirm it fails without the guard).
 
-Also modified: `.claude/commands/codex-auto-loop.md` — cycle cap 5→3, added "read the review
-body too", per-thread resolution step (reply with fixing SHA + test name, no mass-resolve),
-and an explicit ready-for-human-merge stopping condition.
+**Open deviation to watch:** Codex asked for a uint32 target-height id; we kept uint8 + 3
+skipped pad bytes and argued it on the thread. Round 3 may push back. Inert today
+(`TiTargetHeight.native_track_id` has no consumer); settle at hardware bring-up.
+
+**Deferred (own change):** extract a vendor-neutral diagnostics contract so
+`LivePeopleSource.diagnostics()` can be typed and `LiveObservatoryRun.session` annotated
+against the protocol — today that would drag `TiAdapterDiagnostics` into the neutral module.
 
 ### Next step
-Run the full check sequence → `final-reviewer` → commit → push → reply to and resolve each
-round-2 thread with the fixing SHA + test name → post the `@codex review` comment from step 13
-of the auto-loop → stop and wait for round 3 (last of the 3 cycles).
+**Waiting on Codex round 3** (requested 2026-09-16, comment `5697400380`; reviews take ~12–16
+min). When it lands: read both the review body and the inline threads, and treat round-2
+findings already answered on `6455378` as superseded. This is the **last of the 3 cycles** — if
+only P3 hardening remains and CI is green, STOP and report the PR as ready for the owner's
+merge decision. Never merge.
 
 ### Hardware status
 No TI board has ever been connected. Hardware acceptance NOT RUN. All measured fields in
