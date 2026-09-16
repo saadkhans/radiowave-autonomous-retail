@@ -179,6 +179,7 @@ export interface ObservatoryActions {
   startLiveRun(capture: boolean): Promise<void>;
   stopLiveRun(): Promise<void>;
   reconnectLiveRun(): Promise<void>;
+  adoptLiveRun(runId: string): Promise<void>;
 }
 
 const StateContext = createContext<ObservatoryState>(initialState);
@@ -449,6 +450,39 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
     [applyRun, refreshLiveAvailability, runExclusive, state.run, stopActiveLiveRun],
   );
 
+  // Invariant 19: a LIVE run the server reports as active (liveAvailability's
+  // active_run_id) but this client is not bound to - e.g. after a page reload
+  // while the sensor session is still running server-side - must be
+  // recoverable rather than orphaned. Adoption is an explicit operator action
+  // (never polled/auto-triggered) that binds to the existing run. It mirrors
+  // startLiveRun's ordering: any run already active on this client is stopped
+  // first via the same stopActiveLiveRun helper, the generation is bumped,
+  // then the snapshot and store for the *existing* run are fetched (instead
+  // of creating a new one) before runIdRef is bound - so a failed fetch here
+  // never leaves runIdRef pointing at a run with no store. Unlike
+  // startLiveRun, a failed adopt does not stop the run: we did not create
+  // this session, so tearing down someone else's hardware run on a transient
+  // fetch error would be destructive. The failure simply propagates through
+  // the queue's normal error path, leaving the run adoptable again.
+  const adoptLiveRun = useCallback(
+    (runId: string) => {
+      dispatch({ type: "playing", playing: false });
+      const activeRun = state.run;
+      return runExclusive(async () => {
+        await stopActiveLiveRun(activeRun);
+        generationRef.current += 1;
+        const generation = generationRef.current;
+        const snapshot = await api.getSnapshot(runId);
+        const liveStore = await api.getStore(runId);
+        runIdRef.current = runId;
+        dispatch({ type: "select", selection: null });
+        dispatch({ type: "liveStore", store: liveStore });
+        applyRun(snapshot, generation);
+      }).finally(() => void refreshLiveAvailability());
+    },
+    [applyRun, refreshLiveAvailability, runExclusive, state.run, stopActiveLiveRun],
+  );
+
   // Stop/reconnect are user-initiated hardware controls: unlike a playback
   // tick, they must never be silently dropped just because a live poll
   // happens to be in flight, so they always queue (runQueued) rather than
@@ -552,6 +586,7 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
       startLiveRun,
       stopLiveRun,
       reconnectLiveRun,
+      adoptLiveRun,
     }),
     [
       selectScenario,
@@ -569,6 +604,7 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
       startLiveRun,
       stopLiveRun,
       reconnectLiveRun,
+      adoptLiveRun,
     ],
   );
 

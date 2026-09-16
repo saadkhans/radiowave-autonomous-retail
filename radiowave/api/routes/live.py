@@ -38,6 +38,10 @@ def availability(request: Request) -> ObservatoryLiveAvailability:
     # sensor unavailable too, even though no run is published yet: the manager is
     # authoritative about the slot, this is only a friendlier pre-check message.
     starting = manager.live_reservation() is not None
+    # Likewise, a run whose ``delete()`` has already removed it from the published
+    # run list but whose ``close()`` has not finished stopping the sensor yet: still
+    # unavailable, with a distinct reason from "starting".
+    closing = manager.closing_live_run_id() is not None
     if runtime is None:
         return ObservatoryLiveAvailability(
             configured=False,
@@ -53,6 +57,8 @@ def availability(request: Request) -> ObservatoryLiveAvailability:
         reason = f"live run {active_id} is already using the sensor; stop it first"
     elif starting:
         reason = "a live run is starting; try again shortly"
+    elif closing:
+        reason = "a live run is stopping; try again shortly"
     return ObservatoryLiveAvailability(
         configured=True,
         config_path=runtime.config_path,

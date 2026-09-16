@@ -11,7 +11,7 @@ import pytest
 
 from radiowave.adapters.mmwave.ti.config import TiRawCaptureConfig, TiReconnectPolicy
 from radiowave.adapters.mmwave.ti.health import TiStreamState
-from radiowave.adapters.mmwave.ti.session import TiLiveSession
+from radiowave.adapters.mmwave.ti.session import RawByteCapture, TiLiveSession
 from radiowave.adapters.mmwave.ti.transport import (
     ByteStream,
     ByteStreamError,
@@ -551,3 +551,197 @@ def test_no_zombie_threads_after_stop() -> None:
         assert session.stop(timeout_s=2.0)
     assert session.running is False
     assert not any(t.name == f"ti-mmwave-{session.sensor_id}" for t in threading.enumerate())
+
+
+# --------------------------------------------------------------------------- Codex P2 fixes
+
+
+def test_reconnect_that_interrupts_a_blocked_read_is_not_a_transport_failure() -> None:
+    """A manual reconnect that closes a stream while the reader is blocked inside
+    ``stream.read()`` must be treated the same as a normal, requested reconnect: a new
+    generation opens and the session never reaches ERROR nor consumes the
+    consecutive-failure budget."""
+    first = HoldOpenStream(frames(1), block_when_idle=True)
+    second = HoldOpenStream(frames(1, start=2))
+    session = session_for(
+        [first, second],
+        reconnect=TiReconnectPolicy(
+            enabled=True, initial_delay_s=0.001, max_delay_s=0.001, max_attempts=1
+        ),
+    )
+    session.start()
+    try:
+        assert wait_until(lambda: session.queued == 1)
+        # The reader is now blocked inside stream.read() (block_when_idle=True); this
+        # closes the stream to wake it, raising ByteStreamClosed inside the reader.
+        assert session.request_reconnect() is True
+        assert wait_until(lambda: session.queued == 2)
+        diagnostics = session.diagnostics()
+        assert diagnostics.state != TiStreamState.ERROR
+        assert diagnostics.generation == 2
+        assert diagnostics.reconnect_count == 1
+        assert "retry" not in (diagnostics.message or "")
+    finally:
+        session.stop()
+
+
+def test_reconnect_interrupting_a_blocked_read_with_retries_disabled_still_reconnects() -> None:
+    """Same interrupted-blocked-read scenario, but with automatic reconnect disabled:
+    a manual reconnect must still open the next connection instead of being misread as
+    a transport failure and driven to ERROR."""
+    first = HoldOpenStream(frames(1), block_when_idle=True)
+    second = HoldOpenStream(frames(1, start=2))
+    session = session_for([first, second], reconnect=TiReconnectPolicy(enabled=False))
+    session.start()
+    try:
+        assert wait_until(lambda: session.queued == 1)
+        assert session.request_reconnect() is True
+        assert wait_until(lambda: session.queued == 2)
+        assert session.diagnostics().state != TiStreamState.ERROR
+    finally:
+        session.stop()
+
+
+def test_reconnect_surfacing_as_a_transport_error_is_not_a_transport_failure() -> None:
+    """Same interrupted-blocked-read scenario, but the transport reports the
+    operator-requested close as a plain ``ByteStreamError`` rather than
+    ``ByteStreamClosed`` (as ``SerialByteStream`` can, when the port's ``is_open`` flag
+    has not flipped yet). The pending request still makes it benign: a new generation
+    opens and the session never reaches ERROR."""
+    first = HoldOpenStream(frames(1), block_when_idle=True, error_on_close=True)
+    second = HoldOpenStream(frames(1, start=2))
+    session = session_for([first, second], reconnect=TiReconnectPolicy(enabled=False))
+    session.start()
+    try:
+        assert wait_until(lambda: session.queued == 1)
+        assert session.request_reconnect() is True
+        assert wait_until(lambda: session.queued == 2)
+        diagnostics = session.diagnostics()
+        assert diagnostics.state != TiStreamState.ERROR
+        assert diagnostics.generation == 2
+    finally:
+        session.stop()
+
+
+def test_a_spontaneous_stream_close_is_still_a_transport_failure() -> None:
+    """A stream close with no pending reconnect/stop request is still a genuine
+    transport failure: it must still drive the session to ERROR (with reconnect
+    disabled) rather than being treated as benign."""
+    session = session_for([MemoryByteStream(frames(1))], reconnect=TiReconnectPolicy(enabled=False))
+    session.start()
+    try:
+        assert wait_until(lambda: session.diagnostics().state == TiStreamState.ERROR)
+        assert wait_until(lambda: not session.running)
+        assert session.queued == 1
+        message = session.diagnostics().message or ""
+        assert "stream closed" in message
+        assert "reconnect disabled" in message
+    finally:
+        session.stop()
+
+
+def test_stop_that_interrupts_a_blocked_read_exits_cleanly() -> None:
+    """``stop()`` closing a stream while the reader is blocked inside ``stream.read()``
+    must exit the reader cleanly (no ERROR, no hang) same as the normal stop path."""
+    stream = HoldOpenStream(frames(1), block_when_idle=True)
+    session = session_for([stream])
+    session.start()
+    assert wait_until(lambda: session.queued == 1)
+    assert session.stop(timeout_s=2.0)
+    assert not session.running
+    assert session.diagnostics().state == TiStreamState.DISCONNECTED
+
+
+def test_start_failure_closes_a_capture_it_just_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If reader-thread creation/start fails, ``start()`` must close the raw capture
+    file it just opened (instead of leaking the handle) and leave the session in a
+    state where a later successful ``start()`` still works."""
+    path = tmp_path / "captures" / "raw.bin"
+    session = session_for(
+        [HoldOpenStream(frames(1))],
+        raw_capture=TiRawCaptureConfig(path=str(path), max_bytes=1024),
+    )
+
+    real_thread = threading.Thread
+
+    class ExplodingThread:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading, "Thread", ExplodingThread)
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        session.start()
+    assert session._capture is None
+    assert not session.running
+    assert path.exists()  # the file was opened, then closed again -- not leaked
+
+    monkeypatch.setattr(threading, "Thread", real_thread)
+    session.start()
+    try:
+        assert wait_until(lambda: session.queued == 1)
+    finally:
+        assert session.stop()
+
+
+def test_start_failure_surfaces_the_original_error_when_capture_close_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the capture-close cleanup itself fails, ``start()`` must still raise the
+    original thread-start error (not the cleanup error) and still leave
+    ``self._capture`` cleared."""
+    path = tmp_path / "captures" / "raw.bin"
+    session = session_for(
+        [HoldOpenStream(frames(1))],
+        raw_capture=TiRawCaptureConfig(path=str(path), max_bytes=1024),
+    )
+
+    class ExplodingThread:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("original thread-start failure")
+
+    def exploding_close(self: RawByteCapture) -> None:
+        raise OSError("disk full while closing capture")
+
+    monkeypatch.setattr(threading, "Thread", ExplodingThread)
+    monkeypatch.setattr(RawByteCapture, "close", exploding_close)
+
+    with pytest.raises(RuntimeError, match="original thread-start failure"):
+        session.start()
+    assert session._capture is None
+
+
+# --------------------------------------------------------------------------- Codex P2: tracker
+
+
+def test_ti_live_session_satisfies_the_people_tracker_protocol() -> None:
+    from radiowave.fusion.interfaces import PeopleTracker
+
+    session = session_for([HoldOpenStream(frames(1))])
+    assert isinstance(session, PeopleTracker)
+
+
+def test_ti_live_session_satisfies_the_live_people_source_protocol() -> None:
+    from radiowave.adapters.mmwave.base import LivePeopleSource
+
+    session = session_for([HoldOpenStream(frames(1))])
+    assert isinstance(session, LivePeopleSource)
+
+
+def test_observations_yields_drained_person_observations_in_arrival_order() -> None:
+    session = session_for([HoldOpenStream(frames(3))])
+    session.start()
+    try:
+        assert wait_until(lambda: session.queued == 3)
+        observations = list(session.observations())
+        assert [o.metadata["native_frame_number"] for o in observations] == [1, 2, 3]
+        assert session.queued == 0
+    finally:
+        session.stop()

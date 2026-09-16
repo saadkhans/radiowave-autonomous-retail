@@ -78,7 +78,7 @@ def test_point_cloud_target_index_height_and_presence_frame() -> None:
         build_point_cloud_tlv([(0, 0, 100, 500, 200), (0, 50, -100, 1000, 150)]),
     )
     index_tlv = build_tlv(TiTlvType.TARGET_INDEX, bytes([0, 1]))
-    height_tlv = build_tlv(TiTlvType.TARGET_HEIGHT, struct.pack("<Bff", 0, 1.8, 0.1))
+    height_tlv = build_tlv(TiTlvType.TARGET_HEIGHT, struct.pack("<B3xff", 0, 1.8, 0.1))
     presence_tlv = build_tlv(TiTlvType.PRESENCE_INDICATION, struct.pack("<I", 1))
     frame_bytes = build_frame(frame_number=3, tlvs=[cloud_tlv, index_tlv, height_tlv, presence_tlv])
 
@@ -564,6 +564,176 @@ def test_duplicate_unknown_tlv_type_in_one_packet_still_parses() -> None:
 
     assert len(frames) == 1
     assert frames[0].unknown_tlvs == ((9999, 4), (9999, 4))
+
+
+def test_target_height_uses_the_ti_twelve_byte_record() -> None:
+    """The real TI wire format for TARGET_HEIGHT (TLV 1012) is 12 bytes per record,
+    matching TI's native 'B2f' alignment rather than a hand-packed 9-byte record: a
+    uint8 id, three bytes of C struct padding, then two float32s. The parser reads the
+    id from offset 0 and skips the padding, so this proves it decodes TI's own byte
+    layout unchanged."""
+    height_tlv = build_tlv(TiTlvType.TARGET_HEIGHT, struct.pack("<B3xff", 3, 1.9, 0.2))
+    frame_bytes = build_frame(frame_number=1, tlvs=[height_tlv])
+
+    frames = TiFrameParser().feed(frame_bytes)
+
+    assert len(frames) == 1
+    assert len(frames[0].heights) == 1
+    assert frames[0].heights[0].native_track_id == 3
+    assert frames[0].heights[0].max_z == pytest.approx(1.9)
+    assert frames[0].heights[0].min_z == pytest.approx(0.2)
+
+
+def test_nine_byte_target_height_payload_is_rejected() -> None:
+    """A legacy/incorrect 9-byte-per-record payload does not satisfy the real
+    12-byte alignment and must be rejected outright, never silently decoded."""
+    bad_height_tlv = build_tlv(TiTlvType.TARGET_HEIGHT, struct.pack("<Bff", 0, 1.8, 0.1))
+    frame_bytes = build_frame(frame_number=1, tlvs=[bad_height_tlv])
+    parser = TiFrameParser()
+
+    frames = parser.feed(frame_bytes)
+
+    assert frames == []
+    assert parser.stats.reject_reasons[TiFrameRejectReason.BAD_TLV_LENGTH.value] == 1
+
+
+def test_target_height_id_ignores_dirty_struct_padding() -> None:
+    """The id is the byte at offset 0; bytes 1..3 are C struct padding and must be
+    skipped, never folded into the id.
+
+    TI's demo packs TLVs contiguously into a shared result buffer, so those padding
+    bytes can carry stale data from an earlier frame rather than zeros. Reading the
+    field as a uint32 would turn that into a silently wrong track id; this pins that
+    a dirty-padding record still decodes the same id as a clean one.
+    """
+    dirty = struct.pack("<B3sff", 7, b"\xde\xad\xbe", 1.7, 0.4)
+    assert len(dirty) == 12
+    height_tlv = build_tlv(TiTlvType.TARGET_HEIGHT, dirty)
+    frame_bytes = build_frame(frame_number=1, tlvs=[height_tlv])
+
+    frames = TiFrameParser().feed(frame_bytes)
+
+    assert len(frames) == 1
+    assert frames[0].heights[0].native_track_id == 7
+    assert frames[0].heights[0].max_z == pytest.approx(1.7)
+    assert frames[0].heights[0].min_z == pytest.approx(0.4)
+
+
+def test_multi_record_target_height_decodes_at_correct_offsets() -> None:
+    payload = struct.pack("<B3xff", 0, 1.8, 0.1) + struct.pack("<B3xff", 1, 2.2, 0.3)
+    assert len(payload) == 24
+    height_tlv = build_tlv(TiTlvType.TARGET_HEIGHT, payload)
+    frame_bytes = build_frame(frame_number=1, tlvs=[height_tlv])
+
+    frames = TiFrameParser().feed(frame_bytes)
+
+    assert len(frames) == 1
+    heights = frames[0].heights
+    assert len(heights) == 2
+    assert heights[0].native_track_id == 0
+    assert heights[0].max_z == pytest.approx(1.8)
+    assert heights[0].min_z == pytest.approx(0.1)
+    assert heights[1].native_track_id == 1
+    assert heights[1].max_z == pytest.approx(2.2)
+    assert heights[1].min_z == pytest.approx(0.3)
+
+
+def test_frame_with_target_list_and_target_height_tlv_yields_targets() -> None:
+    """Regression for the P1 bug: a wrong 9-byte height record size caused a valid
+    12-byte height payload to fail its modulo check and reject the whole frame,
+    including an otherwise-valid target list. With the correct 12-byte record size
+    both TLVs decode together."""
+    target_tlv = build_tlv(
+        TiTlvType.TARGET_LIST_3D,
+        build_target_record(tid=5, x=1.0, y=2.0, z=0.0, vx=0.0, vy=0.0, vz=0.0),
+    )
+    height_tlv = build_tlv(TiTlvType.TARGET_HEIGHT, struct.pack("<B3xff", 5, 1.8, 0.1))
+    frame_bytes = build_frame(frame_number=1, tlvs=[target_tlv, height_tlv])
+
+    frames = TiFrameParser().feed(frame_bytes)
+
+    assert len(frames) == 1
+    assert len(frames[0].targets) == 1
+    assert frames[0].targets[0].native_track_id == 5
+    assert len(frames[0].heights) == 1
+    assert frames[0].heights[0].native_track_id == 5
+
+
+def test_target_index_over_max_points_is_rejected() -> None:
+    limits = TiParserLimits(max_points=4)
+    index_tlv = build_tlv(TiTlvType.TARGET_INDEX, bytes(range(5)))
+    frame_bytes = build_frame(frame_number=1, tlvs=[index_tlv])
+    parser = TiFrameParser(limits=limits)
+
+    frames = parser.feed(frame_bytes)
+
+    assert frames == []
+    assert parser.stats.reject_reasons[TiFrameRejectReason.TOO_MANY_POINTS.value] == 1
+
+
+def test_target_index_at_max_points_is_accepted() -> None:
+    limits = TiParserLimits(max_points=4)
+    index_tlv = build_tlv(TiTlvType.TARGET_INDEX, bytes(range(4)))
+    frame_bytes = build_frame(frame_number=1, tlvs=[index_tlv])
+    parser = TiFrameParser(limits=limits)
+
+    frames = parser.feed(frame_bytes)
+
+    assert len(frames) == 1
+    assert frames[0].target_indices == (0, 1, 2, 3)
+
+
+def test_parser_recovers_after_an_oversized_target_index() -> None:
+    limits = TiParserLimits(max_points=4)
+    oversized_index_tlv = build_tlv(TiTlvType.TARGET_INDEX, bytes(range(5)))
+    bad_frame = build_frame(frame_number=80, tlvs=[oversized_index_tlv])
+    good_frame = build_target_frame(frame_number=81, targets=[{"tid": 1}])
+    parser = TiFrameParser(limits=limits)
+
+    frames = parser.feed(bad_frame + good_frame)
+
+    assert [f.frame_number for f in frames] == [81]
+    assert parser.stats.reject_reasons[TiFrameRejectReason.TOO_MANY_POINTS.value] == 1
+
+
+def test_target_height_over_max_targets_is_rejected() -> None:
+    limits = TiParserLimits(max_targets=4)
+    payload = b"".join(struct.pack("<B3xff", i, 1.8, 0.1) for i in range(5))
+    height_tlv = build_tlv(TiTlvType.TARGET_HEIGHT, payload)
+    frame_bytes = build_frame(frame_number=1, tlvs=[height_tlv])
+    parser = TiFrameParser(limits=limits)
+
+    frames = parser.feed(frame_bytes)
+
+    assert frames == []
+    assert parser.stats.reject_reasons[TiFrameRejectReason.TOO_MANY_TARGETS.value] == 1
+
+
+def test_target_height_at_max_targets_is_accepted() -> None:
+    limits = TiParserLimits(max_targets=4)
+    payload = b"".join(struct.pack("<B3xff", i, 1.8, 0.1) for i in range(4))
+    height_tlv = build_tlv(TiTlvType.TARGET_HEIGHT, payload)
+    frame_bytes = build_frame(frame_number=1, tlvs=[height_tlv])
+    parser = TiFrameParser(limits=limits)
+
+    frames = parser.feed(frame_bytes)
+
+    assert len(frames) == 1
+    assert len(frames[0].heights) == 4
+
+
+def test_parser_recovers_after_an_oversized_target_height() -> None:
+    limits = TiParserLimits(max_targets=4)
+    payload = b"".join(struct.pack("<B3xff", i, 1.8, 0.1) for i in range(5))
+    oversized_height_tlv = build_tlv(TiTlvType.TARGET_HEIGHT, payload)
+    bad_frame = build_frame(frame_number=90, tlvs=[oversized_height_tlv])
+    good_frame = build_target_frame(frame_number=91, targets=[{"tid": 1}])
+    parser = TiFrameParser(limits=limits)
+
+    frames = parser.feed(bad_frame + good_frame)
+
+    assert [f.frame_number for f in frames] == [91]
+    assert parser.stats.reject_reasons[TiFrameRejectReason.TOO_MANY_TARGETS.value] == 1
 
 
 def test_next_valid_frame_after_a_duplicate_tlv_packet_is_parsed() -> None:

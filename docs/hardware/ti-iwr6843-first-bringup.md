@@ -101,6 +101,8 @@ Add `--raw-capture data/captures/raw.bin` to also dump raw UART bytes for parser
 (`data/captures/` is git-ignored). Omit `--data-port` to use the port already in the config file.
 Once the probe output shows which layout the board emits (printed as part of the status), pin `adapter.target_record_layout` (`3d_v2`, `3d_v1` or `2d`) in the config — confirm it from the probe output rather than leaving it unset, since an unset layout is only auto-detected when exactly one candidate fits the record count; an ambiguous count is now rejected outright rather than guessed.
 
+While a raw capture is open, also confirm the **target-height record (TLV 1012)** against real bytes: it must be 12 bytes per record (TI's C struct is padded to 4-byte alignment; a hand-packed 9-byte reading rejects every real one-target height TLV and drops the whole frame with it). The parser takes the id from the single byte at offset 0 and skips bytes 1..3 as padding, so a record whose padding carries stale bytes still decodes the right id. Check on real output whether those padding bytes are in fact zero: if the firmware turns out to use a full uint32 id there, ids above 255 would currently truncate. Resolve that before anything downstream consumes `TiTargetHeight.native_track_id`; today heights are carried on the frame for diagnostics and never feed a canonical observation.
+
 ### 7. Confirm frames are received
 
 Healthy output looks like one summary line per second plus per-target lines:

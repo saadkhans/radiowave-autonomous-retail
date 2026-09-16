@@ -86,7 +86,7 @@ class _FrameRejectedError(Exception):
 
 _DETECTED_POINT_STRUCT = struct.Struct("<4f")  # x, y, z, velocity (OOB SDK 3.x)
 _SIDE_INFO_STRUCT = struct.Struct("<2h")  # snr, noise; units 0.1 dB
-_TARGET_HEIGHT_STRUCT = struct.Struct("<Bff")  # tid, max_z, min_z
+_TARGET_HEIGHT_STRUCT = struct.Struct("<B3xff")  # tid, 3 pad bytes, max_z, min_z
 _POINT_CLOUD_UNITS_STRUCT = struct.Struct("<5f")  # elevation, azimuth, doppler, range, snr units
 _POINT_CLOUD_RECORD_STRUCT = struct.Struct("<bbhHH")  # elevation, azimuth, doppler, range, snr
 _PRESENCE_STRUCT = struct.Struct("<I")
@@ -331,10 +331,17 @@ def _parse_packet(
                 if len(targets) > limits.max_targets:
                     raise _FrameRejectedError(TiFrameRejectReason.TOO_MANY_TARGETS)
         elif tlv_type == TiTlvType.TARGET_INDEX:
+            if len(payload) > limits.max_points:
+                raise _FrameRejectedError(TiFrameRejectReason.TOO_MANY_POINTS)
             target_indices = tuple(payload)
         elif tlv_type == TiTlvType.TARGET_HEIGHT:
             if length % _TARGET_HEIGHT_STRUCT.size != 0:
                 raise _FrameRejectedError(TiFrameRejectReason.BAD_TLV_LENGTH)
+            # One height record is emitted per target, so it carries the same
+            # cardinality as TARGET_LIST_3D and is bounded the same way — before
+            # materializing the tuple, not after.
+            if length // _TARGET_HEIGHT_STRUCT.size > limits.max_targets:
+                raise _FrameRejectedError(TiFrameRejectReason.TOO_MANY_TARGETS)
             heights = _decode_heights(payload)
         elif tlv_type == TiTlvType.POINT_CLOUD_3D:
             body_len = length - _POINT_CLOUD_UNITS_STRUCT.size

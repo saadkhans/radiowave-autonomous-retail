@@ -844,6 +844,13 @@ class RunManager:
         # still running, and the admission would go on to publish a run after the
         # manager was already closed (invariant 16).
         self._live_constructing: ObservatoryRun | None = None
+        # The run id of a LIVE run whose ``delete()`` has already popped it from
+        # ``_runs`` but whose ``run.close()`` has not returned yet. The physical
+        # sensor is not free until close() actually joins the reader thread and
+        # tears down the transport, so this keeps the slot held for the whole
+        # teardown window (invariant 15) even though the run is no longer
+        # discoverable via ``get``/``ids``. See ``delete``.
+        self._closing_live_run_id: str | None = None
         # Set by ``close_all()``; once true no new LIVE admission may start, and any
         # admission already past that point must close its run instead of publishing.
         self._closed = False
@@ -971,12 +978,31 @@ class RunManager:
         with self._lock:
             return self._live_reservation
 
+    def closing_live_run_id(self) -> str | None:
+        """The run id currently being torn down by ``delete()``, if any.
+
+        Distinct from ``live_reservation`` (construction, before a run exists) and
+        from a published-but-not-yet-finished run in ``_runs``: this covers the
+        window after ``delete()`` has removed the run from ``_runs`` but before its
+        ``close()`` has actually stopped the sensor. See ``delete``.
+        """
+        with self._lock:
+            return self._closing_live_run_id
+
     def get(self, run_id: str) -> ObservatoryRun | None:
         with self._lock:
             return self._runs.get(run_id)
 
     def _active_live_run_id_locked(self) -> str | None:
-        """First LIVE run that is not finished ("active" = not stopped); caller holds the lock."""
+        """First LIVE run that is not finished ("active" = not stopped); caller holds the lock.
+
+        Also reports a run whose ``delete()`` has already popped it from ``_runs``
+        but whose ``close()`` has not returned yet (see ``_closing_live_run_id``):
+        the physical sensor is not free until then, so admission must still refuse a
+        concurrent ``build_live_exclusive`` for that whole window.
+        """
+        if self._closing_live_run_id is not None:
+            return self._closing_live_run_id
         for run_id, run in sorted(self._runs.items()):
             if run.mode == "LIVE" and not run.finished:
                 return run_id
@@ -991,11 +1017,33 @@ class RunManager:
             )
 
     def delete(self, run_id: str) -> bool:
+        """Remove a run and release its resources.
+
+        For a LIVE run that is still active, the slot must stay held for the whole
+        teardown (invariant 15): popping from ``_runs`` and then closing outside the
+        lock (deliberately, so a live run's thread joins never block the manager
+        lock) would otherwise leave a window where ``_active_live_run_id_locked``
+        reports no active run and no reservation while the old reader thread, serial
+        stream and raw capture are still alive — long enough for a concurrent
+        ``POST /runs/live`` to pass admission and open a second session against the
+        same UART. ``_closing_live_run_id`` closes that window: set before the run is
+        popped, cleared only after ``run.close()`` returns (in a ``finally``, so a
+        ``close()`` that raises still releases the slot rather than sticking it
+        forever).
+        """
         with self._lock:
             run = self._runs.pop(run_id, None)
-        if run is None:
-            return False
-        run.close()  # outside the manager lock: a live run joins its threads here
+            if run is None:
+                return False
+            closing = run.mode == "LIVE" and not run.finished
+            if closing:
+                self._closing_live_run_id = run_id
+        try:
+            run.close()  # outside the manager lock: a live run joins its threads here
+        finally:
+            if closing:
+                with self._lock:
+                    self._closing_live_run_id = None
         return True
 
     def close_all(self) -> None:

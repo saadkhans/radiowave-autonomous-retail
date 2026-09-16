@@ -107,6 +107,13 @@ class LiveObservatoryRun(ObservatoryRun):
     def __init__(self, run_id: str, runtime: LiveRuntime, *, capture: bool) -> None:
         self._runtime = runtime
         self._init_common(run_id, runtime.config.store, runtime.pipeline_config)
+        # Concrete today, but only the surface of
+        # :class:`~radiowave.adapters.mmwave.base.LivePeopleSource` is used below
+        # (architecture invariant 1). Annotating it as that protocol is what would
+        # make mypy enforce the boundary instead of leaving it a convention; that
+        # needs ``diagnostics()`` to return a vendor-neutral contract first, which
+        # today is the TI-package ``TiAdapterDiagnostics``. See the protocol's
+        # docstring for the deferred extraction.
         self.session = TiLiveSession(
             runtime.config,
             self.registry,
@@ -140,22 +147,30 @@ class LiveObservatoryRun(ObservatoryRun):
         # ``observations_total`` and ``_live_status`` (both consumed from within it)
         # never observe two different instants of the session's counters.
         self._diagnostics_cache: TiAdapterDiagnostics | None = None
-        # ``session.start()`` is the last step before the driver thread: everything
-        # that can fail on its own (recorder/capture-path allocation, pipeline
-        # construction) already happened above, so the only thing that can still
-        # raise after the sensor is reading is the driver thread's own creation.
-        # Guard exactly that: if it raises, ``__init__`` never returns, so
-        # ``build_live_exclusive`` never gets a ``run`` reference to close, and
-        # without this the started session (and its reader thread) would leak.
-        self.session.start()
+        # ``session.start()`` itself opens the raw capture file and creates the
+        # reader thread, so it can raise after already allocating OS resources — not
+        # just the driver thread's own creation below. Either failure means
+        # ``__init__`` never returns, so ``build_live_exclusive`` never gets a
+        # ``run`` reference to close: without this try/except, an already-open
+        # recorder (and any partially opened capture) would leak. ``session.stop()``
+        # is safe to call even on a session that never started or only partially
+        # started (idempotent, never raises out of a clean state), but is still
+        # guarded here — the same way the manager's own failure paths are — in case
+        # it ever does.
         try:
+            self.session.start()
             if runtime.autonomous:
                 self._driver = threading.Thread(
                     target=self._drive, name=f"live-run-{run_id}", daemon=True
                 )
                 self._driver.start()
         except BaseException:
-            self.session.stop()
+            try:
+                self.session.stop()
+            except Exception:
+                log.exception(
+                    "failed to stop live session for %s after construction failure", run_id
+                )
             if self._recorder is not None:
                 self._recorder.close()
             raise

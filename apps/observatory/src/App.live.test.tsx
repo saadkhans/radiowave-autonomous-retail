@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "@/App";
+import { api } from "@/lib/api";
 import { LIVE_POLL_MS } from "@/state/store";
 import { installFakeApi } from "@/test/fixtures";
 
@@ -270,4 +271,60 @@ describe("LIVE mode", () => {
     await sleep(LIVE_POLL_MS * 3);
     expect(fake.calls.filter((call) => call === "GET /api/runs/live-0001/snapshot")).toHaveLength(0);
   }, 10000);
+
+  it("invariant 19: an active run reported by another client offers a resume control and keeps Start live disabled", async () => {
+    // Simulates the server already owning a LIVE run (e.g. from before a page
+    // reload) that this fresh client is not bound to.
+    await api.createLiveRun(false);
+
+    render(<App />);
+
+    const resumeButton = await screen.findByRole("button", { name: /Resume live run live-0001/ });
+    expect(resumeButton).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start live" })).toBeDisabled();
+    expect(screen.queryByTestId("mode-badge")).not.toBeInTheDocument();
+  });
+
+  it("invariant 19: clicking resume binds the client to the existing run so Stop and Reconnect operate on it", async () => {
+    await api.createLiveRun(false);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /Resume live run live-0001/ }));
+
+    await waitFor(() => expect(screen.getByTestId("mode-badge")).toHaveTextContent("LIVE"));
+    expect(screen.queryByRole("button", { name: /Resume live run/i })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+    await waitFor(() => expect(fake.calls).toContain("POST /api/runs/live-0001/reconnect"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    await waitFor(() => expect(fake.calls).toContain("POST /api/runs/live-0001/stop"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Start live" })).toBeInTheDocument());
+  });
+
+  it("invariant 19: a failed store fetch during adopt surfaces the error, does not bind the run, and leaves it adoptable", async () => {
+    await api.createLiveRun(false);
+
+    render(<App />);
+    fake.failNext("GET /api/runs/live-0001/store");
+    fireEvent.click(await screen.findByRole("button", { name: /Resume live run live-0001/ }));
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    // Not bound: no mode badge, and the failed adopt must not have stopped
+    // the run (unlike startLiveRun, adopt never tears down a run it did not
+    // create).
+    expect(screen.queryByTestId("mode-badge")).not.toBeInTheDocument();
+    expect(fake.calls).not.toContain("POST /api/runs/live-0001/stop");
+    // Still adoptable: the resume control is still offered for the same run.
+    expect(await screen.findByRole("button", { name: /Resume live run live-0001/ })).toBeInTheDocument();
+  });
+
+  it("invariant 19: the resume control is not shown once the client is already bound to that run id", async () => {
+    render(<App />);
+    await screen.findByRole("button", { name: "Start live" });
+    fireEvent.click(screen.getByRole("button", { name: "Start live" }));
+    await waitFor(() => expect(screen.getByTestId("mode-badge")).toHaveTextContent("LIVE"));
+
+    expect(screen.queryByRole("button", { name: /Resume live run/i })).not.toBeInTheDocument();
+  });
 });

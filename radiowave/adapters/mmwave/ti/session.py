@@ -21,7 +21,7 @@ import logging
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -194,12 +194,42 @@ class TiLiveSession:
             self._stopped = False
             self._stop.clear()
             raw = self._adapter_config.raw_capture
+            opened_capture = False
             if raw.path is not None and self._capture is None:
                 self._capture = RawByteCapture(Path(raw.path), raw.max_bytes)
-            self._thread = threading.Thread(
-                target=self._run, name=f"ti-mmwave-{self.sensor_id}", daemon=True
-            )
-            self._thread.start()
+                opened_capture = True
+            try:
+                self._thread = threading.Thread(
+                    target=self._run, name=f"ti-mmwave-{self.sensor_id}", daemon=True
+                )
+                self._thread.start()
+            except BaseException:
+                # Thread creation/start failed (thread exhaustion, OS limits): no
+                # reader exists to ever close the capture handle just opened above, so
+                # close it here rather than leaking an open file. Never close a capture
+                # a previous, already-succeeded start() owns.
+                if opened_capture and self._capture is not None:
+                    try:
+                        self._capture.close()
+                    except Exception:
+                        # A cleanup failure (e.g. OSError flushing a full disk) must
+                        # never replace the original thread-start error being
+                        # propagated below; only log it. Catching Exception, not
+                        # BaseException, so a KeyboardInterrupt during cleanup is
+                        # still delivered rather than swallowed.
+                        log.exception(
+                            "failed to close raw capture for %s during start() cleanup",
+                            self.sensor_id,
+                        )
+                    self._capture = None
+                self._thread = None
+                # Back to the stopped state this start() was entered from: the flag
+                # was cleared above on the assumption a reader would exist, and none
+                # does. Leaving it false would let a caller that swallows this error
+                # go on to request_reconnect() and run a reader with raw capture
+                # silently disabled (the handle it would write to was just closed).
+                self._stopped = True
+                raise
 
     def stop(self, timeout_s: float = 5.0) -> bool:
         """Stop reading, close the transport and join the thread. True if it exited.
@@ -285,6 +315,21 @@ class TiLiveSession:
             items = self._drain_locked(None)
             now = self.clock_now()
         return items, now
+
+    def observations(self) -> Iterator[PersonObservation]:
+        """Drain the queue and yield observations in arrival order.
+
+        This exists so :class:`TiLiveSession` structurally satisfies
+        :class:`radiowave.fusion.interfaces.PeopleTracker` (a vendor-neutral,
+        substitutable boundary; see architecture invariant 1). It is built on
+        :meth:`drain`, so — like ``drain`` and unlike :meth:`drain_with_clock` — it
+        does NOT read :meth:`clock_now` atomically with the drain. A consumer that
+        also advances a downstream pipeline's clock (the live Observatory driver, or
+        anything else stepping fusion forward) MUST use :meth:`drain_with_clock`
+        instead, or it can advance its clock past an observation still on its way
+        into the queue.
+        """
+        yield from self.drain()
 
     def clock_now(self) -> datetime:
         """The session's one ordered live clock, shared by every stamped observation and
@@ -470,9 +515,24 @@ class TiLiveSession:
             try:
                 data = stream.read(chunk)
             except ByteStreamClosed as exc:
+                if self._stop.is_set() or self._reconnect_requested.is_set():
+                    # request_reconnect()/stop() closed the stream to wake a reader
+                    # blocked inside stream.read(); that close is the operator's own
+                    # pending request, not a transport failure (see module docstring
+                    # and request_reconnect's docstring for the wake-up contract). A
+                    # spontaneous close with no pending request still falls through
+                    # below and counts against the failure budget as before.
+                    return None, self._connection_had_frame
                 reason = f"stream closed: {exc}" if str(exc) else "stream closed"
                 return reason, self._connection_had_frame
             except ByteStreamError as exc:
+                if self._stop.is_set() or self._reconnect_requested.is_set():
+                    # Some transports (e.g. SerialByteStream, when the port's
+                    # ``is_open`` flag has not yet flipped at the moment of the
+                    # exception) can surface a request_reconnect()/stop()-triggered
+                    # close as a plain ByteStreamError rather than ByteStreamClosed.
+                    # Same benign-close reasoning as above.
+                    return None, self._connection_had_frame
                 return f"transport error: {exc}", self._connection_had_frame
             except Exception as exc:  # a driver bug must not kill the API
                 log.exception("unexpected error reading %s", self.sensor_id)

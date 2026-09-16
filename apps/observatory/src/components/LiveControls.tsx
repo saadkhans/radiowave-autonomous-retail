@@ -11,7 +11,8 @@ import { useActions, useObservatory } from "@/state/store";
  */
 export function LiveControls() {
   const { run, liveAvailability, busy } = useObservatory();
-  const { startLiveRun, stopLiveRun, reconnectLiveRun, refreshLiveAvailability } = useActions();
+  const { startLiveRun, stopLiveRun, reconnectLiveRun, adoptLiveRun, refreshLiveAvailability } =
+    useActions();
   const [capture, setCapture] = useState(false);
 
   useEffect(() => {
@@ -21,6 +22,15 @@ export function LiveControls() {
   // A stopped live run keeps mode "LIVE" (it stays readable) but frees the
   // sensor, so once it's finished this falls back to the "Start live" panel.
   const isLive = run?.mode === "LIVE" && !run.finished;
+
+  // Invariant 19: the server may report a LIVE run still running (e.g. after
+  // a page reload) that this client is not bound to. Surfaced only when it's
+  // genuinely not ours yet - once adopted, `run.run_id` matches and this
+  // resolves to false, so the control disappears in favor of the LIVE panel
+  // above (Stop/Reconnect).
+  const activeRunId = liveAvailability?.active_run_id ?? null;
+  const isBoundToActiveRun = activeRunId !== null && run?.run_id === activeRunId;
+  const adoptable = activeRunId !== null && !isBoundToActiveRun;
 
   if (isLive) {
     return (
@@ -74,6 +84,15 @@ export function LiveControls() {
         <div className="mono text-[11px] text-console-danger" data-testid="live-unavailable-reason">
           {liveAvailability.reason}
         </div>
+      ) : null}
+      {adoptable ? (
+        <button
+          type="button"
+          className="btn self-start"
+          onClick={() => void adoptLiveRun(activeRunId!)}
+        >
+          Resume live run {activeRunId}
+        </button>
       ) : null}
       <label className="flex items-center gap-2 text-[12px]">
         <input

@@ -13,7 +13,7 @@ from radiowave.adapters.mmwave.ti.config import (
     TiSerialConfig,
 )
 from radiowave.adapters.mmwave.ti.session import SessionTiming
-from radiowave.adapters.mmwave.ti.transport import ByteStreamClosed
+from radiowave.adapters.mmwave.ti.transport import ByteStreamClosed, ByteStreamError
 from radiowave.contracts.geometry import WorldCoordinate
 from radiowave.contracts.store import Box2D, Sensor, SensorPose, SourceType, Store
 
@@ -134,18 +134,33 @@ class HoldOpenStream:
     out. Each timeout triggers a stale check that reads the (auto-stepping) fake monotonic
     clock, so a test comparing two runs stamp for stamp uses the blocking form: the number
     of idle timeouts before the consumer ticks depends on thread timing, not on the input.
+
+    With ``error_on_close=True`` a read after ``close()`` raises ``ByteStreamError``
+    instead of ``ByteStreamClosed``. That models a real transport (``SerialByteStream``
+    whose ``is_open`` flag has not flipped yet at the moment of the exception) surfacing
+    an operator-requested close as a plain transport error.
     """
 
-    def __init__(self, chunks: list[bytes], *, block_when_idle: bool = False) -> None:
+    def __init__(
+        self,
+        chunks: list[bytes],
+        *,
+        block_when_idle: bool = False,
+        error_on_close: bool = False,
+    ) -> None:
         self._chunks = list(chunks)
         self._closed = threading.Event()
         self._block_when_idle = block_when_idle
+        self._error_on_close = error_on_close
         self.reads = 0
+
+    def _closed_error(self) -> Exception:
+        return ByteStreamError("closed") if self._error_on_close else ByteStreamClosed("closed")
 
     def read(self, max_bytes: int) -> bytes:
         self.reads += 1
         if self._closed.is_set():
-            raise ByteStreamClosed("closed")
+            raise self._closed_error()
         if self._chunks:
             chunk = self._chunks.pop(0)
             if len(chunk) > max_bytes:
@@ -154,7 +169,7 @@ class HoldOpenStream:
             return chunk
         if self._block_when_idle:
             self._closed.wait()
-            raise ByteStreamClosed("closed")
+            raise self._closed_error()
         self._closed.wait(0.005)
         return b""
 

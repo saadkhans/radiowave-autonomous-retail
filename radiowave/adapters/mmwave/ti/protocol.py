@@ -40,7 +40,28 @@ class TiTlvType(IntEnum):
     TARGET_INDEX = 1011
     """N x uint8 target id per point; 253..255 are unassociated/noise codes."""
     TARGET_HEIGHT = 1012
-    """N x (tid uint8, max_z float32, min_z float32), 9 bytes each."""
+    """N x (tid uint8, 3 pad bytes, max_z float32, min_z float32), 12 bytes each.
+
+    The record is 12 bytes, not the 9 a hand-packed ``'<Bff'`` would produce: TI's C
+    struct ``{uint8_t targetID; float maxZ; float minZ;}`` is padded by the compiler
+    to 4-byte alignment, and TI's own reference visualizer reads it back with the
+    native ``'B2f'`` layout (``struct.calcsize('B2f') == 12``). Decoding it as 9
+    bytes rejects every real one-target height TLV on the divisibility check and
+    takes the whole otherwise-valid frame — including its target list — with it.
+
+    The id is the single byte at offset 0; bytes 1..3 are struct padding and are
+    skipped, never folded into the id. Reading the field as a uint32 instead would
+    be indistinguishable only if that padding were always zero, which nothing
+    guarantees: the demo packs TLVs contiguously into a shared result buffer, so
+    padding can carry stale bytes from a previous frame, and a uint32 read would
+    then yield a silently wrong id where the byte read stays correct. Neither
+    reading dominates the other outright — a genuine uint32 field carrying an id
+    above 255 would truncate here — but for the id range this firmware is known to
+    use the uint8 reading is correct in both cases, so it is the one pinned until
+    real bytes settle it. Confirm the record against real bytes
+    during bring-up (``docs/hardware/ti-iwr6843-first-bringup.md``) before anything
+    consumes the id — today heights are carried for diagnostics only.
+    """
     POINT_CLOUD_3D = 1020
     """3D people counting compressed cloud: 5 float32 units, then N x 8-byte records."""
     PRESENCE_INDICATION = 1021

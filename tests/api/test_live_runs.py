@@ -14,9 +14,11 @@ pytest.importorskip("fastapi")
 pytest.importorskip("httpx")
 from fastapi.testclient import TestClient
 
+from radiowave.adapters.mmwave.ti.session import TiLiveSession
 from radiowave.api.app import create_app
 from radiowave.api.live import LiveObservatoryRun, LiveRuntime
 from radiowave.api.runs import LiveRunBusyError
+from radiowave.replay.recorder import JsonlRecorder
 from tests.fixtures.ti_mmwave.builder import build_target_frame
 from tests.unit.mmwave_ti.support import (
     RADAR,
@@ -172,6 +174,47 @@ def test_one_live_run_at_a_time_until_stopped(live_client: TestClient) -> None:
     assert live_client.post("/api/runs/live", json={}).status_code == 201
 
 
+def test_stop_route_holds_the_sensor_busy_until_session_actually_stops(
+    live_client: TestClient,
+) -> None:
+    """The stop route does not have the same slot-release defect as ``delete``:
+    ``LiveObservatoryRun.stop()`` only sets ``self.finished`` (which is what makes
+    the run stop counting as "active") after the session has actually stopped, so
+    the sensor stays reported busy for the whole teardown, never just after it."""
+    run_id = live_client.post("/api/runs/live", json={}).json()["state"]["run_id"]
+    run = _run(live_client, run_id)
+
+    entered = threading.Event()
+    release = threading.Event()
+    original_session_stop = run.session.stop
+
+    def blocking_session_stop(timeout_s: float = 5.0) -> bool:
+        entered.set()
+        assert release.wait(5.0)
+        return original_session_stop(timeout_s)
+
+    run.session.stop = blocking_session_stop  # type: ignore[method-assign]
+
+    results: dict[str, Any] = {}
+
+    def do_stop() -> None:
+        results["status"] = live_client.post(f"/api/runs/{run_id}/stop").status_code
+
+    thread = threading.Thread(target=do_stop)
+    thread.start()
+    try:
+        assert wait_until(lambda: entered.is_set())
+        blocked = live_client.post("/api/runs/live", json={})
+        assert blocked.status_code == 409
+    finally:
+        release.set()
+        thread.join(5.0)
+
+    assert results["status"] == 200
+    retry = live_client.post("/api/runs/live", json={})
+    assert retry.status_code == 201
+
+
 def test_stop_finalizes_capture_and_reconnect_bumps_generation(
     live_client: TestClient, tmp_path: Path
 ) -> None:
@@ -199,6 +242,148 @@ def test_delete_stops_the_session(live_client: TestClient) -> None:
     assert live_client.delete(f"/api/runs/{run_id}").status_code == 204
     assert wait_until(lambda: not run.session.running)
     assert run.finished
+
+
+def test_delete_holds_the_live_slot_until_close_completes(
+    live_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Invariant 15's teardown-side twin of ``test_concurrent_admission_exactly_one_run_starts``:
+    ``delete()`` must not free the slot until ``run.close()`` (which joins the
+    session's reader thread) has actually returned, or a concurrent admission could
+    open a second session against the same UART while the old one is still alive."""
+    run_id = live_client.post("/api/runs/live", json={}).json()["state"]["run_id"]
+
+    entered = threading.Event()
+    release = threading.Event()
+    original_stop = LiveObservatoryRun.stop
+
+    def blocking_stop(self: LiveObservatoryRun) -> None:
+        entered.set()
+        assert release.wait(5.0)
+        original_stop(self)
+
+    monkeypatch.setattr(LiveObservatoryRun, "stop", blocking_stop)
+
+    results: dict[str, Any] = {}
+
+    def do_delete() -> None:
+        results["status"] = live_client.delete(f"/api/runs/{run_id}").status_code
+
+    thread = threading.Thread(target=do_delete)
+    thread.start()
+    try:
+        assert wait_until(lambda: entered.is_set())
+        blocked = live_client.post("/api/runs/live", json={})
+        assert blocked.status_code == 409
+        assert "stopping" in blocked.json()["detail"]
+    finally:
+        release.set()
+        thread.join(5.0)
+
+    assert results["status"] == 204
+    retry = live_client.post("/api/runs/live", json={})
+    assert retry.status_code == 201
+
+
+def test_availability_reports_a_closing_live_run_as_unavailable(
+    live_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = live_client.post("/api/runs/live", json={}).json()["state"]["run_id"]
+
+    entered = threading.Event()
+    release = threading.Event()
+    original_stop = LiveObservatoryRun.stop
+
+    def blocking_stop(self: LiveObservatoryRun) -> None:
+        entered.set()
+        assert release.wait(5.0)
+        original_stop(self)
+
+    monkeypatch.setattr(LiveObservatoryRun, "stop", blocking_stop)
+
+    thread = threading.Thread(target=lambda: live_client.delete(f"/api/runs/{run_id}"))
+    thread.start()
+    try:
+        assert wait_until(lambda: entered.is_set())
+        status = live_client.get("/api/live/status").json()
+        assert status["reason"] is not None
+        assert "stopping" in status["reason"]
+    finally:
+        release.set()
+        thread.join(5.0)
+
+
+def test_a_close_that_raises_still_releases_the_live_slot(
+    live_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = live_client.post("/api/runs/live", json={}).json()["state"]["run_id"]
+    original_stop = LiveObservatoryRun.stop
+
+    def raising_stop(self: LiveObservatoryRun) -> None:
+        original_stop(self)  # really stop the session first, so nothing leaks
+        raise RuntimeError("boom-close")
+
+    monkeypatch.setattr(LiveObservatoryRun, "stop", raising_stop)
+
+    with pytest.raises(RuntimeError, match="boom-close"):
+        live_client.delete(f"/api/runs/{run_id}")
+
+    manager = live_client.app.state.runs  # type: ignore[attr-defined]
+    assert manager.closing_live_run_id() is None
+
+    retry = live_client.post("/api/runs/live", json={})
+    assert retry.status_code == 201
+
+
+def test_live_run_construction_closes_the_recorder_when_session_start_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``TiLiveSession.start()`` itself opens the raw capture file and creates the
+    reader thread, so it can raise after already allocating OS resources — the
+    comment this fix replaced wrongly claimed only the driver thread's own creation
+    could still fail at that point. A failure here must close the already-open
+    recorder and release the live slot instead of leaking."""
+    runtime = LiveRuntime(
+        config=live_config(),
+        stream_factory=lambda: HoldOpenStream(frames()),
+        timing=FakeTiming().timing(),
+        capture_dir=tmp_path,
+        autonomous=False,
+    )
+    recorders: list[JsonlRecorder] = []
+    original_recorder_init = JsonlRecorder.__init__
+
+    def capturing_init(self: JsonlRecorder, *args: Any, **kwargs: Any) -> None:
+        original_recorder_init(self, *args, **kwargs)
+        recorders.append(self)
+
+    monkeypatch.setattr(JsonlRecorder, "__init__", capturing_init)
+
+    original_start = TiLiveSession.start
+
+    def failing_start(self: TiLiveSession) -> None:
+        raise RuntimeError("boom-session-start")
+
+    monkeypatch.setattr(TiLiveSession, "start", failing_start)
+
+    with TestClient(create_app(runtime)) as client:
+        with pytest.raises(RuntimeError, match="boom-session-start"):
+            client.post("/api/runs/live", json={"capture": True})
+
+        assert len(recorders) == 1
+        assert recorders[0]._handle.closed
+
+        manager = client.app.state.runs  # type: ignore[attr-defined]
+        assert manager.live_run_ids() == []
+        assert manager.live_reservation() is None
+
+        status = client.get("/api/live/status").json()
+        assert status["reason"] is None
+        assert status["active_run_id"] is None
+
+        monkeypatch.setattr(TiLiveSession, "start", original_start)
+        retry = client.post("/api/runs/live", json={"capture": False})
+        assert retry.status_code == 201
 
 
 def test_replay_run_state_defaults_to_replay_mode(live_client: TestClient) -> None:
