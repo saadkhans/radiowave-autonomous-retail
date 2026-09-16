@@ -11,9 +11,12 @@ session; it delegates work to the helper agents in `.claude/agents/`.
 - Never create a new branch or a new PR — all work happens on the existing
   `claude/ti-mmwave-live-v0` branch. Never push to `dev` or `main`.
 - Confirm the current head (`git rev-parse HEAD`) matches the PR head before reading a review.
-- Read ONLY the latest Codex review on the current head. Do not reopen stale PR #1/#2 findings
-  unless the defect demonstrably exists in the Phase 3 head.
-- Maximum 5 review cycles per invocation. If after 5 cycles only low-value P3 hardening
+- Read ONLY the latest Codex review on the current head. Only findings raised against the
+  CURRENT head are active. A finding from an earlier commit that already has an owner reply
+  naming a fix and a regression test is superseded and must not be reopened unless the defect
+  is demonstrated to still exist in the working tree at the current head. Do not reopen stale
+  PR #1/#2 findings unless the defect demonstrably exists in the Phase 3 head.
+- Maximum 3 review cycles per invocation. If after 3 cycles only low-value P3 hardening
   remains, STOP and report for a human merge decision.
 - Never suppress a genuine secret finding. If `secret-scan-worker` reports a genuine secret, stop
   the loop immediately and report to the user instead of continuing.
@@ -32,6 +35,9 @@ session; it delegates work to the helper agents in `.claude/agents/`.
 2. **Read the latest Codex review only.**
    Confirm (via `gh pr view 3 --comments` or `gh api repos/{owner}/{repo}/pulls/3/reviews`) that a
    Codex review exists on the current head. If none exists, stop this loop and report — there is nothing to act on.
+   **Important:** a Codex P1 blocker may appear in the review SUBMISSION BODY itself, not only
+   as inline thread comments. Reading only inline comments can miss a critical blocker. Always
+   inspect both the review body and the inline threads.
 
 3. **Delegate to `codex-review-reader`.**
    Have it summarize the active findings from the latest Codex review only, in its structured
@@ -79,16 +85,28 @@ session; it delegates work to the helper agents in `.claude/agents/`.
 
 11. **Push** to `origin/claude/ti-mmwave-live-v0` only.
 
-12. **Comment on PR #3** with exactly this text (no additions, no paraphrasing):
+12. **Resolve threads for each fixed finding.**
+    For each active finding that was addressed by the fixes in step 6:
+    - Verify the exact defect is actually fixed in the pushed code.
+    - Verify a named regression test exists that locks the fix (step 7 output).
+    - Reply on that thread with the fixing commit SHA and the exact test name.
+    - Resolve ONLY that thread.
+    Note: a finding raised in the review SUBMISSION BODY may have no inline thread; answer it
+    with a PR comment instead.
+    Forbidden: mass-resolving threads, resolving without proving the fix, and resolving
+    unrelated historical comments. Each thread must have a specific reply proving the fix before
+    it is marked resolved.
+
+13. **Comment on PR #3** with exactly this text (no additions, no paraphrasing):
 
     ```
-    @codex review the latest commit. Please review Phase 3 as a real-sensor boundary. Focus on TI UART parser safety, timestamp and coordinate correctness, world-frame normalization, native-vs-canonical track identity, disconnect/reconnect behavior, bounded buffering, deterministic normalized capture/replay, Observatory live-state correctness, and regressions to Foundation/Observatory. Do not request RFID, raw ADC DSP, multi-radar fusion, production infrastructure, or other later-phase scope.
+    @codex review the latest commit. Please perform a comprehensive Phase-3 hardware-boundary review. Focus on TI parser ambiguity and packet bounds, firmware-profile validity, stream-generation identity, subframe-aware deduplication, monotonic-correlated UTC timestamps, atomic drain/clock behavior, reconnect recovery, exclusive live-run ownership, capture preservation, and LIVE-to-REPLAY transition safety. Please look for root-invariant violations rather than isolated stylistic issues. Do not request RFID, multi-radar fusion, raw ADC DSP, production infrastructure, or later-phase scope. Do not reopen superseded findings unless the defect still exists on the latest head.
     ```
 
     Then STOP and wait for that review before any speculative new work.
 
-13. **Repeat** from step 1 (when the next review arrives) until `codex-review-reader` reports no
-    active Phase 3 blockers in the latest review, or the 5-cycle cap is reached.
+14. **Repeat** from step 1 (when the next review arrives) until `codex-review-reader` reports no
+    active Phase 3 blockers in the latest review, or the 3-cycle cap is reached.
 
 ## Stopping conditions
 
@@ -98,3 +116,9 @@ session; it delegates work to the helper agents in `.claude/agents/`.
   finding, what was tried, and why it did not resolve, for human decision.
 - Any step's agent reports it cannot proceed (e.g. ambiguous finding, missing base ref): stop and
   report rather than guessing.
+- After the cycle cap is reached, if zero P1 findings remain, zero meaningful P2 findings, only
+  minor P3/nit hardening remains, CI is green (all checks pass: lint, typecheck, test, build,
+  security:secrets), and final-reviewer returns PASS: STOP and report that the PR is ready for
+  a human merge decision. The loop must never chase review perfection and must never merge.
+
+**Required before any push:** Full check sequence must pass (`pnpm run lint`, `pnpm run typecheck`, `pnpm run test`, `pnpm run build`, `pnpm run security:secrets`) and final-reviewer must return `VERDICT: PASS`.
