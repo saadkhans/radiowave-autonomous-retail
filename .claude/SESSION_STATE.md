@@ -42,49 +42,49 @@ from git and `gh`.
 
 ---
 
-## Current state — 2026-09-16
+## Current state — 2026-09-17
 
 **Phase 3 — TI IWR6843 mmWave live people tracking.**
-- Branch: `claude/ti-mmwave-live-v0` → PR **#3** into `dev`. Never merge.
-- Local HEAD == `origin/claude/ti-mmwave-live-v0` == `0a0aca7`. Working tree clean.
-  - `6455378` fix(mmwave): close the round-2 live-boundary gaps
-  - `0a0aca7` chore(claude): session state file + codex-loop tightening
-- Loop: `/codex-auto-loop` (`.claude/commands/codex-auto-loop.md`), **cycle 2 of 3 complete**.
+- Branch: `claude/ti-mmwave-live-v0` → PR **#3** into `dev`. **Never merge — owner's call.**
+- Local HEAD == `origin/claude/ti-mmwave-live-v0` == `80a88e6`. Working tree clean apart from
+  this file.
+- **The codex-auto-loop is FINISHED: all 3 cycles used.** Do not start a cycle 4 and do not post
+  another `@codex review` comment. The PR is waiting on a human merge decision.
 
-### Cycle 2 — done (2026-09-16)
-Codex review round 2 (review id `5197521431`, against `9677b53`) raised 7 findings (2 P1 +
-5 P2). All 7 fixed in `6455378`, each thread replied to with the fixing SHA + regression test
-names and resolved individually.
+### Codex rounds — all complete
+| Round | Head reviewed | Findings | Fixed in | Threads |
+|---|---|---|---|---|
+| 1 | `1ba1782` | 6 P1 + 9 P2 | `9677b53` | answered |
+| 2 | `9677b53` | 2 P1 + 5 P2 | `6455378` | replied + resolved individually |
+| 3 | `0a0aca7` | 4 P1 + 6 P2 | `80a88e6` | replied + resolved individually |
 
-| Codex finding | Where fixed |
-|---|---|
-| P1 target-height TLV 1012 record layout | `ti/parser.py` (`<B3xff`, 12-byte record), `ti/protocol.py`, `docs/hardware/ti-iwr6843-first-bringup.md` |
-| P1 live ownership released before teardown finished | `api/runs.py` (`_closing_live_run_id`), `api/routes/live.py` |
-| P2 TARGET_INDEX / TARGET_HEIGHT unbounded | `ti/parser.py` |
-| P2 reconnect/stop-triggered stream close counted as transport failure | `ti/session.py` |
-| P2 `session.start()` outside constructor cleanup | `api/live.py`, `ti/session.py` |
-| P2 no shared `PeopleTracker` boundary | `ti/session.py` (`observations()`), `adapters/mmwave/base.py` (`LivePeopleSource`) |
-| P2 active live run unrecoverable after browser reload | `store.tsx` (`adoptLiveRun`), `LiveControls.tsx` |
+23 findings total (8 P1, 15 P2). Gate on each push: all 5 checks + `final-reviewer` PASS.
+Final state: 620 tests (554 Python, 66 TS). PR body now carries architecture impact, tests,
+known limitations, deferred work and hardware assumptions (required by CLAUDE.md).
 
-Gate: all 5 checks PASS (598 tests); `final-reviewer` `VERDICT: PASS`. Its three non-blocking
-notes were fixed before push (stale test docstring, overclaiming `protocol.py` sentence, and a
-missing `ByteStreamError`-with-pending-request test — the new test was mutation-checked to
-confirm it fails without the guard).
+### Round 3 — what changed (all in `80a88e6`)
+Four P1s shared one shape: a failure the live path absorbed and ran past.
+- `api/live.py` `stop()` finalized although `session.stop()` returned False → run stays
+  unfinished; `api/runs.py` `delete()` keeps the slot; `_stuck_live_run_id` makes the permanent
+  case say "restart the process" instead of "try again shortly".
+- `api/live.py` recorder I/O error counted as a bad sample → `_AttributableRecorder` latches
+  (on `record` **and** `close`, since `JsonlRecorder` is buffered and a full disk usually
+  surfaces at close), run fails observably, live status reports ERROR.
+- `ti/session.py` raw-capture write shared the parser's except handler → `_write_capture()`
+  detaches once, `raw_capture_failed` in diagnostics + health. Opposite call to the recorder
+  above, deliberately.
+- `store.tsx` replay transition ignored an unbound server-side live run → `stopActiveLiveRun`
+  consults `serverLiveRunIdRef`, but ONLY on committing transitions; a dropdown selection
+  deliberately does not tear down another operator's session.
+P2s: side-info bound + count cross-check, packet-tail validation (rejects embedded magic word),
+firmware TLV-family enforcement, reconnect-request acknowledgement window, `max_attempts` at
+equality, `close_all` waiting for an in-flight `factory()`, and `firmware_profile_for` via
+`dataclasses.replace` (it had been silently dropping `tlv_family`).
 
-**Open deviation to watch:** Codex asked for a uint32 target-height id; we kept uint8 + 3
-skipped pad bytes and argued it on the thread. Round 3 may push back. Inert today
-(`TiTargetHeight.native_track_id` has no consumer); settle at hardware bring-up.
-
-**Deferred (own change):** extract a vendor-neutral diagnostics contract so
-`LivePeopleSource.diagnostics()` can be typed and `LiveObservatoryRun.session` annotated
-against the protocol — today that would drag `TiAdapterDiagnostics` into the neutral module.
-
-### Next step
-**Waiting on Codex round 3** (requested 2026-09-16, comment `5697400380`; reviews take ~12–16
-min). When it lands: read both the review body and the inline threads, and treat round-2
-findings already answered on `6455378` as superseded. This is the **last of the 3 cycles** — if
-only P3 hardening remains and CI is green, STOP and report the PR as ready for the owner's
-merge decision. Never merge.
+### If work resumes here
+The three open threads to pick up are all in the PR body's *Known limitations* / *Deferred
+work*: the target-height id width (settle at bring-up), the vendor-neutral diagnostics contract
+extraction, and the `2 * packet_alignment` tail bound. None blocks merge.
 
 ### Hardware status
 No TI board has ever been connected. Hardware acceptance NOT RUN. All measured fields in
