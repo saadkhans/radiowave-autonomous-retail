@@ -43,6 +43,8 @@ import numpy as np
 
 from radiowave.adapters.rfid.base import NativeRfidRead
 from radiowave.contracts.geometry import SensorCoordinate, WorldCoordinate
+from radiowave.contracts.store import SensorPose
+from radiowave.digital_twin.geometry import RigidTransform
 
 # A new, previously-unused per-modality seed offset, following the convention
 # established in radiowave/simulator/generators.py (_RADAR_SEED_OFFSET=101,
@@ -78,6 +80,10 @@ class RfidAntennaZoneConfig:
 
     sensor_id: str
     position: WorldCoordinate
+    pose: SensorPose | None = None
+    """The read point's full twin pose. Only required for
+    ``localization_enabled``: expressing a world-frame estimate in this
+    antenna's own frame needs the rotation, not just the position."""
     antenna_port: str = "1"
     """Vendor antenna/port label; metadata only, exactly as the real contract
     treats it -- never used as identity."""
@@ -161,6 +167,23 @@ class RfidReadNoiseConfig:
     ``estimate_sigma_m`` -- see ``_estimate_for``. Bleed reads never carry an
     estimate regardless of this flag: a read already admitted to be outside
     the antenna's plausible coverage should not also claim a location."""
+    localization_enabled: bool = False
+    """ASSUMPTION, and a deliberately separate mode from ``estimate_enabled``.
+
+    When true, a read carries a SIMULATED *tag localization* estimate: the item's
+    true position blurred by ``localization_sigma_m``. This is the class of
+    evidence Foundation's fusion is built around (its existing RFID observations
+    carry a ~0.5 m coarse coordinate), and it is what a real phase-based reader
+    deployment is expected to deliver -- Phase 5 owns actually building it.
+
+    It must never be read as measured accuracy, and the sigma must stay honest:
+    at rack scale a 0.5 m blur leaves genuine ambiguity between neighbouring
+    fixtures, which is the point. Shrinking it toward zero would hand fusion the
+    answer key and make every downstream metric meaningless.
+    """
+    localization_sigma_m: float = 0.5
+    """ASSUMPTION: 1-sigma of the simulated localization above, matching the
+    accuracy Foundation's own synthetic RFID generator already assumes."""
     estimate_sigma_m: float = 1.5
     """ASSUMPTION: honest (deliberately coarse) 1-sigma accuracy claimed for
     the SIMULATED estimate above; never claim finer accuracy than this."""
@@ -240,7 +263,10 @@ def _confidence(distance_m: float, antenna: RfidAntennaZoneConfig, *, bleed: boo
 
 
 def _estimate_for(
-    antenna: RfidAntennaZoneConfig, noise: RfidReadNoiseConfig
+    antenna: RfidAntennaZoneConfig,
+    noise: RfidReadNoiseConfig,
+    item_position: WorldCoordinate,
+    rng: np.random.Generator,
 ) -> tuple[SensorCoordinate | None, float | None]:
     """SIMULATED, coarse, explicitly opt-in only (``estimate_enabled``):
     approximates the item's location as *this antenna's own mounted
@@ -254,6 +280,24 @@ def _estimate_for(
     module can produce an honest "near this antenna" estimate without needing
     the transform itself.
     """
+    if noise.localization_enabled:
+        # Simulated localization: the item's TRUE position, blurred. Derived from the
+        # item rather than the antenna so neighbouring tags are distinguishable at all
+        # -- an antenna-position estimate makes ten items on one rack identical, which
+        # no amount of fusion can unpick. The blur is what keeps it evidence rather
+        # than an answer key.
+        if antenna.pose is None:
+            msg = f"antenna {antenna.sensor_id} needs a pose for localization_enabled"
+            raise ValueError(msg)
+        sigma = noise.localization_sigma_m
+        dx, dy, dz = rng.normal(0.0, sigma, size=3)
+        blurred = WorldCoordinate(
+            x=item_position.x + float(dx),
+            y=item_position.y + float(dy),
+            z=max(0.0, item_position.z + float(dz)),
+        )
+        transform = RigidTransform.from_pose(antenna.sensor_id, antenna.pose)
+        return transform.to_sensor(blurred), sigma
     if not noise.estimate_enabled:
         return None, None
     return SensorCoordinate(x=0.0, y=0.0, z=0.0, frame_id=antenna.sensor_id), noise.estimate_sigma_m
@@ -430,7 +474,9 @@ class RfidReaderEmulator:
         rng = self._rng
         sequence = self._sequence[antenna.sensor_id]
         self._sequence[antenna.sensor_id] = sequence + 1
-        estimate, estimate_sigma_m = (None, None) if bleed else _estimate_for(antenna, noise)
+        estimate, estimate_sigma_m = (
+            (None, None) if bleed else _estimate_for(antenna, noise, item.position, self._rng)
+        )
         return NativeRfidRead(
             sensor_id=antenna.sensor_id,
             sequence=sequence,
