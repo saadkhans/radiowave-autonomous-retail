@@ -12,7 +12,7 @@ import logging
 import math
 from collections.abc import Callable
 from datetime import datetime, timedelta
-from threading import Lock, RLock
+from threading import Condition, Lock, RLock
 
 from radiowave.api.viewmodels import (
     ObservatoryBoundary,
@@ -826,6 +826,10 @@ def _transition_label(from_state: ItemState, to_state: ItemState) -> str:
     return f"ITEM_{to_state.value}"
 
 
+_SHUTDOWN_SETTLE_TIMEOUT_S = 10.0
+"""How long ``close_all`` waits for an in-flight LIVE admission to settle."""
+
+
 class RunManager:
     """Owns all in-process runs. Run ids are sequential so tests stay deterministic."""
 
@@ -851,6 +855,18 @@ class RunManager:
         # teardown window (invariant 15) even though the run is no longer
         # discoverable via ``get``/``ids``. See ``delete``.
         self._closing_live_run_id: str | None = None
+        # Set when a deleted LIVE run's teardown could NOT free the sensor (its reader
+        # thread never exited). Unlike ``_closing_live_run_id`` this never clears: it
+        # marks the slot as permanently held so the operator is told to restart rather
+        # than to retry. See ``delete``.
+        self._stuck_live_run_id: str | None = None
+        # Signalled whenever ``_live_reservation`` is released. ``close_all`` waits on
+        # it so shutdown cannot return while an admission is still inside
+        # ``factory(run_id)`` — at that point ``_live_constructing`` is still None even
+        # though the constructor may already have started its sensor thread, so
+        # shutdown would otherwise promise "no reader thread survives" while one was
+        # being created behind its back (invariant 16).
+        self._reservation_settled = Condition(self._lock)
         # Set by ``close_all()``; once true no new LIVE admission may start, and any
         # admission already past that point must close its run instead of publishing.
         self._closed = False
@@ -925,7 +941,24 @@ class RunManager:
                 raise LiveRunBusyError(msg)
             active = self._active_live_run_id_locked()
             if active is not None:
-                msg = f"live run {active} is already using the sensor; stop it first"
+                if active == self._closing_live_run_id:
+                    # Deleted, but its teardown has not released the sensor. If the
+                    # reader thread refused to exit, the slot is held deliberately and
+                    # for good (see ``delete``) -- telling the operator to "try again
+                    # shortly" would be a lie, since retrying can never succeed.
+                    if self._stuck_live_run_id == active:
+                        msg = (
+                            f"live run {active} could not release the sensor; its "
+                            "reader thread did not exit, so the sensor stays reserved "
+                            "until the API process is restarted"
+                        )
+                    else:
+                        msg = (
+                            f"live run {active} is still releasing the sensor; "
+                            "try again shortly"
+                        )
+                else:
+                    msg = f"live run {active} is already using the sensor; stop it first"
                 raise LiveRunBusyError(msg)
             if self._live_reservation is not None:
                 msg = "a live run is starting; try again shortly"
@@ -941,6 +974,10 @@ class RunManager:
             # must still be able to stop it.
             with self._lock:
                 self._live_constructing = run
+                # Wakes a ``close_all`` waiting for exactly this: the factory has
+                # returned, so the run (and any sensor thread it started) is now
+                # reachable from shutdown.
+                self._reservation_settled.notify_all()
             snapshot = run.snapshot()  # captured before anyone can see the run
         except BaseException:
             if run is not None:
@@ -951,24 +988,32 @@ class RunManager:
             with self._lock:
                 self._live_reservation = None
                 self._live_constructing = None
+                self._reservation_settled.notify_all()
             raise
         with self._lock:
             if self._closed:
                 # Shutdown happened while the snapshot was in flight: never publish a
                 # run after the manager has promised no reader thread survives it.
-                self._live_reservation = None
-                self._live_constructing = None
+                # The reservation is deliberately still held here and released only
+                # after ``run.close()`` below, so a ``close_all`` waiting on it cannot
+                # return while this run's reader thread is still being torn down.
                 shutting_down = True
             else:
                 self._runs[run_id] = run  # published only now
                 self._live_reservation = None
                 self._live_constructing = None
+                self._reservation_settled.notify_all()
                 shutting_down = False
         if shutting_down:
             try:
                 run.close()
             except Exception:
                 log.exception("failed to release live run %s after manager shutdown", run_id)
+            finally:
+                with self._lock:
+                    self._live_reservation = None
+                    self._live_constructing = None
+                    self._reservation_settled.notify_all()
             msg = "manager is shutting down"
             raise LiveRunBusyError(msg)
         return run, snapshot
@@ -1043,7 +1088,25 @@ class RunManager:
         finally:
             if closing:
                 with self._lock:
-                    self._closing_live_run_id = None
+                    # Release the slot only if the run actually finished. A LIVE run
+                    # whose ``stop()`` could not join its reader thread leaves
+                    # ``finished`` False on purpose: that thread may still be holding
+                    # the UART and enqueueing, so the slot stays held rather than
+                    # letting a second session open the same port. The run is already
+                    # out of ``_runs``, so this is the only thing still standing
+                    # between a stuck reader and a duplicate session; it is a
+                    # deliberate fail-closed, and it means the sensor stays
+                    # unavailable until the process is restarted. Preferring that to
+                    # two readers on one UART is the whole point of invariant 15.
+                    if run.finished:
+                        self._closing_live_run_id = None
+                    else:
+                        self._stuck_live_run_id = run_id
+                        log.error(
+                            "live run %s did not finish stopping; keeping the sensor "
+                            "reserved rather than admitting another session",
+                            run_id,
+                        )
         return True
 
     def close_all(self) -> None:
@@ -1056,6 +1119,26 @@ class RunManager:
         """
         with self._lock:
             self._closed = True
+            # The blind spot is an admission still INSIDE ``factory(run_id)``: it
+            # holds a reservation, ``_live_constructing`` is not set yet, and its
+            # constructor may already have started a sensor thread — so shutdown would
+            # return promising no reader thread survives while one was being created
+            # behind its back. Wait only for that window to close. Once
+            # ``_live_constructing`` is set the run is reachable from here and the
+            # existing path handles it, so waiting further (e.g. on an in-flight
+            # ``snapshot()``) would be pointless and could stall shutdown. Bounded,
+            # because a wedged constructor must not hang process shutdown for ever; if
+            # it expires we carry on and say so rather than blocking.
+            if not self._reservation_settled.wait_for(
+                lambda: self._live_reservation is None or self._live_constructing is not None,
+                timeout=_SHUTDOWN_SETTLE_TIMEOUT_S,
+            ):
+                log.error(
+                    "live admission %s did not settle within %.0fs; shutting down "
+                    "without it",
+                    self._live_reservation,
+                    _SHUTDOWN_SETTLE_TIMEOUT_S,
+                )
             runs = list(self._runs.values())
             self._runs.clear()
             constructing = self._live_constructing

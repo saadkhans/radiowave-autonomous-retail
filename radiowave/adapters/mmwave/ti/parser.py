@@ -25,6 +25,7 @@ from radiowave.adapters.mmwave.ti.protocol import (
     TiFirmwareProfile,
     TiTlvType,
     target_record_layout_by_name,
+    tlv_type_in_family,
 )
 
 
@@ -42,6 +43,8 @@ class TiFrameRejectReason(StrEnum):
     NON_FINITE_VALUE = "NON_FINITE_VALUE"
     BAD_PACKET_ALIGNMENT = "BAD_PACKET_ALIGNMENT"
     DUPLICATE_TLV = "DUPLICATE_TLV"
+    BAD_PACKET_PADDING = "BAD_PACKET_PADDING"
+    TLV_NOT_IN_PROFILE = "TLV_NOT_IN_PROFILE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,6 +314,19 @@ def _parse_packet(
             if tlv_type in seen:
                 raise _FrameRejectedError(TiFrameRejectReason.DUPLICATE_TLV)
             seen.add(tlv_type)
+            # A known TLV type that does not belong to the configured firmware
+            # profile's TLV family means the wrong firmware image is flashed for
+            # the selected profile — e.g. an OOB-flashed sensor configured as
+            # ti-3d-people-counting emits type-1 DETECTED_POINTS, which that
+            # profile's layout never expects. Left unchecked this "successfully"
+            # decodes into an empty/irrelevant frame field, so the session looks
+            # healthy while producing nothing. Unknown types are not in
+            # _DECODED_TLV_TYPES at all and are unaffected — they keep their
+            # existing tolerated (listed-only, never decoded) behaviour.
+            if profile.tlv_family is not None and not tlv_type_in_family(
+                tlv_type, profile.tlv_family
+            ):
+                raise _FrameRejectedError(TiFrameRejectReason.TLV_NOT_IN_PROFILE)
 
         if tlv_type == TiTlvType.DETECTED_POINTS:
             if length % _DETECTED_POINT_STRUCT.size != 0:
@@ -319,6 +335,15 @@ def _parse_packet(
         elif tlv_type == TiTlvType.DETECTED_POINTS_SIDE_INFO:
             if length % _SIDE_INFO_STRUCT.size != 0:
                 raise _FrameRejectedError(TiFrameRejectReason.BAD_TLV_LENGTH)
+            # Bound the record count here, before _decode_oob_points ever
+            # materializes a Python list from this payload. The 4-byte
+            # divisibility check above says nothing about how many records that
+            # is: a packet can declare a single detected point (or none at all)
+            # while its side-info payload carries thousands of records, which
+            # would otherwise bypass limits.max_points entirely until the whole
+            # oversized list has already been built.
+            if length // _SIDE_INFO_STRUCT.size > limits.max_points:
+                raise _FrameRejectedError(TiFrameRejectReason.TOO_MANY_POINTS)
             pending_side_info = payload
         elif tlv_type == TiTlvType.TARGET_LIST_3D:
             layout = _select_target_layout(length, profile)
@@ -358,6 +383,43 @@ def _parse_packet(
             unknown_tlvs.append((tlv_type, length))
 
         offset += length
+
+    # TLV order within a packet is not guaranteed, so DETECTED_POINTS_SIDE_INFO can
+    # arrive before or after DETECTED_POINTS: this cross-check can only run here,
+    # once both counts are known, not inline in the loop above where one of the two
+    # may still be unseen. A mismatch between the two counts means the packet is
+    # corrupt — one array being shorter or longer than the other is not a case
+    # where either one is "authoritative" and the other ignorable.
+    if pending_detected_points is not None and pending_side_info is not None:
+        detected_count = len(pending_detected_points) // _DETECTED_POINT_STRUCT.size
+        side_info_count = len(pending_side_info) // _SIDE_INFO_STRUCT.size
+        if detected_count != side_info_count:
+            raise _FrameRejectedError(TiFrameRejectReason.BAD_TLV_LENGTH)
+
+    # A corrupted total_packet_len that still passes every per-TLV bound check above
+    # (offsets, lengths, alignment) can extend past the declared TLVs into bytes that
+    # are not padding at all — most dangerously, the next packet's magic word and
+    # header. Unvalidated, that both reports a damaged frame as successfully parsed
+    # AND silently consumes (and thus drops) the start of the next valid frame from
+    # the buffer. Validate the tail before accepting it as padding, not after.
+    tail = packet[offset:total_packet_len]
+    # A legitimate alignment tail can never contain the frame magic word; its
+    # presence anywhere in the tail is conclusive proof this is the next frame's
+    # start being swallowed, not filler bytes.
+    if MAGIC_WORD in tail:
+        raise _FrameRejectedError(TiFrameRejectReason.BAD_PACKET_PADDING)
+    if profile.packet_alignment > 1:
+        # Padding exists only to round total_packet_len up to the profile's
+        # alignment, so it is bounded by that alignment — except when the
+        # unpadded body length is already itself aligned, in which case the
+        # smallest possible *nonzero* padding is one full alignment unit (this
+        # happens legitimately, e.g. when a producer pads to a coarser multiple
+        # than the protocol strictly requires). Two or more full alignment units
+        # of trailing bytes is implausible for any legitimate rounding and is
+        # exactly the size of corruption this check exists to catch.
+        max_plausible_tail = 2 * profile.packet_alignment
+        if len(tail) >= max_plausible_tail:
+            raise _FrameRejectedError(TiFrameRejectReason.BAD_PACKET_PADDING)
 
     oob_points: tuple[TiPointCloudPoint, ...] = ()
     if pending_detected_points is not None:

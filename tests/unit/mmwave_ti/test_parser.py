@@ -13,6 +13,8 @@ from radiowave.adapters.mmwave.ti.parser import (
     TiParserLimits,
 )
 from radiowave.adapters.mmwave.ti.protocol import (
+    FRAME_HEADER_BYTES,
+    MAGIC_WORD,
     TI_3D_PEOPLE_COUNTING,
     TI_OOB_SDK3,
     TiFirmwareProfile,
@@ -475,6 +477,17 @@ def test_misaligned_total_packet_len_is_rejected_and_next_frame_still_parses() -
     assert parser.stats.reject_reasons[TiFrameRejectReason.BAD_PACKET_ALIGNMENT.value] >= 1
 
 
+# POINT_CLOUD_3D (people-counting family) and DETECTED_POINTS (OOB family) never
+# appear together in one real packet once TiFrameRejectReason.TLV_NOT_IN_PROFILE
+# is enforced (see the TLV-family tests further down) — no shipped profile permits
+# both. The two tests below only exercise the *combined-bound arithmetic* itself
+# (points from two different TLVs summing past the limit together), which is a
+# property of the parser's bookkeeping independent of firmware-family policy, so
+# they deliberately use an ad-hoc profile with no family restriction
+# (``tlv_family=None``) rather than either named real-world profile.
+_UNRESTRICTED_FAMILY_TEST_PROFILE = TiFirmwareProfile(name="test-any-family")
+
+
 def test_combined_cloud_and_oob_points_over_limit_is_rejected() -> None:
     """Invariant: parser bounds apply to the final combined outputs, not individual
     TLVs only — 5 + 5 each fit ``max_points`` alone but not together."""
@@ -485,7 +498,7 @@ def test_combined_cloud_and_oob_points_over_limit_is_rejected() -> None:
     )
     oob_tlv = build_tlv(TiTlvType.DETECTED_POINTS, struct.pack("<4f", 1.0, 1.0, 0.0, 0.0) * 5)
     frame_bytes = build_frame(frame_number=1, tlvs=[cloud_tlv, oob_tlv])
-    parser = TiFrameParser(limits=limits)
+    parser = TiFrameParser(profile=_UNRESTRICTED_FAMILY_TEST_PROFILE, limits=limits)
 
     frames = parser.feed(frame_bytes)
 
@@ -501,7 +514,7 @@ def test_combined_cloud_and_oob_points_at_limit_is_accepted() -> None:
     )
     oob_tlv = build_tlv(TiTlvType.DETECTED_POINTS, struct.pack("<4f", 1.0, 1.0, 0.0, 0.0) * 4)
     frame_bytes = build_frame(frame_number=1, tlvs=[cloud_tlv, oob_tlv])
-    parser = TiFrameParser(limits=limits)
+    parser = TiFrameParser(profile=_UNRESTRICTED_FAMILY_TEST_PROFILE, limits=limits)
 
     frames = parser.feed(frame_bytes)
 
@@ -753,3 +766,191 @@ def test_next_valid_frame_after_a_duplicate_tlv_packet_is_parsed() -> None:
 
     assert [f.frame_number for f in frames] == [61]
     assert parser.stats.reject_reasons[TiFrameRejectReason.DUPLICATE_TLV.value] == 1
+
+
+# --- side-info record bound + cross-check (P2 fix 1) -------------------------------
+
+
+def test_side_info_record_count_over_max_points_is_rejected() -> None:
+    """A side-info payload's record count must be bounded before it is ever
+    materialized into a list — a small (or absent) DETECTED_POINTS TLV alongside
+    a thousands-strong side-info TLV must not bypass max_points."""
+    limits = TiParserLimits(max_points=4)
+    side_info_payload = struct.pack("<2h", 0, 0) * 5  # 5 records > max_points=4
+    tlv = build_tlv(TiTlvType.DETECTED_POINTS_SIDE_INFO, side_info_payload)
+    frame_bytes = build_frame(frame_number=1, tlvs=[tlv])
+    parser = TiFrameParser(profile=TI_OOB_SDK3, limits=limits)
+
+    frames = parser.feed(frame_bytes)
+
+    assert frames == []
+    assert parser.stats.reject_reasons[TiFrameRejectReason.TOO_MANY_POINTS.value] == 1
+
+
+def test_side_info_record_count_at_max_points_is_accepted() -> None:
+    limits = TiParserLimits(max_points=4)
+    detected_payload = struct.pack("<4f", 1.0, 1.0, 0.0, 0.0) * 4
+    side_info_payload = struct.pack("<2h", 50, 5) * 4
+    detected_tlv = build_tlv(TiTlvType.DETECTED_POINTS, detected_payload)
+    side_info_tlv = build_tlv(TiTlvType.DETECTED_POINTS_SIDE_INFO, side_info_payload)
+    frame_bytes = build_frame(frame_number=1, tlvs=[detected_tlv, side_info_tlv])
+    parser = TiFrameParser(profile=TI_OOB_SDK3, limits=limits)
+
+    frames = parser.feed(frame_bytes)
+
+    assert len(frames) == 1
+    assert len(frames[0].points) == 4
+    assert frames[0].points[0].snr == pytest.approx(5.0)
+
+
+def test_mismatched_side_info_and_detected_point_counts_is_rejected() -> None:
+    """Invariant: when both TLVs are present, a record-count mismatch means the
+    packet is corrupt — neither array is "authoritative" over the other."""
+    detected_payload = struct.pack("<4f", 1.0, 1.0, 0.0, 0.0) * 2
+    side_info_payload = struct.pack("<2h", 0, 0) * 3
+    detected_tlv = build_tlv(TiTlvType.DETECTED_POINTS, detected_payload)
+    side_info_tlv = build_tlv(TiTlvType.DETECTED_POINTS_SIDE_INFO, side_info_payload)
+    frame_bytes = build_frame(frame_number=1, tlvs=[detected_tlv, side_info_tlv])
+    parser = TiFrameParser(profile=TI_OOB_SDK3)
+
+    frames = parser.feed(frame_bytes)
+
+    assert frames == []
+    assert parser.stats.reject_reasons[TiFrameRejectReason.BAD_TLV_LENGTH.value] == 1
+
+
+def test_parser_recovers_after_an_oversized_side_info_tlv() -> None:
+    limits = TiParserLimits(max_points=4)
+    oversized_side_info_tlv = build_tlv(
+        TiTlvType.DETECTED_POINTS_SIDE_INFO, struct.pack("<2h", 0, 0) * 5
+    )
+    bad_frame = build_frame(frame_number=120, tlvs=[oversized_side_info_tlv])
+    good_frame = build_frame(
+        frame_number=121,
+        tlvs=[build_tlv(TiTlvType.DETECTED_POINTS, struct.pack("<4f", 1.0, 1.0, 0.0, 0.0))],
+    )
+    parser = TiFrameParser(profile=TI_OOB_SDK3, limits=limits)
+
+    frames = parser.feed(bad_frame + good_frame)
+
+    assert [f.frame_number for f in frames] == [121]
+    assert parser.stats.reject_reasons[TiFrameRejectReason.TOO_MANY_POINTS.value] == 1
+
+
+# --- packet tail / padding validation (P2 fix 2) ------------------------------------
+
+
+def test_packet_tail_containing_embedded_magic_word_is_rejected_and_next_frame_recovers() -> None:
+    """Regression: a corrupted total_packet_len whose tail swallows the next
+    packet's magic word must not be accepted as ordinary padding — proving the
+    actual data-loss defect requires showing the following genuinely valid frame
+    is still recovered from the buffer afterwards, not merely that this one is
+    rejected."""
+    tlv = build_tlv(TiTlvType.PRESENCE_INDICATION, struct.pack("<I", 1))
+    body_len = FRAME_HEADER_BYTES + len(tlv)
+    tail = MAGIC_WORD + b"\x00" * 4  # embeds a full magic word inside the "padding"
+    declared_total_len = body_len + len(tail)
+    assert declared_total_len % TI_3D_PEOPLE_COUNTING.packet_alignment == 0
+    frame_a = (
+        build_frame(frame_number=100, tlvs=[tlv], total_len_override=declared_total_len, pad_to=0)
+        + tail
+    )
+    good_frame = build_target_frame(frame_number=101, targets=[{"tid": 1}])
+    parser = TiFrameParser()
+
+    frames = parser.feed(frame_a + good_frame)
+
+    assert [f.frame_number for f in frames] == [101]
+    assert parser.stats.reject_reasons[TiFrameRejectReason.BAD_PACKET_PADDING.value] >= 1
+
+
+def test_over_long_packet_tail_is_rejected() -> None:
+    """A tail far larger than any plausible alignment padding is corruption, not
+    filler, and must be rejected even with no embedded magic word inside it."""
+    tlv = build_tlv(TiTlvType.PRESENCE_INDICATION, struct.pack("<I", 1))
+    body_len = FRAME_HEADER_BYTES + len(tlv)  # 52
+    tail_len = 76  # >= 2 * packet_alignment (64): implausibly long for real padding
+    declared_total_len = body_len + tail_len
+    assert declared_total_len % TI_3D_PEOPLE_COUNTING.packet_alignment == 0
+    frame_bytes = (
+        build_frame(frame_number=1, tlvs=[tlv], total_len_override=declared_total_len, pad_to=0)
+        + b"\x00" * tail_len
+    )
+    parser = TiFrameParser()
+
+    frames = parser.feed(frame_bytes)
+
+    assert frames == []
+    assert parser.stats.reject_reasons[TiFrameRejectReason.BAD_PACKET_PADDING.value] == 1
+
+
+def test_small_alignment_padding_tail_still_parses() -> None:
+    """Ordinary alignment-rounding padding, well under the corruption-sized bound
+    introduced above, is legitimate and must still parse."""
+    tlv = build_tlv(TiTlvType.PRESENCE_INDICATION, struct.pack("<I", 1))
+    frame_bytes = build_frame(frame_number=1, tlvs=[tlv])
+    parser = TiFrameParser()
+
+    frames = parser.feed(frame_bytes)
+
+    assert len(frames) == 1
+    assert frames[0].padding_bytes == 12
+    assert frames[0].presence == 1
+
+
+# --- TLV-type / firmware-profile family enforcement (P2 fix 3) ---------------------
+
+
+def test_oob_detected_points_tlv_under_people_counting_profile_is_rejected() -> None:
+    """Regression: an OOB-flashed sensor configured with the people-counting
+    profile decodes type-1 DETECTED_POINTS as if it belonged, leaving
+    frame.targets empty with no observation ever emitted while the session still
+    reports healthy parsed frames. This must surface as a firmware/configuration
+    error instead."""
+    payload = struct.pack("<4f", 1.0, 2.0, 0.0, 0.5)
+    tlv = build_tlv(TiTlvType.DETECTED_POINTS, payload)
+    frame_bytes = build_frame(frame_number=1, tlvs=[tlv])
+    parser = TiFrameParser(profile=TI_3D_PEOPLE_COUNTING)
+
+    frames = parser.feed(frame_bytes)
+
+    assert frames == []
+    assert parser.stats.reject_reasons[TiFrameRejectReason.TLV_NOT_IN_PROFILE.value] == 1
+
+
+def test_oob_detected_points_tlv_under_oob_profile_still_parses() -> None:
+    """The same TLV type is exactly the OOB profile's own vocabulary and must
+    keep parsing normally under it."""
+    payload = struct.pack("<4f", 1.0, 2.0, 0.0, 0.5)
+    tlv = build_tlv(TiTlvType.DETECTED_POINTS, payload)
+    frame_bytes = build_frame(frame_number=1, tlvs=[tlv])
+    parser = TiFrameParser(profile=TI_OOB_SDK3)
+
+    frames = parser.feed(frame_bytes)
+
+    assert len(frames) == 1
+    assert len(frames[0].points) == 1
+
+
+def test_unknown_tlv_type_is_tolerated_under_people_counting_profile() -> None:
+    """The family check must never reach genuinely unrecognized TLV types — they
+    keep their existing tolerated (listed-only, never decoded) behaviour."""
+    unknown_tlv = build_tlv(9999, b"\x01\x02\x03\x04")
+    frame_bytes = build_frame(frame_number=1, tlvs=[unknown_tlv])
+    parser = TiFrameParser(profile=TI_3D_PEOPLE_COUNTING)
+
+    frames = parser.feed(frame_bytes)
+
+    assert len(frames) == 1
+    assert frames[0].unknown_tlvs == ((9999, 4),)
+
+
+def test_unknown_tlv_type_is_tolerated_under_oob_profile() -> None:
+    unknown_tlv = build_tlv(9999, b"\x01\x02\x03\x04")
+    frame_bytes = build_frame(frame_number=1, tlvs=[unknown_tlv])
+    parser = TiFrameParser(profile=TI_OOB_SDK3)
+
+    frames = parser.feed(frame_bytes)
+
+    assert len(frames) == 1
+    assert frames[0].unknown_tlvs == ((9999, 4),)

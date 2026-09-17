@@ -49,12 +49,13 @@ def firmware_profile_for(config: TiAdapterConfig) -> TiFirmwareProfile:
     base = TI_OOB_SDK3 if config.firmware_profile == "ti-oob-sdk3" else TI_3D_PEOPLE_COUNTING
     if config.target_record_layout is None:
         return base
-    return TiFirmwareProfile(
-        name=base.name,
-        target_record_layout=config.target_record_layout,
-        tlv_length_includes_header=base.tlv_length_includes_header,
-        packet_alignment=base.packet_alignment,
-    )
+    # ``replace`` rather than rebuilding field by field: pinning the record layout must
+    # override exactly that one field and inherit everything else. A hand-written
+    # constructor silently drops any field added to TiFirmwareProfile later — which is
+    # precisely what happened to ``tlv_family``, disabling the wrong-firmware TLV check
+    # for every config that pins a layout, i.e. the configuration the bring-up guide
+    # tells operators to use.
+    return replace(base, target_record_layout=config.target_record_layout)
 
 
 def parser_limits_for(config: TiAdapterConfig) -> TiParserLimits:
@@ -193,6 +194,9 @@ class TiLiveSession:
                 return
             self._stopped = False
             self._stop.clear()
+            # A request left over from a previous run (set on a reader that stop()
+            # then ended) must not make this session's first connection drop itself.
+            self._reconnect_requested.clear()
             raw = self._adapter_config.raw_capture
             opened_capture = False
             if raw.path is not None and self._capture is None:
@@ -466,11 +470,23 @@ class TiLiveSession:
             self._parser.reset()
             self._frame_rate.reset()
             self._observation_rate.reset()
-            self._reconnect_requested.clear()
             self._connection_had_frame = False
             self._set_state(TiStreamState.CONNECTING, "waiting for the first frame")
             reason, had_healthy_frame = self._read_until_failure(stream)
             self._close_stream()
+            # Acknowledge a reconnect request only HERE, once the reader has actually
+            # observed it and dropped the connection. Clearing it during connection
+            # setup instead (where it used to be) erased any request that arrived
+            # after ``self._stream = stream`` was assigned: ``request_reconnect``
+            # would set the flag and close this very stream, the clear would erase the
+            # evidence, and the resulting close would then be misread as a spontaneous
+            # transport failure — ERROR when reconnect is disabled, wasted retry budget
+            # and backoff when it is enabled.
+            #
+            # A request arriving after this clear but before the next connection's
+            # first read keeps the flag set and costs one extra reconnect. That is the
+            # safe direction to err: a request is honoured late, never dropped.
+            self._reconnect_requested.clear()
             if self._stop.is_set():
                 return
             if had_healthy_frame:
@@ -494,9 +510,13 @@ class TiLiveSession:
         if not policy.enabled:
             self._set_state(TiStreamState.ERROR, f"{reason} (reconnect disabled)")
             return False
-        if failures > policy.max_attempts:
+        # ``max_attempts`` is "consecutive failed attempts before giving up", so the
+        # budget is spent once ``failures`` REACHES it. Using ``>`` ran one attempt
+        # past the operator's cap — with ``max_attempts=1`` the session opened the port
+        # a second time and only then reported giving up "after 1 attempts".
+        if failures >= policy.max_attempts:
             self._set_state(
-                TiStreamState.ERROR, f"{reason} (gave up after {policy.max_attempts} attempts)"
+                TiStreamState.ERROR, f"{reason} (gave up after {failures} attempts)"
             )
             return False
         self._set_state(TiStreamState.DISCONNECTED, f"{reason}; retry {failures}")
@@ -544,10 +564,44 @@ class TiLiveSession:
             self._handle_bytes(data)
         return None, self._connection_had_frame
 
-    def _handle_bytes(self, data: bytes) -> None:
+    def _write_capture(self, data: bytes) -> None:
+        """Append to the optional raw capture; detach it permanently if it fails.
+
+        Losing the capture must never cost us the sensor, so a write failure (a full
+        disk, a removed volume) disables the capture for the rest of the session
+        rather than being retried on every chunk. It is recorded in diagnostics
+        (``raw_capture_failed``) because the file left behind is truncated and must
+        not be mistaken for a complete recording. Detaching is deliberately
+        irreversible for this run: re-enabling mid-stream would produce a capture with
+        a silent hole in it, which is worse for parser forensics than a capture that
+        stops at a known point.
+        """
+        capture = self._capture
+        if capture is None:
+            return
         try:
-            if self._capture is not None:
-                self._capture.write(data)
+            capture.write(data)
+        except Exception as exc:
+            log.exception("raw capture failed for %s; detaching it", self.sensor_id)
+            self._capture = None
+            try:
+                capture.close()
+            except Exception:
+                # Already failing; a close error here must not escalate into the
+                # reader loop, which is still healthy and must keep parsing.
+                log.exception("failed to close the raw capture for %s", self.sensor_id)
+            with self._lock:
+                self._diagnostics.raw_capture_failed = str(exc) or exc.__class__.__name__
+
+    def _handle_bytes(self, data: bytes) -> None:
+        # The raw capture is written OUTSIDE the parser's try: it is an optional
+        # diagnostic side channel, and a failure in it must never be handled as a
+        # parser failure. Sharing one handler meant a full disk raised before
+        # ``feed()`` ran, reset the parser and returned — and since the capture stayed
+        # enabled, every later chunk took the same path, so live observations stopped
+        # indefinitely while the UART was perfectly healthy.
+        self._write_capture(data)
+        try:
             frames = self._parser.feed(data)
         except Exception:  # parser bugs are counted, never fatal
             log.exception("parser failure on %s; resetting parser", self.sensor_id)

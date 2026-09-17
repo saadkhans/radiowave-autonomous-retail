@@ -327,4 +327,50 @@ describe("LIVE mode", () => {
 
     expect(screen.queryByRole("button", { name: /Resume live run/i })).not.toBeInTheDocument();
   });
+
+  it("invariant 18: starting a replay stops a server-side live run this client is not bound to", async () => {
+    // A LIVE run the server still owns from before a page reload: `state.run` is
+    // null here, so the stop-first rule used to find nothing to stop and the
+    // operator could walk away into REPLAY leaving the sensor being read (and its
+    // capture written) unattended.
+    await api.createLiveRun(false);
+
+    render(<App />);
+    await screen.findByRole("button", { name: /Resume live run live-0001/ });
+
+    const option = await screen.findByRole("option", { name: /one shopper picks one item/ });
+    fireEvent.click(option);
+    fireEvent.click(await screen.findByRole("button", { name: /Run scenario 01/ }));
+
+    await waitFor(() => expect(fake.calls).toContain("POST /api/runs/live-0001/stop"));
+    await waitFor(() => expect(screen.getByTestId("mode-badge")).toHaveTextContent("REPLAY"));
+  });
+
+  it("invariant 18: merely selecting a scenario does not stop another client's live run", async () => {
+    // Picking a scenario in the dropdown is browsing, not committing to leave LIVE.
+    // Only the actual replay transition (Run scenario) releases the sensor, so a
+    // second operator's dropdown cannot tear down a running hardware session.
+    await api.createLiveRun(false);
+
+    render(<App />);
+    await screen.findByRole("button", { name: /Resume live run live-0001/ });
+
+    fireEvent.click(await screen.findByRole("option", { name: /one shopper picks one item/ }));
+    await screen.findByRole("button", { name: /Run scenario 01/ });
+
+    expect(fake.calls).not.toContain("POST /api/runs/live-0001/stop");
+  });
+
+  it("invariant 18: adopting a live run does not stop the very run being adopted", async () => {
+    // The stop-first rule must not fire for the run the caller is about to bind to:
+    // `adoptLiveRun` passes it as the exception, otherwise resuming a run would tear
+    // it down on the way in.
+    await api.createLiveRun(false);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /Resume live run live-0001/ }));
+
+    await waitFor(() => expect(screen.getByTestId("mode-badge")).toHaveTextContent("LIVE"));
+    expect(fake.calls).not.toContain("POST /api/runs/live-0001/stop");
+  });
 });

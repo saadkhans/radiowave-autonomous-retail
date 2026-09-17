@@ -368,8 +368,8 @@ def test_observation_and_pipeline_clock_are_the_same_ordered_clock() -> None:
 def test_a_healthy_connection_resets_the_consecutive_failure_budget() -> None:
     """Invariant 10 / C1: a successful sensor connection resets consecutive retry
     failures. Two failed opens, then a connection that emits a valid frame before
-    dropping, must report the *next* outage as retry 1 (not 3) and must not exhaust a
-    ``max_attempts=2`` budget that the pre-health failures would otherwise have used up.
+    dropping, must report the *next* outage as retry 1 (not 3) and must not exhaust the
+    ``max_attempts=3`` budget that the pre-health failures would otherwise have used up.
     """
     healthy_stream = MemoryByteStream(frames(1))  # emits one frame, then raises closed
     attempts = 0
@@ -395,7 +395,15 @@ def test_a_healthy_connection_resets_the_consecutive_failure_budget() -> None:
     timing = replace(fake.timing(), wait=wait)
     config = live_config(
         reconnect=TiReconnectPolicy(
-            enabled=True, initial_delay_s=0.001, max_delay_s=0.001, max_attempts=2
+            # Two opens fail before the healthy one, and ``max_attempts`` is the number
+            # of consecutive failures that exhausts the budget, so the cap must exceed
+            # those two for this test to reach the healthy connection at all. (This
+            # read 2 while ``_should_retry`` used ``>``, which allowed one attempt past
+            # the cap; the cap now binds at equality.)
+            enabled=True,
+            initial_delay_s=0.001,
+            max_delay_s=0.001,
+            max_attempts=3,
         )
     )
     session = TiLiveSession(
@@ -745,3 +753,170 @@ def test_observations_yields_drained_person_observations_in_arrival_order() -> N
         assert session.queued == 0
     finally:
         session.stop()
+
+
+# --------------------------------------------------------------------------- Codex round-3 fixes
+
+
+def test_a_raw_capture_write_failure_detaches_it_and_keeps_parsing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full disk costs the capture, never the sensor.
+
+    The capture write used to share the parser's exception handler, so an I/O error
+    raised before ``feed()`` ran, reset the parser and returned -- and because the
+    capture stayed enabled, every later chunk took the same path and observations
+    stopped indefinitely on a perfectly healthy UART. The failing capture must be
+    detached (once, not retried per chunk) and reported, while frames keep flowing.
+    """
+    writes = 0
+
+    def boom(self: RawByteCapture, data: bytes) -> None:
+        nonlocal writes
+        writes += 1
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(RawByteCapture, "write", boom)
+    session = session_for(
+        [HoldOpenStream(frames(3))],
+        raw_capture=TiRawCaptureConfig(path=str(tmp_path / "raw.bin"), max_bytes=1 << 20),
+    )
+    session.start()
+    try:
+        assert wait_until(lambda: session.queued == 3)
+        diagnostics = session.diagnostics()
+        assert diagnostics.state == TiStreamState.STREAMING
+        assert diagnostics.frames_parsed == 3
+        assert "No space left on device" in (diagnostics.raw_capture_failed or "")
+        # Detached, not retried: exactly one failed write however many chunks arrived.
+        assert writes == 1
+    finally:
+        session.stop()
+
+
+def test_a_raw_capture_failure_is_visible_in_sensor_health(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The truncated capture file must not be mistaken for a complete recording, so
+    the detachment surfaces in the canonical health message too."""
+
+    def boom(self: RawByteCapture, data: bytes) -> None:
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(RawByteCapture, "write", boom)
+    session = session_for(
+        [HoldOpenStream(frames(1))],
+        raw_capture=TiRawCaptureConfig(path=str(tmp_path / "raw.bin"), max_bytes=1 << 20),
+    )
+    session.start()
+    try:
+        assert wait_until(lambda: session.diagnostics().raw_capture_failed is not None)
+        health = session.diagnostics().to_sensor_health(datetime.now(UTC))
+        assert "raw capture detached" in (health.message or "")
+        assert "disk gone" in (health.message or "")
+    finally:
+        session.stop()
+
+
+def test_a_reconnect_requested_during_connection_setup_is_not_lost() -> None:
+    """The acknowledgement window.
+
+    ``request_reconnect()`` sets the flag and closes the current stream. The clear
+    used to sit in connection setup, so a request landing after ``self._stream`` was
+    assigned was erased before the reader ever saw it, and the close it had performed
+    was then misread as a spontaneous transport failure. Here the request is issued
+    from inside the factory for the second connection -- i.e. squarely in that setup
+    window -- and must still produce a third connection.
+    """
+    session: TiLiveSession | None = None
+    opened = 0
+    streams: list[ByteStream] = [
+        MemoryByteStream(frames(1)),
+        HoldOpenStream(frames(1, start=2)),
+        HoldOpenStream(frames(1, start=3)),
+    ]
+
+    def factory() -> ByteStream:
+        nonlocal opened
+        opened += 1
+        stream = streams.pop(0)
+        if opened == 2:
+            assert session is not None
+            # Mid-setup: the reader is alive and this connection is not yet being read.
+            assert session.request_reconnect() is True
+        return stream
+
+    config = live_config(
+        reconnect=TiReconnectPolicy(
+            enabled=True, initial_delay_s=0.001, max_delay_s=0.001, max_attempts=5
+        )
+    )
+    session = TiLiveSession(
+        config, StoreRegistry(config.store), stream_factory=factory, timing=FakeTiming().timing()
+    )
+    session.start()
+    try:
+        assert wait_until(lambda: opened == 3)
+        diagnostics = session.diagnostics()
+        assert diagnostics.generation == 3
+        # Honoured as a request, not charged to the failure budget.
+        assert diagnostics.state != TiStreamState.ERROR
+    finally:
+        session.stop()
+
+
+def test_the_attempt_budget_binds_at_max_attempts() -> None:
+    """``max_attempts`` is consecutive failures BEFORE giving up, so a cap of 1 must
+    open the port exactly once. The boundary used to be ``>``, which ran one attempt
+    past the operator's cap and then reported giving up "after 1 attempts"."""
+    attempts = 0
+
+    def factory() -> ByteStream:
+        nonlocal attempts
+        attempts += 1
+        raise ByteStreamError("port busy")
+
+    config = live_config(
+        reconnect=TiReconnectPolicy(
+            enabled=True, initial_delay_s=0.001, max_delay_s=0.001, max_attempts=1
+        )
+    )
+    session = TiLiveSession(
+        config, StoreRegistry(config.store), stream_factory=factory, timing=FakeTiming().timing()
+    )
+    session.start()
+    try:
+        assert wait_until(lambda: session.diagnostics().state == TiStreamState.ERROR)
+        assert attempts == 1
+        assert "gave up after 1 attempts" in (session.diagnostics().message or "")
+    finally:
+        session.stop()
+
+
+def test_pinning_a_record_layout_keeps_every_other_firmware_field() -> None:
+    """Pinning ``target_record_layout`` must override only that field.
+
+    ``firmware_profile_for`` used to rebuild the profile field by field, so every field
+    added to ``TiFirmwareProfile`` afterwards was silently dropped -- ``tlv_family``
+    was, which disabled the wrong-firmware TLV check for exactly the configuration
+    ``docs/hardware/ti-iwr6843-first-bringup.md`` tells operators to pin. Asserted over
+    all fields rather than naming ``tlv_family``, so the next field added is covered
+    without anyone remembering to extend this test.
+    """
+    import dataclasses
+
+    from radiowave.adapters.mmwave.ti.protocol import TI_3D_PEOPLE_COUNTING, TiTlvFamily
+    from radiowave.adapters.mmwave.ti.session import firmware_profile_for
+
+    profile = firmware_profile_for(live_config(target_record_layout="3d_v1").adapter)
+
+    assert profile.target_record_layout == "3d_v1"
+    # The one that actually regressed, named explicitly so the failure is readable.
+    assert profile.tlv_family is TiTlvFamily.PEOPLE_COUNTING
+    inherited = {
+        field.name
+        for field in dataclasses.fields(TI_3D_PEOPLE_COUNTING)
+        if field.name != "target_record_layout"
+    }
+    for name in inherited:
+        assert getattr(profile, name) == getattr(TI_3D_PEOPLE_COUNTING, name), name

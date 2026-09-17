@@ -53,6 +53,15 @@ class TiAdapterDiagnostics:
     observations_emitted: int = 0
     observations_dropped_overflow: int = 0
     reconnect_count: int = 0
+    raw_capture_failed: str | None = None
+    """Why the optional raw byte capture was detached, or None while it is healthy.
+
+    A capture I/O failure (a full disk, a disconnected volume) disables only the
+    capture: the UART is still healthy and live observations must keep flowing, so
+    the reader detaches the capture and records the reason here instead of losing
+    the sensor. It is surfaced in health because the resulting capture file is
+    truncated and must not be mistaken for a complete recording.
+    """
     last_frame_number: int | None = None
     last_frame_at: datetime | None = None
     last_frame_age_s: float | None = None
@@ -64,6 +73,11 @@ class TiAdapterDiagnostics:
         message = self.state.value
         if self.message is not None:
             message = f"{message}: {self.message}"
+        if self.raw_capture_failed is not None:
+            # Appended rather than replacing the state message: the stream itself is
+            # still in whatever state it reports, and losing the capture must not be
+            # silent just because the radar kept working.
+            message = f"{message} (raw capture detached: {self.raw_capture_failed})"
         return SensorHealth(
             sensor_id=self.sensor_id,
             timestamp=now,
@@ -89,6 +103,7 @@ class TiAdapterDiagnostics:
             "observations_emitted": self.observations_emitted,
             "observations_dropped_overflow": self.observations_dropped_overflow,
             "reconnect_count": self.reconnect_count,
+            "raw_capture_failed": self.raw_capture_failed,
             "last_frame_number": self.last_frame_number,
             "last_frame_at": None if self.last_frame_at is None else self.last_frame_at.isoformat(),
             "last_frame_age_s": self.last_frame_age_s,

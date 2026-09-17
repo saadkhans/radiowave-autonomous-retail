@@ -24,6 +24,7 @@ import logging
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from radiowave.adapters.mmwave.ti.config import TiLiveConfig
 from radiowave.adapters.mmwave.ti.health import TiAdapterDiagnostics
@@ -36,6 +37,7 @@ from radiowave.api.viewmodels import (
     RunMode,
 )
 from radiowave.contracts.observations import SensorObservation
+from radiowave.contracts.recording import RecordedEntry
 from radiowave.fusion.interfaces import Recorder
 from radiowave.pipeline import FoundationPipeline, PipelineConfig
 from radiowave.replay.recorder import JsonlRecorder
@@ -101,6 +103,51 @@ def allocate_capture_path(directory: Path, sensor_id: str, run_id: str, stamp: s
     raise RuntimeError(msg)
 
 
+class _AttributableRecorder:
+    """Wraps a run's recorder so a write failure is attributable, never anonymous.
+
+    ``FoundationPipeline.ingest`` advances the fusion clock and commits dedup state
+    BEFORE it records the entry, so a recorder I/O failure surfaces as an exception
+    from ``ingest`` with the pipeline already mutated and the observation missing from
+    the recording. The live run must be able to tell that apart from "this one sample
+    was bad" — the first is a failed run, the second is a counter — and the exception
+    type alone cannot: both arrive as plain ``OSError``/``ValueError``. Latching it
+    here is what makes the distinction reliable.
+
+    Delegates everything else, so an in-memory recorder's ``entries`` (used by tests
+    and by the Parquet path) still works through the wrapper.
+    """
+
+    def __init__(self, inner: Recorder) -> None:
+        self._inner = inner
+        self.failure: str | None = None
+
+    def record(self, entry: RecordedEntry) -> None:
+        try:
+            self._inner.record(entry)
+        except Exception as exc:
+            if self.failure is None:  # keep the first cause, not the last
+                self.failure = str(exc) or exc.__class__.__name__
+            raise
+
+    def close(self) -> None:
+        # Close latches as well as record. ``JsonlRecorder`` writes through a buffered
+        # text handle and never flushes per entry, so a full disk usually surfaces HERE,
+        # on the final flush, not on any ``record()`` call. Without latching, the run
+        # would finish with ``failure is None`` and advertise ``capture_path`` as a
+        # complete recording whose tail is missing -- and JSONL has no footer, so
+        # replay would silently be short rather than erroring.
+        try:
+            self._inner.close()
+        except Exception as exc:
+            if self.failure is None:
+                self.failure = str(exc) or exc.__class__.__name__
+            raise
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class LiveObservatoryRun(ObservatoryRun):
     mode: RunMode = "LIVE"
 
@@ -133,12 +180,18 @@ class LiveObservatoryRun(ObservatoryRun):
             self.capture_path = allocate_capture_path(
                 runtime.capture_dir, runtime.config.adapter.sensor_id, run_id, stamp
             )
-            recorder = JsonlRecorder(self.capture_path)
+            recorder = _AttributableRecorder(JsonlRecorder(self.capture_path))
         self._recorder = recorder
         self.pipeline = FoundationPipeline(
             self.registry, runtime.pipeline_config, scenario_id=None, recorder=recorder
         )
         self.ingest_errors = 0
+        # Set once the run can no longer be trusted to keep ingesting (today: the
+        # capture recorder failed mid-ingest). Distinct from ``finished``: the run has
+        # failed but may not have been torn down yet. ``tick`` becomes a no-op from
+        # that moment so the pipeline is never advanced further on a recording that
+        # already has a hole in it.
+        self.failure: str | None = None
         self._stop = threading.Event()
         self._driver: threading.Thread | None = None
         self.revision = 1
@@ -219,11 +272,24 @@ class LiveObservatoryRun(ObservatoryRun):
 
     def _live_status(self) -> ObservatoryLiveStatus:
         diagnostics = self._diagnostics()
+        state = diagnostics.state.value
+        message = diagnostics.message
+        if self.failure is not None:
+            # The run has failed even when the radar itself is still happily
+            # STREAMING, and an operator must never read "streaming" on a run that has
+            # stopped ingesting. The sensor's own state is kept in the message rather
+            # than dropped, so the cause stays diagnosable.
+            state = "ERROR"
+            message = (
+                f"{self.failure} (sensor {diagnostics.state.value})"
+                if message is None
+                else f"{self.failure} (sensor {diagnostics.state.value}: {message})"
+            )
         return ObservatoryLiveStatus(
             sensor_id=diagnostics.sensor_id,
             sensor_name=self._runtime.sensor_name,
-            state=diagnostics.state.value,
-            message=diagnostics.message,
+            state=state,
+            message=message,
             generation=diagnostics.generation,
             frames_received=diagnostics.frames_received,
             frames_parsed=diagnostics.frames_parsed,
@@ -246,7 +312,7 @@ class LiveObservatoryRun(ObservatoryRun):
         Returns the number of observations ingested. Must be called under the run
         lock (the driver thread and ``apply`` both do).
         """
-        if self.finished:
+        if self.finished or self.failure is not None:
             return 0
         # The queue is drained and ``now`` is read under the session's queue lock, so
         # every observation stamped before ``now`` is in this batch and the clock
@@ -260,16 +326,53 @@ class LiveObservatoryRun(ObservatoryRun):
                 if self.pipeline.ingest(observation):
                     ingested += 1
             except Exception:  # one bad sample must not stop the session
+                if self._latch_recorder_failure():
+                    break
                 self.ingest_errors += 1
                 log.exception("live ingest failed for %s", observation.observation_id)
-        self.pipeline.advance_to(now)
-        self.time_s = max(self.time_s, round((now - self.epoch_at).total_seconds(), 3))
+        if self.failure is None:
+            try:
+                self.pipeline.advance_to(now)
+            except Exception:
+                # ``advance_to`` records too (scheduled flushes), so it fails the same
+                # way and for the same reason; anything else is a real pipeline bug
+                # and must not be swallowed here.
+                if not self._latch_recorder_failure():
+                    raise
+            else:
+                self.time_s = max(self.time_s, round((now - self.epoch_at).total_seconds(), 3))
         # ``observations_cursor`` (read straight from ``self.cursor`` by ``_state``,
         # same as REPLAY) tracks how many observations the pipeline has accepted so
         # far, distinct from ``observations_total`` (everything the sensor emitted).
         self.cursor += ingested
         self.revision += 1
         return ingested
+
+    def _latch_recorder_failure(self) -> bool:
+        """True if the exception just caught came from the capture recorder.
+
+        A recorder failure is not "one bad sample". ``ingest`` has already advanced the
+        clock and committed dedup state by the time it records, so the pipeline is
+        mutated while the recording is missing that observation: continuing would keep
+        a partially mutated pipeline running against a recording that can no longer
+        replay it, and — since the same recorder fails on every subsequent entry —
+        would freeze the live map behind a wall of counted "bad samples" while the
+        sensor was healthy. So the run fails, observably, and stops ingesting.
+
+        Deliberately different from the session's raw byte capture, which IS detached
+        and survived (see ``TiLiveSession._write_capture``): that is an optional
+        diagnostic side channel with no pipeline coupling, whereas this recorder is the
+        normalized capture the operator explicitly asked for and the artifact replay
+        depends on. Degrading it silently would change what the run is.
+        """
+        recorder = self._recorder
+        if not isinstance(recorder, _AttributableRecorder) or recorder.failure is None:
+            return False
+        if self.failure is None:
+            self.failure = f"capture recording failed: {recorder.failure}"
+            log.error("live run %s failed: %s", self.run_id, self.failure)
+            self.revision += 1
+        return True
 
     def _drive(self) -> None:
         interval = self._runtime.tick_interval_s
@@ -279,9 +382,30 @@ class LiveObservatoryRun(ObservatoryRun):
                     self.tick()
             except Exception:  # keep driving; the failure is logged
                 log.exception("live driver tick failed for %s", self.run_id)
+            if self.failure is not None:
+                # Stop OUTSIDE the run lock and outside the tick that latched the
+                # failure: the lock is an RLock, so re-entering would not deadlock, but
+                # holding it across ``session.stop()``'s thread join would block every
+                # snapshot request for the length of that join. A
+                # non-autonomous run has no driver thread, so there the failure simply
+                # latches and every later tick is a no-op until the operator stops the
+                # run; the failure is visible in its live status either way.
+                break
+        if self.failure is not None:
+            self.stop()
 
     def stop(self) -> None:
-        """Stop the sensor and the driver, finalize the pipeline, close the capture."""
+        """Stop the sensor and the driver, finalize the pipeline, close the capture.
+
+        ``finished`` is set only if the session actually stopped. ``session.stop()``
+        returns False when closing the transport did not unblock the reader within its
+        join timeout, which means that thread is still alive and may still be holding
+        the UART and enqueueing. Marking the run finished then would tell
+        ``RunManager`` the sensor is free and let it admit a second session against the
+        same port (invariant 15), so the run stays unfinished and keeps ownership
+        instead — see ``RunManager.delete``, which deliberately keeps the slot
+        reserved for a run in this state rather than releasing it.
+        """
         with self._lock:
             if self.finished:
                 return
@@ -289,15 +413,39 @@ class LiveObservatoryRun(ObservatoryRun):
         driver = self._driver
         if driver is not None and driver is not threading.current_thread():
             driver.join(5.0)
-        self.session.stop()
+        stopped = self.session.stop()
         with self._lock:
-            if not self.finished:
+            if self.finished:
+                return
+            if not stopped:
+                if self.failure is None:
+                    self.failure = (
+                        "sensor reader thread did not exit; the run keeps the sensor "
+                        "reserved until the process restarts"
+                    )
+                log.error("live run %s failed to stop: %s", self.run_id, self.failure)
+                self.revision += 1
+                return
+            try:
                 self.tick()  # last drained observations before the terminal evaluation
                 self.pipeline.finish(advance=False)
-                if self._recorder is not None:
+            except Exception:
+                # A recorder that died during finalization must still not leave the
+                # run un-finished: the sensor IS stopped, which is what ownership
+                # hangs on, so record the failure and finish.
+                if not self._latch_recorder_failure():
+                    raise
+            if self._recorder is not None:
+                try:
                     self._recorder.close()
-                self.finished = True
-                self.revision += 1
+                except Exception:
+                    # The sensor IS stopped, so the run still finishes (ownership hangs
+                    # on that, not on the capture). But the capture is truncated, and
+                    # ``capture_path`` must not go on presenting it as complete.
+                    log.exception("failed to close the capture for %s", self.run_id)
+                    self._latch_recorder_failure()
+            self.finished = True
+            self.revision += 1
 
     def reconnect(self) -> None:
         """Ask the session for a fresh connection generation.

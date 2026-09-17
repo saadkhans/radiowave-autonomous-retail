@@ -620,3 +620,219 @@ def test_driver_thread_start_failure_stops_session_and_releases_reservation(
         )
         assert isinstance(run, LiveObservatoryRun)
         run.close()
+
+
+# --------------------------------------------------------------------------- Codex round-3 fixes
+
+
+def test_a_recorder_failure_fails_the_run_instead_of_counting_a_bad_sample(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A capture I/O error is not "one bad sample".
+
+    ``FoundationPipeline.ingest`` advances the clock and commits dedup state before it
+    records, so a recorder failure leaves the pipeline mutated with the observation
+    missing from the recording -- and because the same recorder fails on every later
+    entry, the old ``except Exception: self.ingest_errors += 1`` froze the live map
+    behind a wall of counted bad samples while the sensor was healthy. The run must
+    fail observably and stop ingesting instead.
+    """
+    runtime = LiveRuntime(
+        config=live_config(),
+        stream_factory=lambda: HoldOpenStream(frames()),
+        timing=FakeTiming().timing(),
+        capture_dir=tmp_path,
+        autonomous=False,
+    )
+
+    def boom(self: JsonlRecorder, entry: Any) -> None:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(JsonlRecorder, "record", boom)
+
+    with TestClient(create_app(runtime)) as client:
+        created = client.post("/api/runs/live", json={"capture": True})
+        assert created.status_code == 201
+        run_id = created.json()["state"]["run_id"]
+        run = _run(client, run_id)
+        assert wait_until(lambda: run.session.queued > 0)
+
+        with run.lock:  # the driver is off (autonomous=False); tick by hand
+            run.tick()
+
+        assert run.failure is not None
+        assert "No space left on device" in run.failure
+        # Not absorbed as a per-sample counter.
+        assert run.ingest_errors == 0
+        # And the run stops ingesting rather than running on a holed recording.
+        with run.lock:
+            assert run.tick() == 0
+
+        status = client.get(f"/api/runs/{run_id}/snapshot").json()["state"]["live"]
+        assert status["state"] == "ERROR"
+        assert "capture recording failed" in (status["message"] or "")
+
+
+def test_a_run_whose_sensor_will_not_stop_keeps_the_slot_reserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Invariant 15: ownership is retained until termination actually succeeds.
+
+    ``session.stop()`` returns False when closing the transport did not unblock the
+    reader within the join timeout -- that thread is still alive and may still hold the
+    UART. Finalizing anyway told ``RunManager`` the sensor was free, so a second
+    session could be admitted against the same port. The run must stay unfinished and
+    the slot must stay held, even after ``delete()`` has removed the run.
+    """
+    runtime = LiveRuntime(
+        config=live_config(),
+        stream_factory=lambda: HoldOpenStream(frames()),
+        timing=FakeTiming().timing(),
+        capture_dir=tmp_path,
+        autonomous=False,
+    )
+    monkeypatch.setattr(TiLiveSession, "stop", lambda self, timeout_s=5.0: False)
+
+    with TestClient(create_app(runtime)) as client:
+        manager = client.app.state.runs  # type: ignore[attr-defined]
+        created = client.post("/api/runs/live", json={"capture": False})
+        assert created.status_code == 201
+        run_id = created.json()["state"]["run_id"]
+        run = _run(client, run_id)
+
+        # This test simulates a reader thread that really will not exit, so it must
+        # clean up after itself in a finally: nothing else will (the run becomes
+        # unreachable from the manager), and a leaked reader thread would otherwise
+        # cascade into every later test that asserts no ``ti-mmwave-*`` thread survives.
+        try:
+            run.stop()
+            assert not run.finished  # the reader never exited; ownership is retained
+            assert run.failure is not None
+            assert "did not exit" in run.failure
+
+            assert manager.delete(run_id) is True
+            # Deleted, but the sensor is NOT handed to anyone else.
+            assert manager.closing_live_run_id() == run_id
+            with pytest.raises(LiveRunBusyError) as excinfo:
+                manager.build_live_exclusive(
+                    lambda new_id: LiveObservatoryRun(new_id, runtime, capture=False)
+                )
+            # The permanent case says so, instead of "try again shortly": retrying can
+            # never succeed once the reader thread is wedged.
+            assert "could not release the sensor" in str(excinfo.value)
+            assert "restarted" in str(excinfo.value)
+
+            availability = client.get("/api/live/status").json()
+            # Gone from ``_runs`` (so not reported as the active run) but the sensor is
+            # still not offered to anyone.
+            assert availability["active_run_id"] is None
+            assert "a live run is stopping" in (availability["reason"] or "")
+        finally:
+            monkeypatch.undo()
+            assert run.session.stop(timeout_s=5.0)
+
+
+def test_close_all_waits_for_an_admission_still_inside_the_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Invariant 16: shutdown must not return while a constructor is still starting a
+    sensor thread. An admission inside ``factory(run_id)`` holds a reservation but has
+    not set ``_live_constructing`` yet, so shutdown used to sail straight past it and
+    promise no reader thread survived while one was being created behind its back."""
+    runtime = LiveRuntime(
+        config=live_config(),
+        stream_factory=lambda: HoldOpenStream(frames()),
+        timing=FakeTiming().timing(),
+        capture_dir=tmp_path,
+        autonomous=False,
+    )
+    inside_factory = threading.Event()
+    release = threading.Event()
+    built: dict[str, LiveObservatoryRun] = {}
+
+    with TestClient(create_app(runtime)) as client:
+        manager = client.app.state.runs  # type: ignore[attr-defined]
+
+        def slow_factory(run_id: str) -> LiveObservatoryRun:
+            inside_factory.set()
+            assert release.wait(5.0)
+            run = LiveObservatoryRun(run_id, runtime, capture=False)
+            built["run"] = run
+            return run
+
+        errors: dict[str, BaseException] = {}
+
+        def admit() -> None:
+            try:
+                manager.build_live_exclusive(slow_factory)
+            except BaseException as exc:  # recorded for the assertion below
+                errors["error"] = exc
+
+        admitter = threading.Thread(target=admit)
+        admitter.start()
+        try:
+            assert wait_until(inside_factory.is_set)
+            # The reservation is held and _live_constructing is still None here.
+            assert manager.live_reservation() is not None
+
+            shutdown_returned = threading.Event()
+
+            def shutdown() -> None:
+                manager.close_all()
+                shutdown_returned.set()
+
+            closer = threading.Thread(target=shutdown)
+            closer.start()
+            try:
+                # close_all must still be waiting on the in-flight construction.
+                assert not shutdown_returned.wait(0.3)
+                release.set()
+                assert shutdown_returned.wait(5.0)
+            finally:
+                closer.join(5.0)
+        finally:
+            release.set()
+            admitter.join(5.0)
+
+        assert isinstance(errors.get("error"), LiveRunBusyError)
+        assert not built["run"].session.running
+        assert not any(
+            t.name.startswith("ti-mmwave-") and t.is_alive() for t in threading.enumerate()
+        )
+
+
+def test_a_recorder_close_failure_is_reported_not_silently_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``JsonlRecorder`` writes through a buffered handle and never flushes per entry,
+    so a full disk usually surfaces on the final ``close()``, not on any ``record()``.
+    The run still finishes -- the sensor IS stopped, which is what ownership hangs on --
+    but it must not go on advertising ``capture_path`` as a complete recording when its
+    tail was never written (JSONL has no footer, so replay would just be short)."""
+    runtime = LiveRuntime(
+        config=live_config(),
+        stream_factory=lambda: HoldOpenStream(frames()),
+        timing=FakeTiming().timing(),
+        capture_dir=tmp_path,
+        autonomous=False,
+    )
+
+    def boom(self: JsonlRecorder) -> None:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(JsonlRecorder, "close", boom)
+
+    with TestClient(create_app(runtime)) as client:
+        run_id = client.post("/api/runs/live", json={"capture": True}).json()["state"]["run_id"]
+        run = _run(client, run_id)
+        assert wait_until(lambda: run.session.queued > 0)
+
+        run.stop()
+
+        # Finished (the sensor stopped), but the failed capture is on the record.
+        assert run.finished
+        assert run.failure is not None
+        assert "No space left on device" in run.failure
+        snapshot = client.get(f"/api/runs/{run_id}/snapshot").json()["state"]
+        assert snapshot["live"]["state"] == "ERROR"
+        assert "capture recording failed" in (snapshot["live"]["message"] or "")

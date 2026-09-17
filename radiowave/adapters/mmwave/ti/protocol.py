@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 
 MAGIC_WORD = bytes([0x02, 0x01, 0x04, 0x03, 0x06, 0x05, 0x08, 0x07])
 
@@ -68,6 +68,52 @@ class TiTlvType(IntEnum):
     """A single uint32 presence flag."""
 
 
+class TiTlvFamily(StrEnum):
+    """Which of TI's two distinct UART TLV vocabularies a TLV type belongs to.
+
+    The demo firmwares this package targets are not one protocol with optional
+    fields — they are two separate vocabularies sharing one magic-word/header
+    framing. The generic "out-of-box" (OOB) demo emits raw, untracked detections
+    as types 1 and 7. The "3D people counting" demo emits tracked targets,
+    compressed point cloud, and presence as types 1010-1021. A TLV type from one
+    vocabulary showing up in a stream configured for the other means the wrong
+    firmware image is flashed for the selected :class:`TiFirmwareProfile`, not
+    merely an unrecognized TLV — see :data:`_TLV_TYPES_BY_FAMILY` and
+    :func:`tlv_type_in_family`.
+    """
+
+    OOB = "oob"
+    PEOPLE_COUNTING = "people_counting"
+
+
+_TLV_TYPES_BY_FAMILY: dict[TiTlvFamily, frozenset[TiTlvType]] = {
+    TiTlvFamily.OOB: frozenset({TiTlvType.DETECTED_POINTS, TiTlvType.DETECTED_POINTS_SIDE_INFO}),
+    TiTlvFamily.PEOPLE_COUNTING: frozenset(
+        {
+            TiTlvType.TARGET_LIST_3D,
+            TiTlvType.TARGET_INDEX,
+            TiTlvType.TARGET_HEIGHT,
+            TiTlvType.POINT_CLOUD_3D,
+            TiTlvType.PRESENCE_INDICATION,
+        }
+    ),
+}
+
+
+def tlv_type_in_family(tlv_type: int, family: TiTlvFamily) -> bool:
+    """Whether ``tlv_type`` belongs to the named :class:`TiTlvFamily`.
+
+    Used to reject a *known* TLV type that belongs to a different firmware
+    vocabulary than the one configured (e.g. an OOB-flashed sensor emitting type-1
+    DETECTED_POINTS while the parser is configured for 3D people counting), so
+    that case surfaces as a firmware/configuration error instead of a silently
+    "healthy" frame with no targets. Types outside every family in
+    :data:`_TLV_TYPES_BY_FAMILY` (i.e. unrecognized TLVs) are not covered by this
+    check at all — callers must keep those on the existing tolerated path.
+    """
+    return tlv_type in _TLV_TYPES_BY_FAMILY.get(family, frozenset())
+
+
 @dataclass(frozen=True, slots=True)
 class TargetRecordLayout:
     """One TI target-record binary shape, selected by payload-length divisibility."""
@@ -113,7 +159,20 @@ class TiFirmwareProfile:
     packet_alignment: int = 32
     """Packets are padded up to a multiple of this. Trailing bytes inside
     ``total_packet_len`` after the last TLV are padding and are counted, never parsed."""
+    tlv_family: TiTlvFamily | None = None
+    """Which :class:`TiTlvFamily` this firmware's TLV vocabulary is restricted to.
+
+    ``None`` means unrestricted — kept as the default so ad-hoc profiles built in
+    tests (or any firmware variant not yet classified into a family) are not
+    silently made stricter than before. The two named profiles below pin a real
+    family: a known TLV type from the *other* family showing up under one of them
+    is a firmware/configuration mismatch and is rejected (see
+    :func:`tlv_type_in_family` and its use in ``parser.py``), not decoded as if
+    it belonged.
+    """
 
 
-TI_3D_PEOPLE_COUNTING = TiFirmwareProfile(name="ti-3d-people-counting")
-TI_OOB_SDK3 = TiFirmwareProfile(name="ti-oob-sdk3")
+TI_3D_PEOPLE_COUNTING = TiFirmwareProfile(
+    name="ti-3d-people-counting", tlv_family=TiTlvFamily.PEOPLE_COUNTING
+)
+TI_OOB_SDK3 = TiFirmwareProfile(name="ti-oob-sdk3", tlv_family=TiTlvFamily.OOB)
