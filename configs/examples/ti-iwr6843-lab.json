@@ -1,0 +1,113 @@
+{
+  "store": {
+    "store_id": "lab-ti-01",
+    "name": "Radiowave lab, one TI radar",
+    "frame": {
+      "frame_id": "store",
+      "description": "Store floor plan frame: origin at a documented corner, x east, y north",
+      "units": "m"
+    },
+    "floor_bounds": {
+      "min_x": 0.0,
+      "min_y": 0.0,
+      "max_x": 8.0,
+      "max_y": 6.0
+    },
+    "zones": [
+      {
+        "zone_id": "floor",
+        "name": "Sales floor",
+        "kind": "SALES_FLOOR",
+        "bounds": {
+          "min_x": 0.0,
+          "min_y": 0.0,
+          "max_x": 8.0,
+          "max_y": 6.0
+        }
+      }
+    ],
+    "fixtures": [],
+    "boundaries": [
+      {
+        "boundary_id": "door",
+        "kind": "EXIT",
+        "bounds": {
+          "min_x": 7.0,
+          "min_y": 0.0,
+          "max_x": 8.0,
+          "max_y": 1.5
+        }
+      }
+    ],
+    "sensors": [
+      {
+        "sensor_id": "radar-ti-01",
+        "modality": "MMWAVE",
+        "pose": {
+          "position": {
+            "x": 4.0,
+            "y": 0.0,
+            "z": 2.0,
+            "frame_id": "store"
+          },
+          "yaw": 1.5707963267948966,
+          "pitch": 0.0,
+          "roll": 0.0
+        },
+        "name": "TI IWR6843ISK on the south wall, facing north",
+        "vendor_metadata": {
+          "board": "IWR6843ISK",
+          "firmware": "3D people counting demo (Industrial Toolbox)",
+          "note": "example values; measure and replace"
+        }
+      }
+    ],
+    "products": [],
+    "items": []
+  },
+  "serial": {
+    "data_port": "COM6",
+    "data_baud_rate": 921600,
+    "cli_port": "COM5",
+    "cli_baud_rate": 115200,
+    "read_timeout_s": 0.5,
+    "read_chunk_bytes": 4096
+  },
+  "adapter": {
+    "sensor_id": "radar-ti-01",
+    "firmware_profile": "ti-3d-people-counting",
+    "target_record_layout": "3d_v2",
+    "coordinates": {
+      "forward_axis": "y",
+      "lateral_positive": "right",
+      "z_origin": "floor",
+      "units": "m"
+    },
+    "observation": {
+      "baseline_sigma_m": 0.35,
+      "baseline_confidence": 0.6,
+      "use_firmware_confidence": true,
+      "confidence_ceiling": 0.9,
+      "max_range_m": 15.0,
+      "max_abs_height_m": 4.0,
+      "stale_after_s": 2.0
+    },
+    "reconnect": {
+      "enabled": true,
+      "initial_delay_s": 1.0,
+      "max_delay_s": 10.0,
+      "max_attempts": 20
+    },
+    "raw_capture": {
+      "path": null,
+      "max_bytes": 67108864
+    },
+    "parser_limits": {
+      "max_packet_bytes": 65536,
+      "max_tlvs": 32,
+      "max_targets": 64,
+      "max_points": 4096,
+      "max_buffer_bytes": 262144
+    }
+  }
+}

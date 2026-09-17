@@ -13,6 +13,8 @@ Target evaluation set:
 
 Goal: characterize people tracks, crossing, stationary shoppers, occlusion and multi-sensor coordinate alignment.
 
+For the TI IWR6843 first-hardware bring-up procedure, see [`docs/hardware/ti-iwr6843-first-bringup.md`](./ti-iwr6843-first-bringup.md).
+
 ## Stage 1B — UHF RFID characterization
 Target evaluation set:
 - 1x fixed RAIN UHF RFID reader with developer APIs

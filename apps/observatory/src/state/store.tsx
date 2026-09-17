@@ -12,7 +12,9 @@ import {
 import { api, ApiError } from "@/lib/api";
 import type { RetailEventType } from "@/lib/format";
 import type {
+  LiveAvailability,
   ObservatoryEvent,
+  ObservatoryStore,
   RunState,
   ScenarioDetail,
   ScenarioSummary,
@@ -51,6 +53,8 @@ export const DEFAULT_LAYERS: Layers = {
 export const SPEEDS = [0.25, 0.5, 1, 2, 5, 10] as const;
 /** Wall-clock tick used only to pace requests; simulated time is owned by the API. */
 export const TICK_MS = 200;
+/** LIVE runs are polled (not advanced) at this interval; the server owns the live edge. */
+export const LIVE_POLL_MS = 250;
 
 export interface ObservatoryState {
   health: string | null;
@@ -67,6 +71,10 @@ export interface ObservatoryState {
   selection: Selection;
   layers: Layers;
   eventFilter: EventFilter;
+  /** Whether a LIVE run can be started now, and with which sensor; refreshed around live actions. */
+  liveAvailability: LiveAvailability | null;
+  /** The store twin for the active LIVE run (fetched once at start; a live twin may have empty fixtures/products/items). */
+  liveStore: ObservatoryStore | null;
 }
 
 export const initialState: ObservatoryState = {
@@ -84,6 +92,8 @@ export const initialState: ObservatoryState = {
   selection: null,
   layers: DEFAULT_LAYERS,
   eventFilter: "ALL",
+  liveAvailability: null,
+  liveStore: null,
 };
 
 export type Action =
@@ -100,7 +110,9 @@ export type Action =
   | { type: "error"; error: string | null }
   | { type: "select"; selection: Selection }
   | { type: "layer"; key: keyof Layers; value?: boolean }
-  | { type: "eventFilter"; filter: EventFilter };
+  | { type: "eventFilter"; filter: EventFilter }
+  | { type: "liveAvailability"; availability: LiveAvailability | null }
+  | { type: "liveStore"; store: ObservatoryStore | null };
 
 export function reducer(state: ObservatoryState, action: Action): ObservatoryState {
   switch (action.type) {
@@ -144,6 +156,10 @@ export function reducer(state: ObservatoryState, action: Action): ObservatorySta
       };
     case "eventFilter":
       return { ...state, eventFilter: action.filter };
+    case "liveAvailability":
+      return { ...state, liveAvailability: action.availability };
+    case "liveStore":
+      return { ...state, liveStore: action.store };
   }
 }
 
@@ -159,6 +175,11 @@ export interface ObservatoryActions {
   select(selection: Selection): void;
   toggleLayer(key: keyof Layers): void;
   setEventFilter(filter: EventFilter): void;
+  refreshLiveAvailability(): Promise<void>;
+  startLiveRun(capture: boolean): Promise<void>;
+  stopLiveRun(): Promise<void>;
+  reconnectLiveRun(): Promise<void>;
+  adoptLiveRun(runId: string): Promise<void>;
 }
 
 const StateContext = createContext<ObservatoryState>(initialState);
@@ -188,10 +209,19 @@ export function isStaleSnapshot(
 export function ObservatoryProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const runIdRef = useRef<string | null>(null);
+  // Invariant 18: the last server-reported active LIVE run id. Held in a ref, not read
+  // from state, so the stop-first helper below sees the newest value without being
+  // re-created on every availability poll (which would churn the memoized action
+  // identities that depend on it).
+  const serverLiveRunIdRef = useRef<string | null>(null);
   // Serial executor state: queueTailRef is the promise chain every mutating
   // action is threaded through (so requests never overlap), pendingCountRef
   // counts enqueued-but-not-settled tasks (drives `busy`), and generationRef
   // is bumped by exclusive actions that supersede anything already in flight.
+  // The LIVE poll loop (below) reuses this exact executor: it goes through
+  // runExclusive so a poll in flight suppresses the next one, and every
+  // response - poll or mutation alike - is published through applyRun, which
+  // drops it via isStaleSnapshot if the run/generation has moved on.
   const queueTailRef = useRef<Promise<void>>(Promise.resolve());
   const pendingCountRef = useRef(0);
   const generationRef = useRef(0);
@@ -269,13 +299,58 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // Invariant 17/18: stops the currently active LIVE run before it is
+  // replaced by a different run - a replay run (startRun/selectScenario) or a
+  // new LIVE run (startLiveRun). Awaited to completion before the caller
+  // proceeds: if the stop request fails, the exception propagates out of the
+  // exclusive task, so no replacement is created and the live run stays
+  // current with the error visible via the queue's normal error path. A
+  // successful stop is required before the caller bumps the generation /
+  // clears runIdRef, so a live poll response already in flight for the
+  // stopped run can never land on the run that replaces it (it is either
+  // refused outright by runExclusive while this task holds the queue, or
+  // dropped by isStaleSnapshot once the run/generation has moved on).
+  // `unbound` opts in to also stopping a LIVE run the SERVER reports but this client
+  // is not bound to (after a page reload `state.run` is null while the sensor is still
+  // being read), and `exceptRunId` is the run the caller is about to bind to rather
+  // than replace. Only the transitions that actually commit to leaving LIVE pass
+  // `unbound` - see the call sites.
+  const stopActiveLiveRun = useCallback(
+    async (
+      activeRun: RunState | null,
+      options: { unbound?: boolean; exceptRunId?: string | null } = {},
+    ) => {
+      const { unbound = false, exceptRunId = null } = options;
+      if (activeRun?.mode === "LIVE" && !activeRun.finished && runIdRef.current) {
+        if (runIdRef.current === exceptRunId) return;
+        await api.stopRun(runIdRef.current);
+        return;
+      }
+      if (!unbound) return;
+      const serverLiveRunId = serverLiveRunIdRef.current;
+      if (!serverLiveRunId || serverLiveRunId === exceptRunId) return;
+      await api.stopRun(serverLiveRunId);
+      serverLiveRunIdRef.current = null;
+    },
+    [],
+  );
+
   // A selection is ignored while a request is queued or in flight (the
   // selector is also disabled), so a run snapshot can never land under a
   // newer scenario. runExclusive owns that refusal; the placeholder dispatch
   // and runIdRef clear below only take effect if the request is not refused.
+  // Selecting a scenario while a LIVE run is active must not orphan it
+  // either (invariant 18): the same stop-first rule as startRun applies here
+  // before runIdRef is cleared.
   const selectScenario = useCallback(
     (scenarioId: string) => {
+      const activeRun = state.run;
       return runExclusive(async () => {
+        // Deliberately NOT `unbound`: merely picking a scenario in the dropdown is
+        // browsing, not committing to leave LIVE, and tearing down a hardware session
+        // another operator started on a dropdown change would be a nasty surprise. The
+        // actual replay transition (`startRun`) is where the sensor is released.
+        await stopActiveLiveRun(activeRun);
         generationRef.current += 1;
         runIdRef.current = null;
         dispatch({ type: "scenario", scenarioId, scenario: null });
@@ -283,16 +358,24 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "scenario", scenarioId, scenario });
       });
     },
-    [runExclusive],
+    [runExclusive, state.run, stopActiveLiveRun],
   );
 
   // Starting or replacing a run always stops playback, even when the start
   // itself is refused because another request is still queued or running.
+  // Invariant 17: if a LIVE run is active, it is stopped first (and that stop
+  // must succeed) before the replay run is created.
   const startRun = useCallback(() => {
     const scenarioId = state.scenarioId;
     if (!scenarioId) return Promise.resolve();
     dispatch({ type: "playing", playing: false });
+    const activeRun = state.run;
     return runExclusive(async () => {
+      // Invariant 18: this IS the commit to leave LIVE, so it must also stop a live
+        // run the server reports that this client never bound to - e.g. one still
+        // streaming from before a page reload. Otherwise the operator walks into
+        // REPLAY leaving the sensor being read, and its capture written, unattended.
+        await stopActiveLiveRun(activeRun, { unbound: true });
       generationRef.current += 1;
       const generation = generationRef.current;
       const snapshot = await api.createRun(scenarioId);
@@ -300,7 +383,7 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
       dispatch({ type: "select", selection: null });
       applyRun(snapshot, generation);
     });
-  }, [applyRun, runExclusive, state.scenarioId]);
+  }, [applyRun, runExclusive, state.scenarioId, state.run, stopActiveLiveRun]);
 
   const step = useCallback(() => {
     const runId = runIdRef.current;
@@ -339,6 +422,123 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
     },
     [applyRun, runQueued],
   );
+
+  // Fetches sensor availability; safe to call anytime (read-only), independent
+  // of the serial queue used by mutating actions.
+  const refreshLiveAvailability = useCallback(async () => {
+    try {
+      const availability = await api.liveStatus();
+      serverLiveRunIdRef.current = availability.active_run_id ?? null;
+      dispatch({ type: "liveAvailability", availability });
+    } catch (error) {
+      dispatch({ type: "error", error: describe(error) });
+    }
+  }, []);
+
+  // Starting a live run has no scenario to select: it replaces whatever run
+  // (if any) is active, the same way startRun replaces a replay run - including
+  // an already-active LIVE run (invariant: LIVE -> LIVE replacement stops the
+  // old sensor session first rather than relying on the server's 409). Pauses
+  // playback first for the same reason startRun/reset do.
+  //
+  // Invariant 18 (a failed live startup cannot leave an invisible running
+  // sensor): the run/store fetch is awaited and must succeed before the run
+  // becomes current. If it fails, this best-effort-stops the just-created run
+  // and rethrows so the queue's normal error path fires; no success path
+  // (dispatch/runIdRef/applyRun) runs, so runIdRef is left untouched (not
+  // pointing at the stopped run) and no live polling starts.
+  const startLiveRun = useCallback(
+    (capture: boolean) => {
+      dispatch({ type: "playing", playing: false });
+      const activeRun = state.run;
+      return runExclusive(async () => {
+        // Replacing the live run: the sensor must be free first, whoever holds it.
+        await stopActiveLiveRun(activeRun, { unbound: true });
+        generationRef.current += 1;
+        const generation = generationRef.current;
+        const snapshot = await api.createLiveRun(capture);
+        let liveStore: ObservatoryStore;
+        try {
+          liveStore = await api.getStore(snapshot.state.run_id);
+        } catch (error) {
+          try {
+            await api.stopRun(snapshot.state.run_id);
+          } catch (stopError) {
+            // The stop also failed: the run id is still running hardware and
+            // the operator would otherwise only see the store error, with no
+            // indication that manual intervention is required.
+            throw new Error(
+              `live run ${snapshot.state.run_id} could not be stopped after its store failed to load ` +
+                `(${describe(error)}; stop failed: ${describe(stopError)}); stop it manually`,
+            );
+          }
+          throw error;
+        }
+        runIdRef.current = snapshot.state.run_id;
+        dispatch({ type: "select", selection: null });
+        dispatch({ type: "liveStore", store: liveStore });
+        applyRun(snapshot, generation);
+      }).finally(() => void refreshLiveAvailability());
+    },
+    [applyRun, refreshLiveAvailability, runExclusive, state.run, stopActiveLiveRun],
+  );
+
+  // Invariant 19: a LIVE run the server reports as active (liveAvailability's
+  // active_run_id) but this client is not bound to - e.g. after a page reload
+  // while the sensor session is still running server-side - must be
+  // recoverable rather than orphaned. Adoption is an explicit operator action
+  // (never polled/auto-triggered) that binds to the existing run. It mirrors
+  // startLiveRun's ordering: any run already active on this client is stopped
+  // first via the same stopActiveLiveRun helper, the generation is bumped,
+  // then the snapshot and store for the *existing* run are fetched (instead
+  // of creating a new one) before runIdRef is bound - so a failed fetch here
+  // never leaves runIdRef pointing at a run with no store. Unlike
+  // startLiveRun, a failed adopt does not stop the run: we did not create
+  // this session, so tearing down someone else's hardware run on a transient
+  // fetch error would be destructive. The failure simply propagates through
+  // the queue's normal error path, leaving the run adoptable again.
+  const adoptLiveRun = useCallback(
+    (runId: string) => {
+      dispatch({ type: "playing", playing: false });
+      const activeRun = state.run;
+      return runExclusive(async () => {
+        // `exceptRunId` is the whole point here: adoption binds to this run, so the
+        // stop-first rule must skip it rather than tear down the session being resumed.
+        await stopActiveLiveRun(activeRun, { unbound: true, exceptRunId: runId });
+        generationRef.current += 1;
+        const generation = generationRef.current;
+        const snapshot = await api.getSnapshot(runId);
+        const liveStore = await api.getStore(runId);
+        runIdRef.current = runId;
+        dispatch({ type: "select", selection: null });
+        dispatch({ type: "liveStore", store: liveStore });
+        applyRun(snapshot, generation);
+      }).finally(() => void refreshLiveAvailability());
+    },
+    [applyRun, refreshLiveAvailability, runExclusive, state.run, stopActiveLiveRun],
+  );
+
+  // Stop/reconnect are user-initiated hardware controls: unlike a playback
+  // tick, they must never be silently dropped just because a live poll
+  // happens to be in flight, so they always queue (runQueued) rather than
+  // refuse outright.
+  const stopLiveRun = useCallback(() => {
+    const runId = runIdRef.current;
+    if (!runId) return Promise.resolve();
+    return runQueued(async () => {
+      const generation = generationRef.current;
+      applyRun(await api.stopRun(runId), generation);
+    }).finally(() => void refreshLiveAvailability());
+  }, [applyRun, refreshLiveAvailability, runQueued]);
+
+  const reconnectLiveRun = useCallback(() => {
+    const runId = runIdRef.current;
+    if (!runId) return Promise.resolve();
+    return runQueued(async () => {
+      const generation = generationRef.current;
+      applyRun(await api.reconnectRun(runId), generation);
+    }).finally(() => void refreshLiveAvailability());
+  }, [applyRun, refreshLiveAvailability, runQueued]);
 
   const play = useCallback(() => {
     // A run replacement or seek may be in flight; playback binds to the run
@@ -383,6 +583,27 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
     return () => window.clearInterval(handle);
   }, [applyRun, runExclusive, state.playing, state.run?.run_id]);
 
+  // LIVE polling: a LIVE run's time is the wall clock owned by the sensor
+  // session, not something the client advances, so instead of calling
+  // advance() this polls the server's own snapshot. It reuses runExclusive
+  // (a poll in flight suppresses the next one) and applyRun/isStaleSnapshot
+  // (a response for a run that has since been replaced/reset is dropped) -
+  // the exact same discipline as the replay tick loop above. Bound to the
+  // run's mode/id/finished from state (not a ref) so a run replacement, a
+  // stop, or the run finishing all tear this interval down.
+  useEffect(() => {
+    if (state.run?.mode !== "LIVE" || state.run.finished) return;
+    const runId = state.run.run_id;
+    const handle = window.setInterval(() => {
+      if (runIdRef.current !== runId) return;
+      void runExclusive(async () => {
+        const generation = generationRef.current;
+        applyRun(await api.getSnapshot(runId), generation);
+      });
+    }, LIVE_POLL_MS);
+    return () => window.clearInterval(handle);
+  }, [applyRun, runExclusive, state.run?.mode, state.run?.run_id, state.run?.finished]);
+
   const actions = useMemo<ObservatoryActions>(
     () => ({
       selectScenario,
@@ -396,6 +617,11 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
       select,
       toggleLayer,
       setEventFilter,
+      refreshLiveAvailability,
+      startLiveRun,
+      stopLiveRun,
+      reconnectLiveRun,
+      adoptLiveRun,
     }),
     [
       selectScenario,
@@ -409,6 +635,11 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
       select,
       toggleLayer,
       setEventFilter,
+      refreshLiveAvailability,
+      startLiveRun,
+      stopLiveRun,
+      reconnectLiveRun,
+      adoptLiveRun,
     ],
   );
 
