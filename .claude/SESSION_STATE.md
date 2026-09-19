@@ -44,53 +44,62 @@ from git and `gh`.
 
 ## Current state — 2026-09-17
 
-**Phase 3 — TI IWR6843 mmWave live people tracking.**
-- Branch: `claude/ti-mmwave-live-v0` → PR **#3** into `dev`. **Never merge — owner's call.**
-- Local HEAD == `origin/claude/ti-mmwave-live-v0` == `80a88e6`. Working tree clean apart from
-  this file.
-- **The codex-auto-loop is FINISHED: all 3 cycles used.** Do not start a cycle 4 and do not post
-  another `@codex review` comment. The PR is waiting on a human merge decision.
+**Phase 4 — Virtual Store Lab v0.** Branch `claude/virtual-store-lab-v0` -> PR **#4**, stacked on
+PR #3. **Never merge either.**
 
-### Codex rounds — all complete
-| Round | Head reviewed | Findings | Fixed in | Threads |
-|---|---|---|---|---|
-| 1 | `1ba1782` | 6 P1 + 9 P2 | `9677b53` | answered |
-| 2 | `9677b53` | 2 P1 + 5 P2 | `6455378` | replied + resolved individually |
-| 3 | `0a0aca7` | 4 P1 + 6 P2 | `80a88e6` | replied + resolved individually |
+- Phase-4 HEAD `c0b9587`; base is PR #3 HEAD `ab9b497` + 2 docs commits. PR #3 has NOT advanced,
+  so **no rebase is needed** (re-check with
+  `git merge-base --is-ancestor origin/claude/ti-mmwave-live-v0 HEAD`).
+- Gate at `c0b9587`: lint/typecheck/test/build/security all PASS, **617 Python tests**.
 
-23 findings total (8 P1, 15 P2). Gate on each push: all 5 checks + `final-reviewer` PASS.
-Final state: 620 tests (554 Python, 66 TS). PR body now carries architecture impact, tests,
-known limitations, deferred work and hardware assumptions (required by CLAUDE.md).
+### Phase 3 / PR #3 — parked, not finished
+Software gate is **PASS on checks** but `FINAL CODEX: PENDING`. A final review was requested
+once (comment `5712432606`, 2026-09-17T09:56Z) and **never arrived** — ~2h vs a 15-16 min norm,
+no review and no 👍 reaction, i.e. silently dropped. 31 threads, 0 unresolved. Do NOT infer a
+clean review from silence; either re-request (the user said exactly one request, so ask first)
+or report PENDING. **Do not merge PR #3.**
 
-### Round 3 — what changed (all in `80a88e6`)
-Four P1s shared one shape: a failure the live path absorbed and ran past.
-- `api/live.py` `stop()` finalized although `session.stop()` returned False → run stays
-  unfinished; `api/runs.py` `delete()` keeps the slot; `_stuck_live_run_id` makes the permanent
-  case say "restart the process" instead of "try again shortly".
-- `api/live.py` recorder I/O error counted as a bad sample → `_AttributableRecorder` latches
-  (on `record` **and** `close`, since `JsonlRecorder` is buffered and a full disk usually
-  surfaces at close), run fails observably, live status reports ERROR.
-- `ti/session.py` raw-capture write shared the parser's except handler → `_write_capture()`
-  detaches once, `raw_capture_failed` in diagnostics + health. Opposite call to the recorder
-  above, deliberately.
-- `store.tsx` replay transition ignored an unbound server-side live run → `stopActiveLiveRun`
-  consults `serverLiveRunIdRef`, but ONLY on committing transitions; a dropdown selection
-  deliberately does not tear down another operator's session.
-P2s: side-info bound + count cross-check, packet-tail validation (rejects embedded magic word),
-firmware TLV-family enforcement, reconnect-request acknowledgement window, `max_attempts` at
-equality, `close_all` waiting for an in-flight `factory()`, and `firmware_profile_for` via
-`dataclasses.replace` (it had been silently dropping `tlv_family`).
+### Phase-4 architecture (decided, do not relitigate)
+- World -> virtual TI radar -> **real UART bytes** -> real `TiFrameParser` -> real
+  `TiTargetNormalizer` -> `PersonObservation`. No shortcut; `radiowave/` never imports `tests/`.
+- World -> virtual RFID -> `NativeRfidRead` -> **existing** adapter/`ObservationNormalizer` ->
+  `ItemObservation`. **`ItemObservation` and `NativeRfidRead` already existed — do not invent an
+  RFID contract.**
+- **Ground truth is a sink.** `GroundTruthLog` is imported only by the simulator + its tests.
+  Fusion must infer events or we are grading an answer key.
+- **The seed varies observation, not truth.** Scripted motion is seed-invariant unless `jitter()`
+  is applied; the seed drives sensor noise and faults. This is deliberate — it lets one physical
+  scenario be replayed against many noise realizations.
+- **Determinism oracle is the synchronous path** (bytes -> parser ->
+  `frame_to_observations(received_at=<sim time>)`), NOT the live session: the reader thread's
+  batching is not reproducible. The live path exists only for the Observatory acceptance gate.
+- **SIM runs stay `mode="LIVE"`** (reusing `LiveObservatoryRun` + a simulator `stream_factory`,
+  which is already an injectable hook) rather than adding a `"SIM"` RunMode that would ripple
+  through viewmodels/TS types/RunManager/routes. But simulated data MUST be unmistakably labelled
+  — plan is an additive `simulated: bool` on `ObservatoryLiveStatus` + a distinct badge.
+- Phase-4 store is a NEW builder (`lab/store.py`). **Never modify `build_lab_store()`** — 14
+  existing scenarios depend on it.
 
-### If work resumes here
-The three open threads to pick up are all in the PR body's *Known limitations* / *Deferred
-work*: the target-height id width (settle at bring-up), the vendor-neutral diagnostics contract
-extraction, and the `2 * packet_alignment` tail bound. None blocks merge.
+### Wave status
+- **Wave 1 DONE + pushed (`c0b9587`)**: `lab/store.py`, `world.py`, `actors.py`,
+  `interactions.py`, `ground_truth.py`, `sensors/ti_encoder.py`, `sensors/ti_radar.py` + 62 tests.
+  Round-trip verified independently: exact to ~5e-8 m across several poses AND a non-default
+  `TiCoordinateConvention`.
+- **Wave 2 IN FLIGHT (uncommitted if this session died)**: `sensors/rfid.py` + `test_rfid.py`;
+  `scenarios.py` + `test_scenarios.py` (catalog 01-13 plus `acceptance_60s`).
+- **Not started**: `lab/engine.py` (orchestrator owns this — wires world+sensors+pipeline),
+  `lab/metrics.py`, Observatory SIM controls, docs.
 
-### Hardware status
-No TI board has ever been connected. Hardware acceptance NOT RUN. All measured fields in
-`docs/experiments/ti-iwr6843-single-person-baseline.md` are still TBD.
+### Lesson worth keeping
+Workers report "tests pass" but do NOT run the repo gate. Wave 1 arrived with 18 ruff errors +
+1 mypy error. **Always run `pnpm run lint`/`typecheck` on the combined result before trusting a
+worker hand-back**, and spot-check headline claims: one worker's "different seed -> different
+evolution" test only passed because its helper called `jitter()`.
 
----
+### Outstanding from the user
+The Phase-4 brief arrived **truncated** at scenario `14_co_w` (14+ missing, plus any section
+after 26). Scenarios 01-13 + `acceptance_60s` are being built from the explicit list; reconcile
+14+ against `docs/phases/phase-4-virtual-store-lab-v0.md`'s 18-scenario list or ask.
 
 ## History
 - PR #1 — Foundation v0 (merged by owner).

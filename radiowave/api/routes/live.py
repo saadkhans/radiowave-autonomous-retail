@@ -9,7 +9,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 
 from radiowave.api.live import LiveObservatoryRun, LiveRuntime, serial_support_available
-from radiowave.api.runs import LiveModeError, LiveRunBusyError, RunManager
+from radiowave.api.runs import LiveModeError, LiveRunBusyError, RunManager, StoppableRun
 from radiowave.api.viewmodels import (
     LiveRunCreateRequest,
     ObservatoryLiveAvailability,
@@ -100,18 +100,44 @@ def create_live_run(request: Request, body: LiveRunCreateRequest) -> Observatory
 
 
 def _live_run(request: Request, run_id: str) -> LiveObservatoryRun:
+    """A run backed by real hardware. Used only by controls that need the transport."""
     run = _manager(request).get(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail=f"unknown run {run_id!r}")
+    if isinstance(run, StoppableRun) and not isinstance(run, LiveObservatoryRun):
+        # A simulated run is live-shaped but has no transport to act on. Saying so
+        # beats "is not a LIVE run", which is confusing when its mode IS "LIVE".
+        raise HTTPException(
+            status_code=409,
+            detail=f"run {run_id!r} is simulated; there is no sensor connection to control",
+        )
     if not isinstance(run, LiveObservatoryRun):
         raise HTTPException(status_code=409, detail=f"run {run_id!r} is not a LIVE run")
+    return run
+
+
+def _stoppable_run(request: Request, run_id: str) -> StoppableRun:
+    """Any run that can be stopped, hardware-backed or simulated.
+
+    Stopping is deliberately capability-based rather than an ``isinstance`` check on
+    the hardware class. Every client stops the active run before replacing it
+    (invariant 18's stop-first rule), so tying ``/stop`` to one concrete class meant a
+    simulated run could be started but never switched away from - the stop 409'd, the
+    replacement aborted, and the operator was stuck. What ``/stop`` actually needs is
+    "can this run be told to finish", which both kinds can.
+    """
+    run = _manager(request).get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"unknown run {run_id!r}")
+    if not isinstance(run, StoppableRun):
+        raise HTTPException(status_code=409, detail=f"run {run_id!r} cannot be stopped")
     return run
 
 
 @router.post("/runs/{run_id}/stop", response_model=ObservatorySnapshot)
 def stop_live_run(request: Request, run_id: str) -> ObservatorySnapshot:
     """Stop reading, finalize the pipeline and close the capture; the run stays readable."""
-    run = _live_run(request, run_id)
+    run = _stoppable_run(request, run_id)
     run.stop()  # joins the reader/driver threads; takes the lock itself
     return run.snapshot()
 
