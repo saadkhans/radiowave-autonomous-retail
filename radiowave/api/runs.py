@@ -13,6 +13,7 @@ import math
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from threading import Condition, Lock, RLock
+from typing import Protocol, runtime_checkable
 
 from radiowave.api.viewmodels import (
     ObservatoryBoundary,
@@ -212,6 +213,24 @@ def list_scenarios() -> list[ObservatoryScenarioSummary]:
 # ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
+@runtime_checkable
+class StoppableRun(Protocol):
+    """A run that can be told to finish and then still be read.
+
+    Capability, not class: both a hardware LIVE run and a simulated one can be
+    stopped, and ``/runs/{id}/stop`` cares about that rather than about which
+    concrete class is behind it. Checking the class instead is what made a simulated
+    run unstoppable - and therefore impossible to switch away from, because every
+    replacement path stops the active run first.
+    """
+
+    mode: RunMode
+
+    def stop(self) -> None: ...
+
+    def snapshot(self) -> ObservatorySnapshot: ...
+
+
 class ObservatoryRun:
     """A deterministic REPLAY run over one scenario.
 

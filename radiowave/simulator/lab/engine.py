@@ -182,6 +182,13 @@ class LabEngine:
         self._pending = sorted(scenario.scheduled_interactions, key=lambda i: i.t)
         self._faults_applied: list[str] = []
         self._radar_restarts_done: set[float] = set()
+        # Run counters live on the instance so a caller can step the simulation
+        # incrementally (the Observatory SIM run) and still get a coherent result.
+        self._radar_bytes = 0
+        self._person_obs = 0
+        self._item_obs = 0
+        self._ingested = 0
+        self._rejected = 0
 
     # ------------------------------------------------------------------ helpers
     def _sensor_of(self, modality: SourceType) -> Sensor:
@@ -297,53 +304,81 @@ class LabEngine:
         return [self.observation_normalizer.item(read) for read in self._rfid.reads(tagged, now)]
 
     # ------------------------------------------------------------------- run
-    def run(self) -> LabRunResult:
-        self._radar_bytes = 0
-        ingested = rejected = person_obs = item_obs = 0
-        total_ticks = round(self.scenario.duration_s * self.scenario.tick_hz)
+    @property
+    def total_ticks(self) -> int:
+        return round(self.scenario.duration_s * self.scenario.tick_hz)
 
-        for _ in range(total_ticks):
-            now_s = self._elapsed_s()
-            # Scripted actions land before the tick they are scheduled for, so the
-            # sensors in this tick already see their physical consequences.
-            while self._pending and self._pending[0].t <= now_s:
-                self._apply_interaction(self._pending.pop(0))
+    @property
+    def exhausted(self) -> bool:
+        return self.world.tick >= self.total_ticks
 
-            self.world.step()
-            now = self.world.now
+    def step_once(self) -> int:
+        """Advance exactly one simulated tick and ingest what the sensors saw.
 
-            observations = self._sense_radar(now, now_s) + self._sense_rfid(now, now_s)
-            person_obs += sum(1 for o in observations if o.source_type is SourceType.MMWAVE)
-            item_obs += sum(1 for o in observations if o.source_type is SourceType.RFID)
+        Split out of :meth:`run` so a live viewer can drive the same simulation
+        incrementally without a second code path: the Observatory SIM run calls this,
+        and ``run`` simply calls it in a loop. Both therefore exercise identical
+        sensing, ordering and ingest logic, and cannot drift apart.
 
-            # Stable ordering before ingest: the pipeline drops observations that move
-            # time backwards, and an unordered batch would make that a coin flip rather
-            # than a property of the simulated transport.
-            for observation in sorted(
-                observations, key=lambda o: (o.timestamp, o.source_type.value, o.observation_id)
-            ):
-                if self.pipeline.ingest(observation):
-                    ingested += 1
-                else:
-                    rejected += 1
-            self.pipeline.advance_to(now)
+        Returns the number of observations the pipeline accepted this tick.
+        """
+        now_s = self._elapsed_s()
+        # Scripted actions land before the tick they are scheduled for, so the
+        # sensors in this tick already see their physical consequences.
+        while self._pending and self._pending[0].t <= now_s:
+            self._apply_interaction(self._pending.pop(0))
 
+        self.world.step()
+        now = self.world.now
+
+        observations = self._sense_radar(now, now_s) + self._sense_rfid(now, now_s)
+        self._person_obs += sum(1 for o in observations if o.source_type is SourceType.MMWAVE)
+        self._item_obs += sum(1 for o in observations if o.source_type is SourceType.RFID)
+
+        # Stable ordering before ingest: the pipeline drops observations that move
+        # time backwards, and an unordered batch would make that a coin flip rather
+        # than a property of the simulated transport.
+        accepted = 0
+        for observation in sorted(
+            observations, key=lambda o: (o.timestamp, o.source_type.value, o.observation_id)
+        ):
+            if self.pipeline.ingest(observation):
+                self._ingested += 1
+                accepted += 1
+            else:
+                self._rejected += 1
+        self.pipeline.advance_to(now)
+        return accepted
+
+    def result(self) -> LabRunResult:
+        """Finalize the run and return truth and prediction side by side.
+
+        Callers that need live state mid-run (the Observatory SIM run) read the
+        pipeline through ``ObservatoryRun``'s own state rendering instead; finishing
+        here would close the pipeline underneath them.
+        """
         stats = self._parser.stats
+        pipeline_result = self.pipeline.finish()
         return LabRunResult(
             scenario_id=self.scenario.scenario_id,
             seed=self.scenario.seed,
-            ticks=total_ticks,
-            pipeline=self.pipeline.finish(),
+            ticks=self.world.tick,
+            pipeline=pipeline_result,
             ground_truth=self.ground_truth,
             radar_bytes=self._radar_bytes,
             frames_parsed=stats.frames_parsed,
             frames_rejected=stats.frames_rejected,
-            person_observations=person_obs,
-            item_observations=item_obs,
-            observations_ingested=ingested,
-            observations_rejected=rejected,
+            person_observations=self._person_obs,
+            item_observations=self._item_obs,
+            observations_ingested=self._ingested,
+            observations_rejected=self._rejected,
             faults_applied=list(self._faults_applied),
         )
+
+    def run(self) -> LabRunResult:
+        while not self.exhausted:
+            self.step_once()
+        return self.result()
 
 
 def run_lab_scenario(

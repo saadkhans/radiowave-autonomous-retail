@@ -59,6 +59,8 @@ export const LIVE_POLL_MS = 250;
 export interface ObservatoryState {
   health: string | null;
   scenarios: ScenarioSummary[];
+  /** Virtual store lab catalog (GET /sim/scenarios); same shape as `scenarios`. */
+  simScenarios: ScenarioSummary[];
   scenarioId: string | null;
   scenario: ScenarioDetail | null;
   run: RunState | null;
@@ -80,6 +82,7 @@ export interface ObservatoryState {
 export const initialState: ObservatoryState = {
   health: null,
   scenarios: [],
+  simScenarios: [],
   scenarioId: null,
   scenario: null,
   run: null,
@@ -99,6 +102,7 @@ export const initialState: ObservatoryState = {
 export type Action =
   | { type: "health"; health: string | null }
   | { type: "scenarios"; scenarios: ScenarioSummary[] }
+  | { type: "simScenarios"; scenarios: ScenarioSummary[] }
   | { type: "scenario"; scenarioId: string; scenario: ScenarioDetail | null }
   | { type: "run"; run: RunState | null }
   | { type: "snapshot"; run: RunState; events: ObservatoryEvent[]; timeline: Timeline }
@@ -120,6 +124,8 @@ export function reducer(state: ObservatoryState, action: Action): ObservatorySta
       return { ...state, health: action.health };
     case "scenarios":
       return { ...state, scenarios: action.scenarios };
+    case "simScenarios":
+      return { ...state, simScenarios: action.scenarios };
     case "scenario":
       return {
         ...state,
@@ -171,6 +177,8 @@ export interface ObservatoryActions {
   step(): Promise<void>;
   reset(): Promise<void>;
   seek(timeS: number): Promise<void>;
+  /** Manual advance by an explicit amount of simulated time - mirrors step/reset's pattern; primarily for driving a SIM run. */
+  advance(seconds: number): Promise<void>;
   setSpeed(speed: number): void;
   select(selection: Selection): void;
   toggleLayer(key: keyof Layers): void;
@@ -180,6 +188,7 @@ export interface ObservatoryActions {
   stopLiveRun(): Promise<void>;
   reconnectLiveRun(): Promise<void>;
   adoptLiveRun(runId: string): Promise<void>;
+  startSimRun(scenarioId: string | null, seed?: number): Promise<void>;
 }
 
 const StateContext = createContext<ObservatoryState>(initialState);
@@ -286,10 +295,15 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     (async () => {
       try {
-        const [health, scenarios] = await Promise.all([api.health(), api.listScenarios()]);
+        const [health, scenarios, simScenarios] = await Promise.all([
+          api.health(),
+          api.listScenarios(),
+          api.simScenarios(),
+        ]);
         if (cancelled) return;
         dispatch({ type: "health", health: `${health.engine} ${health.version}` });
         dispatch({ type: "scenarios", scenarios });
+        dispatch({ type: "simScenarios", scenarios: simScenarios });
       } catch (error) {
         if (!cancelled) dispatch({ type: "error", error: describe(error) });
       }
@@ -423,6 +437,23 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
     [applyRun, runQueued],
   );
 
+  // Manual advance: lets an operator drive a run forward by an explicit amount
+  // of simulated time (used by the SIM controls panel to step through a lab
+  // scenario). Mirrors step's pattern exactly: refuses outright (runExclusive)
+  // rather than queuing, since it replaces the same in-flight-tick concern a
+  // tick/step would.
+  const advance = useCallback(
+    (seconds: number) => {
+      const runId = runIdRef.current;
+      if (!runId) return Promise.resolve();
+      return runExclusive(async () => {
+        const generation = generationRef.current;
+        applyRun(await api.advance(runId, seconds), generation);
+      });
+    },
+    [applyRun, runExclusive],
+  );
+
   // Fetches sensor availability; safe to call anytime (read-only), independent
   // of the serial queue used by mutating actions.
   const refreshLiveAvailability = useCallback(async () => {
@@ -510,6 +541,51 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
         const snapshot = await api.getSnapshot(runId);
         const liveStore = await api.getStore(runId);
         runIdRef.current = runId;
+        dispatch({ type: "select", selection: null });
+        dispatch({ type: "liveStore", store: liveStore });
+        applyRun(snapshot, generation);
+      }).finally(() => void refreshLiveAvailability());
+    },
+    [applyRun, refreshLiveAvailability, runExclusive, state.run, stopActiveLiveRun],
+  );
+
+  // Starting a SIM run has no sensor to contend for - the lab needs no
+  // hardware - but it still replaces whatever run is active exactly the way
+  // startLiveRun replaces one: same exclusive-queue discipline, same
+  // generation bump, same ordering (stop-first via stopActiveLiveRun with
+  // `unbound: true`, so a hardware LIVE session left running from before a
+  // page reload is not orphaned by switching to the lab), and runIdRef is
+  // bound only once the snapshot and store fetches both succeed - mirroring
+  // startLiveRun's invariant 18 handling so a failed store fetch cannot leave
+  // an invisible running sim either. Pauses playback first for the same
+  // reason startRun/startLiveRun do.
+  const startSimRun = useCallback(
+    (scenarioId: string | null, seed?: number) => {
+      dispatch({ type: "playing", playing: false });
+      const activeRun = state.run;
+      return runExclusive(async () => {
+        await stopActiveLiveRun(activeRun, { unbound: true });
+        generationRef.current += 1;
+        const generation = generationRef.current;
+        const snapshot = await api.createSimRun(scenarioId, seed);
+        let liveStore: ObservatoryStore;
+        try {
+          liveStore = await api.getStore(snapshot.state.run_id);
+        } catch (error) {
+          try {
+            await api.stopRun(snapshot.state.run_id);
+          } catch (stopError) {
+            // The stop also failed: the run id is still running and the
+            // operator would otherwise only see the store error, with no
+            // indication that manual intervention is required.
+            throw new Error(
+              `sim run ${snapshot.state.run_id} could not be stopped after its store failed to load ` +
+                `(${describe(error)}; stop failed: ${describe(stopError)}); stop it manually`,
+            );
+          }
+          throw error;
+        }
+        runIdRef.current = snapshot.state.run_id;
         dispatch({ type: "select", selection: null });
         dispatch({ type: "liveStore", store: liveStore });
         applyRun(snapshot, generation);
@@ -613,6 +689,7 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
       step,
       reset,
       seek,
+      advance,
       setSpeed,
       select,
       toggleLayer,
@@ -622,6 +699,7 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
       stopLiveRun,
       reconnectLiveRun,
       adoptLiveRun,
+      startSimRun,
     }),
     [
       selectScenario,
@@ -631,6 +709,7 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
       step,
       reset,
       seek,
+      advance,
       setSpeed,
       select,
       toggleLayer,
@@ -640,6 +719,7 @@ export function ObservatoryProvider({ children }: { children: ReactNode }) {
       stopLiveRun,
       reconnectLiveRun,
       adoptLiveRun,
+      startSimRun,
     ],
   );
 

@@ -63,6 +63,24 @@ export const SCENARIO_SUMMARY: ScenarioSummary = {
 
 export const SCENARIO_DETAIL: ScenarioDetail = { ...SCENARIO_SUMMARY, store: STORE };
 
+/** A virtual store lab scenario (GET /sim/scenarios); same shape as ScenarioSummary. */
+export const SIM_SCENARIO_SUMMARY: ScenarioSummary = {
+  scenario_id: "acceptance_60s",
+  name: "Phase-4 acceptance gate",
+  description: "3 shoppers, 30 items, 3 racks, 60 s.",
+  duration_s: 60,
+  seed: 7,
+  shopper_count: 3,
+  item_count: 30,
+  vision_enabled: false,
+  radar_dropouts: 0,
+  rfid_dropouts: 0,
+  ground_truth: [
+    { t_s: 6, event_type: "PICK", epc: "3034F1A00000000000000001", shopper_label: "GT-PERSON-001", counterpart_label: null },
+    { t_s: 20, event_type: "EXIT_WITH_ITEM", epc: "3034F1A00000000000000001", shopper_label: "GT-PERSON-001", counterpart_label: null },
+  ],
+};
+
 export function person(overrides: Partial<Person> = {}): Person {
   return {
     track_id: "P0001",
@@ -251,6 +269,8 @@ interface LiveRunRecord {
   reconnects: number;
   finished: boolean;
   state: LiveStatus["state"];
+  /** Present exactly for SIM runs (POST /runs/sim); drives the `simulated*` LiveStatus fields. */
+  simulated?: { scenarioId: string; seed: number };
 }
 
 /** Thrown by a route handler to produce a non-2xx response (e.g. 409 on start-live). */
@@ -274,6 +294,7 @@ export function installFakeApi() {
   const liveRuns = new Map<string, LiveRunRecord>();
   let runSeq = 0;
   let liveRunSeq = 0;
+  let simRunSeq = 0;
   const calls: string[] = [];
   const failures = new Set<string>();
   const holdQueues = new Map<string, Array<{ promise: Promise<void>; release: () => void }>>();
@@ -328,12 +349,16 @@ export function installFakeApi() {
     timeline: timeline({ run_id: runId, time_s: record.time }),
   });
 
+  // A SIM run keeps a fixed scenario duration (like the real server) rather
+  // than growing with elapsed time the way a hardware LIVE run's does.
   const liveState = (runId: string, record: LiveRunRecord): RunState =>
     liveRunState({
       run_id: runId,
       time_s: record.time,
-      duration_s: record.time,
+      duration_s: record.simulated ? SIM_SCENARIO_SUMMARY.duration_s : record.time,
       finished: record.finished,
+      scenario_id: record.simulated?.scenarioId ?? "live",
+      seed: record.simulated?.seed ?? 0,
       observations_total: Math.round(record.time * 10),
       live: liveStatus({
         state: record.state,
@@ -345,12 +370,20 @@ export function installFakeApi() {
         last_frame_age_s: record.finished ? null : 0.1,
         frame_rate_hz: record.finished ? null : 10,
         observation_rate_hz: record.finished ? null : 10,
+        simulated: record.simulated !== undefined,
+        simulated_scenario_id: record.simulated?.scenarioId ?? null,
+        simulated_seed: record.simulated?.seed ?? null,
       }),
     });
   const liveSnapshot = (runId: string, record: LiveRunRecord) => ({
     state: liveState(runId, record),
     events: { run_id: runId, epoch: 0, events: [], next_seq: 0, total: 0 },
-    timeline: timeline({ run_id: runId, time_s: record.time, duration_s: record.time, ground_truth: [] }),
+    timeline: timeline({
+      run_id: runId,
+      time_s: record.time,
+      duration_s: record.simulated ? SIM_SCENARIO_SUMMARY.duration_s : record.time,
+      ground_truth: record.simulated ? SIM_SCENARIO_SUMMARY.ground_truth : [],
+    }),
   });
   /** Each poll of a live run's snapshot simulates one wall-clock tick of new frames. */
   const tickLive = (record: LiveRunRecord): LiveRunRecord => {
@@ -363,6 +396,7 @@ export function installFakeApi() {
     [/^\/api\/scenarios$/, "GET", () => [SCENARIO_SUMMARY, { ...SCENARIO_SUMMARY, scenario_id: "12", name: "ambiguous two-shopper pickup" }]],
     [/^\/api\/scenarios\/01$/, "GET", () => SCENARIO_DETAIL],
     [/^\/api\/scenarios\/12$/, "GET", () => ({ ...SCENARIO_DETAIL, scenario_id: "12", name: "ambiguous two-shopper pickup", description: "Two shoppers reach for the same shirt." })],
+    [/^\/api\/sim\/scenarios$/, "GET", () => [SIM_SCENARIO_SUMMARY]],
     [
       /^\/api\/runs$/,
       "POST",
@@ -374,10 +408,43 @@ export function installFakeApi() {
       },
     ],
     [
+      /^\/api\/runs\/sim$/,
+      "POST",
+      (_url, init) => {
+        simRunSeq += 1;
+        const runId = `sim-${String(simRunSeq).padStart(4, "0")}`;
+        const body = init?.body
+          ? (JSON.parse(String(init.body)) as { scenario_id?: string | null; seed?: number | null })
+          : {};
+        const scenarioId = body.scenario_id ?? SIM_SCENARIO_SUMMARY.scenario_id;
+        const seed = body.seed ?? SIM_SCENARIO_SUMMARY.seed;
+        const record: LiveRunRecord = {
+          time: 0,
+          generation: 1,
+          reconnects: 0,
+          finished: false,
+          state: "STREAMING",
+          simulated: { scenarioId, seed },
+        };
+        liveRuns.set(runId, record);
+        return liveSnapshot(runId, record);
+      },
+      201,
+    ],
+    [
       /^\/api\/runs\/[^/]+\/reset$/,
       "POST",
       (url) => {
         const runId = runIdFromPath(url.pathname);
+        const liveRecord = liveRuns.get(runId);
+        if (liveRecord) {
+          // SIM reset rebuilds from the same scenario/seed - bit-identical by
+          // design, so only the clock and finished flag move.
+          liveRecord.time = 0;
+          liveRecord.finished = false;
+          liveRecord.state = "STREAMING";
+          return liveSnapshot(runId, liveRecord);
+        }
         const record = recordFor(runId);
         record.time = 0;
         record.steps = 0;
@@ -389,6 +456,12 @@ export function installFakeApi() {
       "POST",
       (url) => {
         const runId = runIdFromPath(url.pathname);
+        const liveRecord = liveRuns.get(runId);
+        if (liveRecord) {
+          // Mirrors SimRuntime.seconds_per_advance (0.5s) on the real server.
+          if (!liveRecord.finished) liveRecord.time = Math.round((liveRecord.time + 0.5) * 100) / 100;
+          return liveSnapshot(runId, liveRecord);
+        }
         const record = recordFor(runId);
         record.time = Math.min(record.time + 0.25, 18);
         record.steps += 1;
@@ -400,8 +473,13 @@ export function installFakeApi() {
       "POST",
       (url, init) => {
         const runId = runIdFromPath(url.pathname);
-        const record = recordFor(runId);
         const body = JSON.parse(String(init?.body)) as { seconds: number };
+        const liveRecord = liveRuns.get(runId);
+        if (liveRecord) {
+          if (!liveRecord.finished) liveRecord.time = Math.round((liveRecord.time + body.seconds) * 100) / 100;
+          return liveSnapshot(runId, liveRecord);
+        }
+        const record = recordFor(runId);
         record.time = Math.min(record.time + body.seconds, 18);
         record.steps += 1;
         return snapshot(runId, record);

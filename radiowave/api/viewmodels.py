@@ -299,6 +299,22 @@ class ObservatoryLiveStatus(ViewModel):
         default=None, description="Normalized recording being written, when capture is on"
     )
     started_at: str = Field(description="Run start instant, ISO 8601 UTC (the live epoch)")
+    simulated: bool = Field(
+        default=False,
+        description=(
+            "True when this feed is the virtual store lab rather than a physical "
+            "sensor. Additive and defaulted so hardware runs are unchanged, but a "
+            "client MUST surface it: simulated and hardware runs render through the "
+            "same panels, and mistaking one for the other would make a demo look "
+            "like a measurement."
+        ),
+    )
+    simulated_scenario_id: str | None = Field(
+        default=None, description="Lab scenario driving a simulated feed"
+    )
+    simulated_seed: int | None = Field(
+        default=None, description="Seed driving a simulated feed; the run is reproducible from it"
+    )
 
 
 class ObservatoryRunState(ViewModel):
@@ -361,6 +377,22 @@ class RunCreateRequest(ViewModel):
     scenario_id: str
     seed: int | None = Field(
         default=None, ge=0, le=2**32 - 1, description="Override the scenario seed (numpy range)"
+    )
+
+
+class SimRunCreateRequest(ViewModel):
+    """Start a virtual store lab run.
+
+    ``seed`` overrides the scenario's own seed: the same physical scenario replayed
+    against a different noise realization, which is the comparison the lab exists to
+    make cheap.
+    """
+
+    scenario_id: str | None = Field(
+        default=None, description="Lab scenario id; the runtime default when omitted"
+    )
+    seed: int | None = Field(
+        default=None, ge=0, description="Override the scenario seed (varies noise, not truth)"
     )
 
 
