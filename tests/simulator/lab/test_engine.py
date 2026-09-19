@@ -193,3 +193,39 @@ def test_sensor_modalities_are_both_represented() -> None:
     tracks = run_lab_scenario(load_scenario(ACCEPTANCE)).pipeline
     assert {SourceType.MMWAVE, SourceType.RFID}
     assert tracks.item_tracks and tracks.person_tracks
+
+
+def test_a_recycled_radar_native_id_does_not_merge_two_shoppers() -> None:
+    """The scenario Phase-3 generation scoping exists for.
+
+    ``09_native_id_reuse`` schedules the radar to hand a departing shopper's native
+    track id to an arriving one. A native id is the sensor's own bookkeeping, not an
+    identity, so recycling it must not fuse two people into one canonical track -
+    which is precisely the failure that would be invisible without simulating it.
+    """
+    engine = LabEngine(load_scenario("09_native_id_reuse"))
+    result = engine.run()
+
+    assert any(f.startswith("NATIVE_ID_REUSE") for f in result.faults_applied), (
+        "the scheduled reuse window must actually have driven the radar"
+    )
+    track_ids = {t.track_id for t in result.pipeline.person_tracks}
+    assert len(track_ids) == 2, f"two shoppers must stay distinct, got {track_ids}"
+    assert result.frames_rejected == 0
+
+
+def test_forcing_id_reuse_does_not_disturb_the_rest_of_the_noise_stream() -> None:
+    """Turning a fault on must change what that fault governs and nothing else.
+
+    The radar draws its reuse random either way, so a run with the window scheduled
+    stays comparable to one without it: any difference is attributable to the reuse
+    itself rather than to every later noise draw having shifted.
+    """
+    scenario = load_scenario("09_native_id_reuse")
+    without = scenario.model_copy(update={"fault_injections": []})
+    a, b = LabEngine(scenario), LabEngine(without)
+    result_a, result_b = a.run(), b.run()
+
+    # Same world, same frames; only identity bookkeeping differs.
+    assert result_a.frames_parsed == result_b.frames_parsed
+    assert result_a.person_observations == result_b.person_observations

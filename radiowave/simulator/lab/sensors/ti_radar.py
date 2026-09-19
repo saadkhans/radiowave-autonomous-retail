@@ -201,6 +201,7 @@ class TiRadarEmulator:
         self._frame_number = 0
         self._tracks: dict[str, _Track] = {}
         self._retired_ids: list[int] = []
+        self._force_id_reuse = False
         self._next_native_id = 1
 
     @property
@@ -232,9 +233,26 @@ class TiRadarEmulator:
         angle = abs(math.atan2(left, forward))
         return angle <= fov.horizontal_half_angle_rad
 
+    def set_forced_id_reuse(self, enabled: bool) -> None:
+        """Force the next allocations to recycle a retired id, for a scheduled fault.
+
+        A probability alone cannot express "reuse an id *now*", which is what a
+        scenario wants when it schedules a NATIVE_ID_REUSE window at the moment one
+        shopper leaves and another arrives. That exact sequencing is the case Phase
+        3's generation scoping has to survive, so it must be schedulable rather than
+        left to chance.
+        """
+        self._force_id_reuse = enabled
+
     def _allocate_native_id(self) -> int:
         noise = self._config.noise
-        if self._retired_ids and self._rng.random() < noise.native_id_reuse_probability:
+        # The draw happens either way, even when reuse is forced, so that turning the
+        # fault on does not shift the RNG stream underneath every other noise source.
+        # Enabling a fault should change what the fault governs and nothing else,
+        # otherwise two runs are incomparable for reasons unrelated to the fault.
+        roll = self._rng.random()
+        reuse = self._force_id_reuse or roll < noise.native_id_reuse_probability
+        if self._retired_ids and reuse:
             index = int(self._rng.integers(0, len(self._retired_ids)))
             return self._retired_ids.pop(index)
         native_id = self._next_native_id

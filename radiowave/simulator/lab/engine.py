@@ -182,6 +182,7 @@ class LabEngine:
         self._pending = sorted(scenario.scheduled_interactions, key=lambda i: i.t)
         self._faults_applied: list[str] = []
         self._radar_restarts_done: set[float] = set()
+        self._id_reuse_forced = False
         # Run counters live on the instance so a caller can step the simulation
         # incrementally (the Observatory SIM run) and still get a coherent result.
         self._radar_bytes = 0
@@ -277,6 +278,17 @@ class LabEngine:
                 self._parser.reset()
                 self._radar_restarts_done.add(fault.start_t)
                 self._faults_applied.append(f"RADAR_RESTART@{fault.start_t}")
+
+        # A scheduled NATIVE_ID_REUSE window makes the radar recycle a retired native
+        # id rather than waiting for chance: the case worth exercising is a departing
+        # shopper's id being handed to an arriving one, which must NOT let stale
+        # identity survive - Phase 3's generation scoping is what stops it.
+        reuse_now = self._fault_active(FaultKind.NATIVE_ID_REUSE, now_s)
+        if reuse_now != self._id_reuse_forced:
+            self._radar.set_forced_id_reuse(reuse_now)
+            self._id_reuse_forced = reuse_now
+            if reuse_now:
+                self._faults_applied.append(f"NATIVE_ID_REUSE@{now_s}")
 
         targets = [
             VisibleTarget(

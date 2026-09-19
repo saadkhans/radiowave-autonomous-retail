@@ -46,7 +46,7 @@ TI UART -> defensive parser -> PersonObservation -> canonical PersonTrack -> liv
 
 Build a realistic mini-store entirely in software using production sensor boundaries. First gate: 3 shoppers + 30 unique items + 3 racks + deterministic 60-second live simulation through production fusion/confidence/cart and Observatory.
 
-See `docs/phases/phase-4-virtual-store-lab-v0.md`.
+See `docs/phases/phase-4-virtual-store-lab-v0.md` for the phase contract, and `docs/simulator/virtual-store-lab.md` for usage and architecture.
 
 ### Phase 5 — RFID Native Boundary + Real Reader Integration
 Build native RFID simulation first, then integrate Impinj R700 / Times-7 hardware and calibrate real item-location behavior.
