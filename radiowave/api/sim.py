@@ -66,6 +66,9 @@ class SimObservatoryRun(ObservatoryRun):
     """A lab scenario, stepped incrementally and rendered as a live-style run."""
 
     mode: RunMode = "LIVE"
+    #: Live-SHAPED, but not hardware-backed: it must never occupy the exclusive
+    #: sensor slot (see ObservatoryRun.simulated).
+    simulated: bool = True
 
     def __init__(
         self,
@@ -189,11 +192,21 @@ class SimObservatoryRun(ObservatoryRun):
         stats = self._engine._parser.stats
         radar_sensor_id = self._engine._radar_sensor_id
         elapsed = max(self.time_s, 1e-9)
+        # A deliberate radar outage must be visible, or a client cannot tell a
+        # configured dropout from a healthy sensor. Staleness is derived from
+        # SIMULATED time - the age of the last emitted frame - not the host clock.
+        frame_age_s = round(self.time_s - self._engine.last_frame_at_s, 3)
+        if self.finished:
+            state, message = "DISCONNECTED", "simulation complete"
+        elif self._engine.radar_suppressed:
+            state, message = "STALE", "simulated radar dropout"
+        else:
+            state, message = "STREAMING", None
         return ObservatoryLiveStatus(
             sensor_id=radar_sensor_id,
             sensor_name=f"Virtual TI radar ({self.lab_scenario.scenario_id})",
-            state="STREAMING" if not self.finished else "DISCONNECTED",
-            message=None if not self.finished else "simulation complete",
+            state=state,
+            message=message,
             generation=self._engine._ti_normalizer.generation,
             frames_received=stats.frames_parsed + stats.frames_rejected,
             frames_parsed=stats.frames_parsed,
@@ -202,7 +215,7 @@ class SimObservatoryRun(ObservatoryRun):
             observations_emitted=self._engine._person_obs,
             observations_dropped_overflow=0,
             reconnect_count=max(0, self._engine._ti_normalizer.generation - 1),
-            last_frame_age_s=0.0,
+            last_frame_age_s=max(0.0, frame_age_s),
             frame_rate_hz=round(stats.frames_parsed / elapsed, 2),
             observation_rate_hz=round(self._engine._person_obs / elapsed, 2),
             capture_path=None,

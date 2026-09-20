@@ -172,11 +172,15 @@ def handoff(
     item.position = _carry_position(world, to_shopper)
     from_shopper.carried_epcs = tuple(e for e in from_shopper.carried_epcs if e != epc)
     to_shopper.carried_epcs = (*to_shopper.carried_epcs, epc)
+    # Primary is the GIVER, counterpart the receiver - matching the canonical
+    # RetailEvent contract and the scenario's own ExpectedTruth. Recording them the
+    # other way round made the truth log disagree with the declared answer key, so
+    # every attribution metric derived from it compared the wrong pair of shoppers.
     log.record_event(
         world,
         GroundTruthEventType.HANDOFF,
-        ground_truth_person_id=to_ground_truth_person_id,
-        counterpart_person_id=from_person_id,
+        ground_truth_person_id=from_person_id,
+        counterpart_person_id=to_ground_truth_person_id,
         epc=epc,
     )
 
@@ -196,18 +200,14 @@ def exit_store(
     departure being triggered.
     """
     actor = world.shoppers[ground_truth_person_id]
-    carried = actor.carried_epcs
+    # Only STARTS the walk. EXIT and EXIT_WITH_ITEM are recorded by the engine when
+    # the shopper actually reaches the boundary (see LabEngine._record_departures),
+    # because the walk takes simulated seconds and the shopper stays present - and
+    # keeps generating radar and RFID evidence - for all of them. Stamping the truth
+    # here instead claimed an item had left the store while the sensors could still
+    # plainly see it inside, which makes every exit and cart comparison wrong by the
+    # length of that walk.
     actors.exit_store(actor, exit_point, speed_mps)
-    log.record_event(
-        world, GroundTruthEventType.EXIT, ground_truth_person_id=ground_truth_person_id
-    )
-    for epc in carried:
-        log.record_event(
-            world,
-            GroundTruthEventType.EXIT_WITH_ITEM,
-            ground_truth_person_id=ground_truth_person_id,
-            epc=epc,
-        )
 
 
 __all__ = [

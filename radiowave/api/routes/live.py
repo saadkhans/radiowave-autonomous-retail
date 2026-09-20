@@ -138,8 +138,11 @@ def _stoppable_run(request: Request, run_id: str) -> StoppableRun:
 def stop_live_run(request: Request, run_id: str) -> ObservatorySnapshot:
     """Stop reading, finalize the pipeline and close the capture; the run stays readable."""
     run = _stoppable_run(request, run_id)
-    run.stop()  # joins the reader/driver threads; takes the lock itself
-    return run.snapshot()
+    # ``apply`` performs the mutation and captures the snapshot under ONE hold of the
+    # run lock. Calling stop() and snapshot() separately left a window in which
+    # another client could reset a simulated run in between, so the stop response
+    # described a freshly reset, unfinished run instead of the stop it was answering.
+    return run.apply(run.stop)
 
 
 @router.post("/runs/{run_id}/reconnect", response_model=ObservatorySnapshot)

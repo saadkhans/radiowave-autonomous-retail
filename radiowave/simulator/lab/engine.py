@@ -49,8 +49,8 @@ from radiowave.digital_twin.registry import StoreRegistry
 from radiowave.fusion.interfaces import Recorder
 from radiowave.ingestion.normalization import ObservationNormalizer
 from radiowave.pipeline import FoundationPipeline, PipelineConfig, PipelineResult
-from radiowave.simulator.lab import interactions
-from radiowave.simulator.lab.ground_truth import GroundTruthLog
+from radiowave.simulator.lab import actors, interactions
+from radiowave.simulator.lab.ground_truth import GroundTruthEventType, GroundTruthLog
 from radiowave.simulator.lab.scenarios import (
     FaultKind,
     InteractionVerb,
@@ -69,7 +69,12 @@ from radiowave.simulator.lab.sensors.ti_radar import (
     TiRadarEmulatorConfig,
     VisibleTarget,
 )
-from radiowave.simulator.lab.world import VirtualWorld, WorldConfig
+from radiowave.simulator.lab.world import (
+    ActorMotionState,
+    ItemState,
+    VirtualWorld,
+    WorldConfig,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,29 +165,34 @@ class LabEngine:
             if sensor.modality is SourceType.RFID
         ]
         reliability = scenario.sensors.rfid
+        reliability_noise = RfidReadNoiseConfig(
+            base_read_probability=reliability.read_probability,
+            missed_read_probability=reliability.missed_read_rate,
+            bleed_probability=reliability.bleed_rate,
+            # Lab runs need item LOCATION evidence, because Foundation's fusion is
+            # built around an RFID adapter supplying a zone-scale coordinate (its own
+            # synthetic reads carry ~0.5 m sigma). With no estimate at all the pipeline
+            # tracks items but can never infer that one moved, so every scenario
+            # proposes zero events - a starved simulator, not a working one. The blur
+            # stays honest at rack scale.
+            localization_enabled=True,
+        )
         self._rfid = RfidReaderEmulator(
             RfidReaderEmulatorConfig(
-                antennas=antennas,
-                noise=RfidReadNoiseConfig(
-                    base_read_probability=reliability.read_probability,
-                    missed_read_probability=reliability.missed_read_rate,
-                    bleed_probability=reliability.bleed_rate,
-                    # Lab runs need item LOCATION evidence, because Foundation's fusion
-                    # is built around an RFID adapter supplying a zone-scale coordinate
-                    # (its own synthetic reads carry ~0.5 m sigma). With no estimate at
-                    # all the pipeline tracks items but can never infer that one moved,
-                    # so every scenario proposes zero events - which is a starved
-                    # simulator, not a working one. The blur stays honest at rack scale.
-                    localization_enabled=True,
-                ),
-                seed=scenario.seed,
+                antennas=antennas, noise=reliability_noise, seed=scenario.seed
             )
         )
 
+        # The advertised reader cadence, used to pace polling (see _sense_rfid).
+        self._rfid_rate_hz = float(reliability_noise.read_rate_hz)
         self._pending = sorted(scenario.scheduled_interactions, key=lambda i: i.t)
         self._faults_applied: list[str] = []
         self._radar_restarts_done: set[float] = set()
         self._id_reuse_forced = False
+        self._pending_waypoints: dict[str, list[tuple[float, tuple[float, float]]]] = {}
+        self._departed: set[str] = set()
+        self._next_rfid_poll_s = 0.0
+        self._last_frame_at_s = 0.0
         # Run counters live on the instance so a caller can step the simulation
         # incrementally (the Observatory SIM run) and still get a coherent result.
         self._radar_bytes = 0
@@ -202,9 +212,18 @@ class LabEngine:
     def _elapsed_s(self) -> float:
         return self.world.tick / self.scenario.tick_hz
 
-    def _fault_active(self, kind: FaultKind, now_s: float) -> bool:
+    def _fault_active(self, kind: FaultKind, now_s: float, sensor_id: str | None = None) -> bool:
+        """Is this fault active now, for this sensor?
+
+        ``sensor_id`` matters: a fault that names one read point must darken only
+        that read point. Ignoring it turned ``08_rfid_dropout`` - declared against a
+        single rack antenna - into a store-wide RFID blackout, so the scenario
+        measured something far more severe than the outage it describes.
+        """
         for fault in self.scenario.fault_injections:
-            if fault.kind is kind and fault.start_t <= now_s < fault.end_t:
+            if fault.kind is not kind or not (fault.start_t <= now_s < fault.end_t):
+                continue
+            if fault.sensor_id is None or sensor_id is None or fault.sensor_id == sensor_id:
                 return True
         return False
 
@@ -221,12 +240,16 @@ class LabEngine:
         verb = item.verb
         if verb is InteractionVerb.ENTER:
             entry = (script.waypoints[0].x, script.waypoints[0].y)
-            actor = interactions.enter(world, log, entry, item.shopper_id, script.speed_mps)
-            rest = [(w.x, w.y) for w in script.waypoints[1:]]
-            if rest:
-                from radiowave.simulator.lab import actors as _actors
-
-                _actors.waypoint_walk(actor, rest, script.speed_mps)
+            interactions.enter(world, log, entry, item.shopper_id, script.speed_mps)
+            # Later waypoints are QUEUED against their own ``t`` rather than loaded
+            # now. Loading the whole route at entry made the shopper sprint it
+            # immediately, and the next APPROACH_FIXTURE then overwrote whatever was
+            # left - so the shopper stood at the rack for the rest of the run instead
+            # of carrying the item along the declared trajectory, and the radar and
+            # RFID evidence described a route the scenario never asked for.
+            self._pending_waypoints[item.shopper_id] = [
+                (w.t, (w.x, w.y)) for w in script.waypoints[1:]
+            ]
         elif verb is InteractionVerb.APPROACH_FIXTURE:
             assert item.fixture_id is not None  # guaranteed by LabScenario validation
             interactions.approach_fixture(
@@ -252,6 +275,49 @@ class LabEngine:
             interactions.exit_store(
                 world, log, item.shopper_id, (last.x, last.y), script.speed_mps
             )
+
+    def _release_due_waypoints(self, now_s: float) -> None:
+        """Hand a shopper the next scripted waypoint once its time has come."""
+        for shopper_id, queued in self._pending_waypoints.items():
+            actor = self.world.shoppers.get(shopper_id)
+            if actor is None or not queued:
+                continue
+            # Once a shopper is leaving, the scripted route is over. Releasing a
+            # later waypoint would call waypoint_walk and reset the actor out of
+            # EXITING back to WALKING, so arrival at the door would register as an
+            # ordinary stop and the departure - and with it EXIT_WITH_ITEM truth -
+            # would never be recorded at all.
+            if actor.state in (ActorMotionState.EXITING, ActorMotionState.EXITED):
+                continue
+            due = [point for when, point in queued if when <= now_s]
+            if due:
+                self._pending_waypoints[shopper_id] = [
+                    (when, point) for when, point in queued if when > now_s
+                ]
+                actors.waypoint_walk(actor, due, actor.speed_mps)
+
+    def _record_departures(self) -> None:
+        """Record EXIT / EXIT_WITH_ITEM at the moment the boundary is actually crossed.
+
+        ``exit_store`` only starts the walk; the shopper stays present - and visible to
+        both sensors - until they arrive. Truth is therefore stamped here, on the
+        present -> departed transition, so the answer key agrees with when the evidence
+        could first have supported it.
+        """
+        for shopper_id, actor in self.world.shoppers.items():
+            if actor.present or shopper_id in self._departed:
+                continue
+            self._departed.add(shopper_id)
+            self.ground_truth.record_event(
+                self.world, GroundTruthEventType.EXIT, ground_truth_person_id=shopper_id
+            )
+            for epc in actor.carried_epcs:
+                self.ground_truth.record_event(
+                    self.world,
+                    GroundTruthEventType.EXIT_WITH_ITEM,
+                    ground_truth_person_id=shopper_id,
+                    epc=epc,
+                )
 
     # --------------------------------------------------------------- sensing
     def _sense_radar(self, now: datetime, now_s: float) -> list[AnyObservation]:
@@ -300,6 +366,8 @@ class LabEngine:
             if actor.present
         ]
         data = self._radar.emit(targets, now)
+        if data:
+            self._last_frame_at_s = now_s
         self._radar_bytes += len(data)
         observations: list[AnyObservation] = []
         for frame in self._parser.feed(data):
@@ -307,18 +375,57 @@ class LabEngine:
         return observations
 
     def _sense_rfid(self, now: datetime, now_s: float) -> list[AnyObservation]:
-        if self._fault_active(FaultKind.RFID_DROPOUT, now_s):
+        # Poll at the reader's CONFIGURED cadence, not once per world tick. At the
+        # catalog's 20 Hz tick and a 2 Hz reader, polling every tick produced ten
+        # times the independent localized estimates the reader claims to deliver -
+        # each one a fresh blur of the true position, so averaging them recovered far
+        # more certainty than the advertised rate can justify. That silently made the
+        # evidence better than the hardware assumption it is meant to stand in for.
+        if now_s + 1e-9 < self._next_rfid_poll_s:
             return []
+        rate_hz = self._rfid_rate_hz
+        self._next_rfid_poll_s = now_s + (1.0 / rate_hz if rate_hz > 0 else 0.0)
+
         tagged = [
             TaggedItemState(epc=state.epc, position=state.position, carrier_id=state.carrier_id)
             for state in self.world.items.values()
+            if self._still_in_store(state)
         ]
-        return [self.observation_normalizer.item(read) for read in self._rfid.reads(tagged, now)]
+        return [
+            self.observation_normalizer.item(read)
+            for read in self._rfid.reads(tagged, now)
+            # Filtered per read rather than per poll: only the named antenna goes
+            # dark, so the rest of the reader keeps working as the scenario declares.
+            if not self._fault_active(FaultKind.RFID_DROPOUT, now_s, read.sensor_id)
+        ]
+
+    def _still_in_store(self, state: ItemState) -> bool:
+        """False once an item's carrier has physically left the building.
+
+        A tag that has gone out of the door cannot keep answering antennas inside it.
+        Leaving departed merchandise in the poll kept generating in-store evidence for
+        items that had left, which corrupts exactly the exit and cart evaluation the
+        long scenarios exist to measure.
+        """
+        if state.carrier_id is None:
+            return True
+        carrier = self.world.shoppers.get(state.carrier_id)
+        return carrier is None or carrier.present
 
     # ------------------------------------------------------------------- run
     @property
     def total_ticks(self) -> int:
         return round(self.scenario.duration_s * self.scenario.tick_hz)
+
+    @property
+    def radar_suppressed(self) -> bool:
+        """True while a configured RADAR_DROPOUT window is open (for live status)."""
+        return self._fault_active(FaultKind.RADAR_DROPOUT, self._elapsed_s())
+
+    @property
+    def last_frame_at_s(self) -> float:
+        """Elapsed simulated seconds at the last emitted radar frame."""
+        return self._last_frame_at_s
 
     @property
     def exhausted(self) -> bool:
@@ -340,8 +447,14 @@ class LabEngine:
         while self._pending and self._pending[0].t <= now_s:
             self._apply_interaction(self._pending.pop(0))
 
+        self._release_due_waypoints(now_s)
         self.world.step()
         now = self.world.now
+        self._record_departures()
+        # Sample continuous truth every tick. Without this the trajectory maps the
+        # log advertises stay empty, so track continuity, position error, co-motion
+        # and ID switches cannot be evaluated against physical truth at all.
+        self.ground_truth.snapshot(self.world)
 
         observations = self._sense_radar(now, now_s) + self._sense_rfid(now, now_s)
         self._person_obs += sum(1 for o in observations if o.source_type is SourceType.MMWAVE)
@@ -390,6 +503,13 @@ class LabEngine:
     def run(self) -> LabRunResult:
         while not self.exhausted:
             self.step_once()
+        # Validation accepts an interaction at exactly ``duration_s``, but the loop
+        # above stops before a tick with ``now_s == duration_s`` ever runs, so such an
+        # action would vanish from both physical state and truth. A validated
+        # timestamp must never silently disappear.
+        while self._pending and self._pending[0].t <= self.scenario.duration_s:
+            self._apply_interaction(self._pending.pop(0))
+        self._record_departures()
         return self.result()
 
 

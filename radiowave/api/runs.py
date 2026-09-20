@@ -230,6 +230,16 @@ class StoppableRun(Protocol):
 
     def snapshot(self) -> ObservatorySnapshot: ...
 
+    def apply(self, operation: Callable[[], None]) -> ObservatorySnapshot:
+        """Mutate and snapshot under one hold of the run lock.
+
+        Part of the protocol because ``/stop`` needs the snapshot that the stop
+        itself produced: doing the two separately leaves a window for another client
+        to change the run in between, so the response describes a state the caller
+        never asked for.
+        """
+        ...
+
 
 class ObservatoryRun:
     """A deterministic REPLAY run over one scenario.
@@ -240,6 +250,12 @@ class ObservatoryRun:
     """
 
     mode: RunMode = "REPLAY"
+    #: True when this run's data comes from the virtual store lab rather than a
+    #: physical sensor. The exclusive LIVE slot exists to arbitrate ONE serial port,
+    #: so a simulated run must not hold it: doing so made ``/live/status`` report a
+    #: simulation as the active hardware run and rejected a genuine ``POST
+    #: /runs/live`` with 409, even though the simulation owns no device.
+    simulated: bool = False
 
     def __init__(
         self,
@@ -1068,7 +1084,8 @@ class RunManager:
         if self._closing_live_run_id is not None:
             return self._closing_live_run_id
         for run_id, run in sorted(self._runs.items()):
-            if run.mode == "LIVE" and not run.finished:
+            # ``simulated`` runs are excluded: the slot arbitrates a physical port.
+            if run.mode == "LIVE" and not run.finished and not run.simulated:
                 return run_id
         return None
 
@@ -1077,7 +1094,7 @@ class RunManager:
             return sorted(
                 run_id
                 for run_id, run in self._runs.items()
-                if run.mode == "LIVE" and not run.finished
+                if run.mode == "LIVE" and not run.finished and not run.simulated
             )
 
     def delete(self, run_id: str) -> bool:

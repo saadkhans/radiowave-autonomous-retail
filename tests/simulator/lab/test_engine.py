@@ -229,3 +229,103 @@ def test_forcing_id_reuse_does_not_disturb_the_rest_of_the_noise_stream() -> Non
     # Same world, same frames; only identity bookkeeping differs.
     assert result_a.frames_parsed == result_b.frames_parsed
     assert result_a.person_observations == result_b.person_observations
+
+
+# ------------------------------------------------------- Codex PR #4 round-1 fixes
+
+
+def test_exit_truth_is_recorded_when_the_boundary_is_crossed() -> None:
+    """Truth must be stamped when the shopper actually leaves, not when told to.
+
+    The walk to the door takes simulated seconds during which the shopper is still
+    present and still generating radar and RFID evidence. Recording the exit on
+    intent put the answer key ahead of any evidence that could support it.
+    """
+    from radiowave.simulator.lab.ground_truth import GroundTruthEventType
+
+    scenario = load_scenario("01_normal_purchase")
+    scheduled_exit = next(
+        i.t for i in scenario.scheduled_interactions if i.verb.value == "EXIT"
+    )
+    engine = LabEngine(scenario)
+    engine.run()
+
+    exits = engine.ground_truth.events_of(GroundTruthEventType.EXIT)
+    assert len(exits) == 1, "the shopper must actually complete the walk and depart"
+    crossed_at = (exits[0].timestamp - engine.world.now).total_seconds() + (
+        engine.world.tick / scenario.tick_hz
+    )
+    # Strictly after the instruction: the walk has non-zero duration.
+    assert crossed_at > scheduled_exit
+    assert engine.ground_truth.events_of(GroundTruthEventType.EXIT_WITH_ITEM)
+    assert all(not a.present for a in engine.world.shoppers.values())
+
+
+def test_handoff_truth_names_the_giver_first() -> None:
+    """Primary is the giver, counterpart the receiver - matching RetailEvent and the
+    scenario's own ExpectedTruth. Reversed, every attribution metric compared the
+    wrong pair."""
+    from radiowave.simulator.lab.ground_truth import GroundTruthEventType
+
+    engine = LabEngine(load_scenario("04_handoff"))
+    engine.run()
+    handoffs = engine.ground_truth.events_of(GroundTruthEventType.HANDOFF)
+    assert len(handoffs) == 1
+    event = handoffs[0]
+    assert event.ground_truth_person_id == "GT-PERSON-001"
+    assert event.counterpart_person_id == "GT-PERSON-002"
+
+
+def test_rfid_polls_at_the_configured_cadence_not_every_tick() -> None:
+    """The reader advertises a read rate; polling faster silently manufactures
+    certainty.
+
+    Each poll is an independent blur of the true position, so ten times the polls
+    averages down to far better accuracy than the advertised cadence could deliver -
+    making the simulated evidence better than the hardware assumption it stands in
+    for.
+    """
+    scenario = load_scenario("01_normal_purchase")
+    result = run_lab_scenario(scenario)
+
+    ticks = round(scenario.duration_s * scenario.tick_hz)
+    polls_if_every_tick = ticks * len(
+        [s for s in scenario.store.sensors if s.modality.value == "RFID"]
+    ) * len(scenario.store.items)
+    # Far below the every-tick ceiling: the cadence is actually being honoured.
+    assert result.item_observations < polls_if_every_tick / 4
+
+
+def test_merchandise_stops_being_read_once_its_carrier_has_left() -> None:
+    """A tag that has gone out of the door cannot keep answering antennas inside it.
+
+    Leaving departed items in the poll kept producing in-store evidence for goods
+    that had left, which corrupts precisely the exit and cart evaluation the long
+    scenarios exist to measure.
+    """
+    engine = LabEngine(load_scenario("01_normal_purchase"))
+    engine.run()
+
+    departed = [a for a in engine.world.shoppers.values() if not a.present]
+    assert departed, "the scenario must actually produce a departure"
+    carried_out = {epc for a in departed for epc in a.carried_epcs}
+    assert carried_out, "the shopper must leave carrying something"
+    for epc in carried_out:
+        assert not engine._still_in_store(engine.world.items[epc])
+
+
+def test_scripted_waypoints_are_released_on_their_own_schedule() -> None:
+    """Waypoints carry a ``t``; loading the whole route at entry made the shopper
+    sprint it immediately and then stand still, so the emitted evidence described a
+    route the scenario never declared."""
+    scenario = load_scenario("01_normal_purchase")
+    engine = LabEngine(scenario)
+    # Drive only the first second: a shopper that had been handed the whole route
+    # would already be far along it.
+    for _ in range(int(scenario.tick_hz)):
+        engine.step_once()
+    actor = next(iter(engine.world.shoppers.values()))
+    entry = scenario.shoppers[0].waypoints[0]
+    travelled = ((actor.position.x - entry.x) ** 2 + (actor.position.y - entry.y) ** 2) ** 0.5
+    # At ~1.2 m/s, one second of walking cannot have covered the whole store.
+    assert travelled <= actor.speed_mps * 1.5

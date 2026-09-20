@@ -55,6 +55,26 @@ from radiowave.digital_twin.geometry import RigidTransform
 # even if all are ever seeded from the same scenario seed in one process.
 _RFID_LAB_SEED_OFFSET = 505
 
+# Generation-scoped floor for an antenna's emitted sequence numbers after a
+# simulated reader restart (see ``RfidReadNoiseConfig.reader_restart_probability``
+# and ``RfidReaderEmulator._restart``). This mirrors, in spirit, how the TI
+# mmWave adapter scopes ``native_track_id`` by stream generation (see
+# ``radiowave/adapters/mmwave/ti/adapter.py``'s ``f"g{generation}:t{tid}"``
+# hint): ``ObservationNormalizer.item`` derives ``observation_id`` as
+# ``f"rfid:{sensor_id}:{sequence}"``, and ``NativeRfidRead.sequence`` is a
+# plain, non-negative ``int`` -- not a string -- so the generation cannot be
+# embedded as a string prefix the way TI embeds it in ``native_track_id``.
+# Instead, each new generation's onboard counter starts at
+# ``generation * _SEQUENCE_GENERATION_STRIDE`` rather than at literal zero:
+# this still models a real reader's onboard sequence counter restarting from
+# a fresh baseline every generation, while guaranteeing the *emitted*
+# sequence -- and therefore the observation id -- can never collide with one
+# already used by an earlier generation. A single generation emitting
+# anywhere near a million reads within one lab run would overflow this
+# headroom; Foundation v0 lab runs are far below that, so this assumption is
+# safe here (widen the stride if that ever changes).
+_SEQUENCE_GENERATION_STRIDE = 1_000_000
+
 
 @dataclass(frozen=True, slots=True)
 class TaggedItemState:
@@ -122,8 +142,14 @@ class RfidReadNoiseConfig:
     on top of the distance-based detection roll -- produces a dropout gap."""
     duplicate_read_probability: float = 0.0
     """ASSUMPTION: probability a successful read is reported a second time
-    verbatim (same RSSI/phase, a fresh sequence number) -- an
-    un-deduplicated reader buffer, a common real RAIN RFID nuisance."""
+    verbatim -- the exact same measurement (same sequence, RSSI, phase,
+    timestamp, and any localization estimate), not a freshly re-noised one --
+    modeling an un-deduplicated reader buffer or a retried transport, a
+    common real RAIN RFID nuisance. Verbatim reuse (rather than drawing new
+    noise and a new sequence number) is what lets the pipeline's
+    ``ObservationDeduplicator`` recognize the repeat as a replay of the same
+    evidence and drop it, instead of accepting it as a second, independent
+    (and therefore confidence-inflating) observation."""
     burst_probability: float = 0.0
     """ASSUMPTION: probability a successful read additionally triggers a burst
     of extra, independently-noisy reads of the same tag within the same
@@ -149,8 +175,13 @@ class RfidReadNoiseConfig:
     exactly this many subsequent calls."""
     reader_restart_probability: float = 0.0
     """ASSUMPTION: per-antenna, per-call probability of a deliberate reader
-    restart, resetting that antenna's read-sequence counter to zero -- the
-    RFID analogue of ``TiRadarEmulator.reset_stream``."""
+    restart -- the RFID analogue of ``TiRadarEmulator.reset_stream``. A
+    restart resets that antenna's onboard sequence counter to a fresh
+    baseline (a real reader's firmware genuinely does this), but the
+    *emitted* sequence value is scoped to a per-antenna generation counter
+    (see ``_SEQUENCE_GENERATION_STRIDE`` and ``RfidReaderEmulator._restart``)
+    so a post-restart read's observation id can never collide with one
+    already emitted before the restart."""
     delayed_delivery_probability: float = 0.0
     """ASSUMPTION: probability a generated read is held back rather than
     returned immediately (see ``max_delivery_delay_calls``), simulating
@@ -308,16 +339,20 @@ class RfidReaderEmulator:
     :class:`NativeRfidRead` per logical antenna zone, per call to :meth:`reads`.
 
     One instance owns one seeded RNG stream, one read-sequence counter per
-    antenna zone, and the fault-model bookkeeping (temporary-disappearance
-    windows, the delayed-delivery queue) -- exactly as one physical reader
-    connection would own its own read buffer and state, independent of any
-    other reader in the store.
+    antenna zone, a per-antenna restart-generation counter (see ``_restart``),
+    and the fault-model bookkeeping (temporary-disappearance windows, the
+    delayed-delivery queue) -- exactly as one physical reader connection
+    would own its own read buffer and state, independent of any other reader
+    in the store.
     """
 
     def __init__(self, config: RfidReaderEmulatorConfig) -> None:
         self._config = config
         self._rng = np.random.default_rng(config.seed + _RFID_LAB_SEED_OFFSET)
         self._sequence: dict[str, int] = {a.sensor_id: 0 for a in config.antennas}
+        # Per-antenna restart-generation counter; see ``_restart`` and
+        # ``_SEQUENCE_GENERATION_STRIDE`` for why this scopes ``_sequence``.
+        self._generation: dict[str, int] = {a.sensor_id: 0 for a in config.antennas}
         # (sensor_id, epc) -> call index at which the item becomes readable
         # again; used by the temporary-disappearance fault.
         self._disappeared_until: dict[tuple[str, str], int] = {}
@@ -346,10 +381,7 @@ class RfidReaderEmulator:
 
         for antenna in cfg.antennas:
             if rng.random() < cfg.noise.reader_restart_probability:
-                # A restart clears only this antenna's read-sequence counter,
-                # mirroring TiRadarEmulator.reset_stream -- physical item state
-                # (owned elsewhere) is untouched.
-                self._sequence[antenna.sensor_id] = 0
+                self._restart(antenna.sensor_id)
             for item in items:
                 live.extend(self._attempt(antenna, item, sim_time, call_index))
 
@@ -358,6 +390,27 @@ class RfidReaderEmulator:
 
         self._call_index += 1
         return live + delivered_now
+
+    def _restart(self, sensor_id: str) -> None:
+        """A deliberate reader restart on one antenna: mirrors
+        ``TiRadarEmulator.reset_stream`` -- physical item state (owned
+        elsewhere) is untouched, only this antenna's own read bookkeeping
+        resets.
+
+        The antenna's onboard sequence counter genuinely does restart from a
+        fresh baseline (real reader firmware does this too), but that
+        baseline is the START of a new generation's block
+        (``generation * _SEQUENCE_GENERATION_STRIDE``), never literal zero.
+        Without this scoping, a read emitted after this restart could be
+        assigned the same ``sequence`` -- and therefore the same
+        ``f"rfid:{sensor_id}:{sequence}"`` observation id (see
+        ``ObservationNormalizer.item``) -- as a read already emitted before
+        the restart, so the pipeline's ``ObservationDeduplicator`` would
+        silently drop the new, genuine measurement as a replay of the old
+        one.
+        """
+        self._generation[sensor_id] += 1
+        self._sequence[sensor_id] = self._generation[sensor_id] * _SEQUENCE_GENERATION_STRIDE
 
     # ------------------------------------------------------------------ per-item
 
@@ -399,7 +452,18 @@ class RfidReaderEmulator:
         reads = [self._build_read(antenna, item, sim_time, distance, bleed=False)]
 
         if rng.random() < noise.duplicate_read_probability:
-            reads.append(self._build_read(antenna, item, sim_time, distance, bleed=False))
+            # A genuine duplicate-delivery fault re-delivers the SAME
+            # measurement -- same sequence, RSSI, phase, timestamp, and any
+            # localization estimate -- not a freshly generated one. Calling
+            # ``_build_read`` again would draw new RSSI/phase/localization
+            # noise AND advance the sequence counter, producing content AND
+            # an observation id (``f"rfid:{sensor_id}:{sequence}"``, see
+            # ``ObservationNormalizer.item``) that differ from the first
+            # read. The pipeline's ``ObservationDeduplicator`` would then
+            # accept that as independent evidence and inflate confidence,
+            # defeating the entire point of this fault: exercising
+            # idempotent handling of a duplicate-delivered read.
+            reads.append(reads[0])
 
         if noise.burst_extra_reads_max > 0 and rng.random() < noise.burst_probability:
             extra = int(rng.integers(1, noise.burst_extra_reads_max + 1))

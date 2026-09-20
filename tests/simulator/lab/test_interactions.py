@@ -126,8 +126,12 @@ def test_handoff_transfers_carrier_and_carried_epcs() -> None:
     assert epc not in giver.carried_epcs
     assert epc in receiver.carried_epcs
     handoff_event = log.events_of(GroundTruthEventType.HANDOFF)[-1]
-    assert handoff_event.ground_truth_person_id == receiver.ground_truth_person_id
-    assert handoff_event.counterpart_person_id == giver.ground_truth_person_id
+    # Primary is the GIVER, counterpart the receiver - the canonical RetailEvent
+    # contract, and the order the scenario's own ExpectedTruth declares. These
+    # assertions previously encoded the reverse, which is what let the truth log
+    # disagree with the answer key it is scored against.
+    assert handoff_event.ground_truth_person_id == giver.ground_truth_person_id
+    assert handoff_event.counterpart_person_id == receiver.ground_truth_person_id
     # After handoff, the item must track the *new* carrier, not the old one.
     assert abs(item.position.x - (receiver.position.x + 0.25)) < 1e-9
 
@@ -143,7 +147,17 @@ def test_handoff_without_carrying_raises() -> None:
         interactions.handoff(world, log, EPCS_RACK_B[0], receiver.ground_truth_person_id)
 
 
-def test_exit_logs_exit_with_item_for_every_carried_epc() -> None:
+def test_exit_starts_a_walk_and_does_not_record_truth_until_the_boundary() -> None:
+    """Exit truth belongs to the crossing, not the intent.
+
+    ``exit_store`` only starts the walk, and the shopper stays present - and plainly
+    visible to both sensors - for every simulated second of it. Recording EXIT and
+    EXIT_WITH_ITEM here (as this test previously asserted) claimed merchandise had
+    left the store while the radar and RFID could still see it inside, putting every
+    exit and cart comparison out by the length of the walk. ``LabEngine`` now records
+    the departure on the present -> departed transition; see
+    ``test_engine.py::test_exit_truth_is_recorded_when_the_boundary_is_crossed``.
+    """
     world, log, person_id = _world_with_shopper()
     epc_a, epc_b = EPCS_RACK_A[0], EPCS_RACK_A[1]
     interactions.pick(world, log, epc_a, person_id)
@@ -151,9 +165,11 @@ def test_exit_logs_exit_with_item_for_every_carried_epc() -> None:
 
     interactions.exit_store(world, log, person_id, (7.3, 3.0))
 
-    exit_with_item_epcs = {e.epc for e in log.events_of(GroundTruthEventType.EXIT_WITH_ITEM)}
-    assert exit_with_item_epcs == {epc_a, epc_b}
-    assert len(log.events_of(GroundTruthEventType.EXIT)) == 1
+    # The walk has begun...
+    assert world.shoppers[person_id].present is True
+    # ...but nothing has crossed the boundary yet, so no exit truth exists.
+    assert log.events_of(GroundTruthEventType.EXIT) == []
+    assert log.events_of(GroundTruthEventType.EXIT_WITH_ITEM) == []
 
 
 def test_ground_truth_log_never_imports_pipeline_or_fusion() -> None:

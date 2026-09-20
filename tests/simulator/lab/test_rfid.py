@@ -14,6 +14,7 @@ from radiowave.adapters.rfid.base import NativeRfidRead
 from radiowave.contracts.geometry import WorldCoordinate
 from radiowave.contracts.store import Box2D, Sensor, SensorPose, SourceType, Store
 from radiowave.digital_twin.registry import StoreRegistry
+from radiowave.ingestion.deduplication import ObservationDeduplicator
 from radiowave.ingestion.normalization import ObservationNormalizer
 from radiowave.simulator.lab.sensors.rfid import (
     RfidAntennaZoneConfig,
@@ -244,6 +245,17 @@ def test_missed_read_probability_produces_a_dropout_gap() -> None:
 
 
 def test_duplicate_read_probability_reports_the_same_read_twice() -> None:
+    """A duplicate-delivery fault must re-emit the exact same measurement --
+    same sequence, RSSI, phase, timestamp, and estimate -- not a freshly,
+    independently-noised one.
+
+    NOTE: this test previously asserted ``reads[0].sequence != reads[1].sequence``,
+    encoding the (wrong) old behaviour where the "duplicate" was actually a second,
+    independently-noised read with its own sequence number. That defeated the
+    pipeline's idempotent duplicate-delivery handling (see
+    ``test_duplicate_read_normalizes_to_the_same_observation_the_pipeline_dedupes``
+    below for the real-dedup-path regression test) and is fixed here.
+    """
     noise = RfidReadNoiseConfig(
         base_read_probability=1.0, min_read_probability=1.0, duplicate_read_probability=1.0
     )
@@ -256,7 +268,46 @@ def test_duplicate_read_probability_reports_the_same_read_twice() -> None:
 
     assert len(reads) == 2
     assert reads[0].epc_hex == reads[1].epc_hex == item.epc
-    assert reads[0].sequence != reads[1].sequence
+    # Verbatim redelivery: the exact same measurement, not a re-noised one.
+    assert reads[0] == reads[1]
+    assert reads[0].sequence == reads[1].sequence
+
+
+def test_duplicate_read_normalizes_to_the_same_observation_the_pipeline_dedupes() -> None:
+    """The whole point of ``duplicate_read_probability`` is to exercise the
+    pipeline's idempotent handling of a duplicate-delivered read: normalizing
+    both copies must produce an ``ItemObservation`` the real
+    ``ObservationDeduplicator`` recognizes as already-seen (by observation id
+    AND by full normalized content) and drops -- not independent evidence
+    that inflates confidence.
+    """
+    registry = StoreRegistry(build_virtual_lab_store())
+    antenna_pose = registry.sensor(RFID_RACK_A_ID).pose.position
+    antenna = RfidAntennaZoneConfig(
+        sensor_id=RFID_RACK_A_ID, position=antenna_pose, max_range_m=4.0
+    )
+    noise = RfidReadNoiseConfig(
+        base_read_probability=1.0, min_read_probability=1.0, duplicate_read_probability=1.0
+    )
+    emulator = RfidReaderEmulator(RfidReaderEmulatorConfig(antennas=[antenna], noise=noise, seed=4))
+    item = TaggedItemState(
+        epc=EPCS_RACK_A[0],
+        position=WorldCoordinate(x=antenna_pose.x, y=antenna_pose.y, z=1.0),
+        carrier_id=None,
+    )
+
+    reads = emulator.reads([item], T0)
+    assert len(reads) == 2
+
+    normalizer = ObservationNormalizer(registry, "rfid-lab-test")
+    dedup = ObservationDeduplicator()
+    first_observation = normalizer.item(reads[0])
+    second_observation = normalizer.item(reads[1])
+
+    assert dedup.accept(first_observation) is True  # genuinely new evidence
+    assert dedup.accept(second_observation) is False  # recognized as a replay, dropped
+    assert dedup.accepted == 1
+    assert dedup.dropped == 1
 
 
 def test_burst_probability_produces_extra_reads_of_the_same_tag() -> None:
@@ -360,6 +411,21 @@ def test_disappearance_gap_is_temporary_and_recovers() -> None:
 
 
 def test_reader_restart_resets_the_sequence_counter() -> None:
+    """Each restart opens a new generation, so the onboard counter restarts
+    from a fresh per-generation baseline -- but that baseline must never
+    repeat a value already emitted by an earlier generation.
+
+    NOTE: this test previously asserted ``reads[0].sequence == 0`` on every
+    call, encoding the (wrong) old behaviour where a restart reset the
+    sequence to literal zero every time -- which meant every one of these
+    five reads shared the SAME observation id and the pipeline's
+    deduplicator would have wrongly dropped four of the five genuinely new
+    measurements as replays. Fixed here: sequence values are still "reset"
+    (to a per-generation baseline) on every restart, but are guaranteed
+    distinct across restarts. See
+    ``test_reader_restart_never_lets_a_post_restart_read_collide_with_an_earlier_one``
+    below for the real-dedup-path regression test.
+    """
     noise = RfidReadNoiseConfig(
         base_read_probability=1.0, min_read_probability=1.0, reader_restart_probability=1.0
     )
@@ -368,11 +434,53 @@ def test_reader_restart_resets_the_sequence_counter() -> None:
     )
     item = _item()
 
+    sequences = []
     for t in range(5):
         reads = emulator.reads([item], _tick(t))
         assert len(reads) == 1
-        # Every call restarts before reading, so sequence is always reset to 0.
-        assert reads[0].sequence == 0
+        sequences.append(reads[0].sequence)
+
+    # Every call restarts before reading, so each read opens a fresh
+    # generation -- but the emitted sequence values must all be distinct,
+    # never colliding back to a value used by an earlier restart.
+    assert len(set(sequences)) == len(sequences) == 5
+
+
+def test_reader_restart_never_lets_a_post_restart_read_collide_with_an_earlier_one() -> None:
+    """Regression for the reported bug: resetting the onboard sequence
+    counter to literal zero on every restart made every post-restart read
+    reuse an observation id already emitted earlier in the run, so the real
+    ``ObservationDeduplicator`` silently dropped genuinely new measurements
+    as replays. Verified against the real normalization + dedup path.
+    """
+    registry = StoreRegistry(build_virtual_lab_store())
+    antenna_pose = registry.sensor(RFID_RACK_A_ID).pose.position
+    antenna = RfidAntennaZoneConfig(
+        sensor_id=RFID_RACK_A_ID, position=antenna_pose, max_range_m=4.0
+    )
+    noise = RfidReadNoiseConfig(
+        base_read_probability=1.0, min_read_probability=1.0, reader_restart_probability=1.0
+    )
+    emulator = RfidReaderEmulator(RfidReaderEmulatorConfig(antennas=[antenna], noise=noise, seed=2))
+    item = TaggedItemState(
+        epc=EPCS_RACK_A[0],
+        position=WorldCoordinate(x=antenna_pose.x, y=antenna_pose.y, z=1.0),
+        carrier_id=None,
+    )
+
+    normalizer = ObservationNormalizer(registry, "rfid-lab-test")
+    dedup = ObservationDeduplicator()
+
+    # Every one of these calls restarts before reading (reader_restart_probability=1.0),
+    # so every read is itself "the first read after a restart" -- exactly the
+    # collision scenario reported. None should be wrongly dropped as a replay.
+    for t in range(5):
+        read = emulator.reads([item], _tick(t))[0]
+        observation = normalizer.item(read)
+        assert dedup.accept(observation) is True
+
+    assert dedup.accepted == 5
+    assert dedup.dropped == 0
 
 
 def test_reader_restart_off_lets_sequence_increment_normally() -> None:
