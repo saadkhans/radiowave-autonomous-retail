@@ -13,6 +13,7 @@ import math
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from threading import Condition, Lock, RLock
+from typing import Protocol, runtime_checkable
 
 from radiowave.api.viewmodels import (
     ObservatoryBoundary,
@@ -212,6 +213,34 @@ def list_scenarios() -> list[ObservatoryScenarioSummary]:
 # ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
+@runtime_checkable
+class StoppableRun(Protocol):
+    """A run that can be told to finish and then still be read.
+
+    Capability, not class: both a hardware LIVE run and a simulated one can be
+    stopped, and ``/runs/{id}/stop`` cares about that rather than about which
+    concrete class is behind it. Checking the class instead is what made a simulated
+    run unstoppable - and therefore impossible to switch away from, because every
+    replacement path stops the active run first.
+    """
+
+    mode: RunMode
+
+    def stop(self) -> None: ...
+
+    def snapshot(self) -> ObservatorySnapshot: ...
+
+    def apply(self, operation: Callable[[], None]) -> ObservatorySnapshot:
+        """Mutate and snapshot under one hold of the run lock.
+
+        Part of the protocol because ``/stop`` needs the snapshot that the stop
+        itself produced: doing the two separately leaves a window for another client
+        to change the run in between, so the response describes a state the caller
+        never asked for.
+        """
+        ...
+
+
 class ObservatoryRun:
     """A deterministic REPLAY run over one scenario.
 
@@ -221,6 +250,12 @@ class ObservatoryRun:
     """
 
     mode: RunMode = "REPLAY"
+    #: True when this run's data comes from the virtual store lab rather than a
+    #: physical sensor. The exclusive LIVE slot exists to arbitrate ONE serial port,
+    #: so a simulated run must not hold it: doing so made ``/live/status`` report a
+    #: simulation as the active hardware run and rejected a genuine ``POST
+    #: /runs/live`` with 409, even though the simulation owns no device.
+    simulated: bool = False
 
     def __init__(
         self,
@@ -1049,7 +1084,8 @@ class RunManager:
         if self._closing_live_run_id is not None:
             return self._closing_live_run_id
         for run_id, run in sorted(self._runs.items()):
-            if run.mode == "LIVE" and not run.finished:
+            # ``simulated`` runs are excluded: the slot arbitrates a physical port.
+            if run.mode == "LIVE" and not run.finished and not run.simulated:
                 return run_id
         return None
 
@@ -1058,7 +1094,7 @@ class RunManager:
             return sorted(
                 run_id
                 for run_id, run in self._runs.items()
-                if run.mode == "LIVE" and not run.finished
+                if run.mode == "LIVE" and not run.finished and not run.simulated
             )
 
     def delete(self, run_id: str) -> bool:

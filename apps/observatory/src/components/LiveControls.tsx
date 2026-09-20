@@ -32,15 +32,26 @@ export function LiveControls() {
   const isBoundToActiveRun = activeRunId !== null && run?.run_id === activeRunId;
   const adoptable = activeRunId !== null && !isBoundToActiveRun;
 
+  // This panel is reused unchanged for a SIM run (it also reports mode
+  // "LIVE"), so its own inline badge must not claim hardware "LIVE" for a
+  // simulated feed - same correctness requirement as the TopBar ModeBadge.
+  const isSimulated = run?.live?.simulated === true;
+
   if (isLive) {
     return (
       <div className="panel flex items-center gap-3 px-3 py-2" data-testid="live-controls">
         <span
-          className="mono flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-widest text-console-danger"
+          className={`mono flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-widest ${
+            isSimulated ? "bg-[#c792ff]/20 text-[#c792ff]" : "text-console-danger"
+          }`}
           data-testid="mode-badge-live"
         >
-          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-console-danger" aria-hidden="true" />
-          LIVE
+          {isSimulated ? (
+            <span aria-hidden="true">🧪</span>
+          ) : (
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-console-danger" aria-hidden="true" />
+          )}
+          {isSimulated ? "SIMULATED" : "LIVE"}
         </span>
         <div className="flex-1">
           <LiveStatusPanel live={run.live} />

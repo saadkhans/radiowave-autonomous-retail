@@ -5,15 +5,41 @@ import { LayerToggles } from "@/components/LayerToggles";
 import { LiveControls } from "@/components/LiveControls";
 import { ReplayControls } from "@/components/ReplayControls";
 import { ScenarioSelector } from "@/components/ScenarioSelector";
+import { SimControls } from "@/components/SimControls";
 import { StoreMap } from "@/components/StoreMap";
 import { Timeline } from "@/components/Timeline";
 import { ObservatoryProvider, useObservatory } from "@/state/store";
 
-/** Clearly visible LIVE (red/pulsing) vs REPLAY mode indicator; never rendered without a run. */
+/**
+ * Clearly visible LIVE (red/pulsing) vs REPLAY vs SIMULATED mode indicator;
+ * never rendered without a run. A SIM run reports `mode === "LIVE"` (it reuses
+ * every LIVE panel), so it is distinguished here by `live.simulated`: a
+ * SIMULATED run gets its own colour (never the hardware LIVE red) plus the
+ * scenario id and seed inline, so a screenshot of this badge alone is
+ * self-describing and cannot be mistaken for a real measurement.
+ */
 function ModeBadge() {
   const { run } = useObservatory();
   if (!run) return null;
-  const isLive = run.mode === "LIVE";
+  const isSimulated = run.mode === "LIVE" && run.live?.simulated === true;
+  const isLive = run.mode === "LIVE" && !isSimulated;
+
+  if (isSimulated) {
+    return (
+      <span
+        className="mono flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-widest bg-[#c792ff]/20 text-[#c792ff]"
+        data-testid="mode-badge"
+      >
+        <span aria-hidden="true">🧪</span>
+        SIMULATED
+        {run.live?.simulated_scenario_id ? ` · ${run.live.simulated_scenario_id}` : ""}
+        {run.live?.simulated_seed !== null && run.live?.simulated_seed !== undefined
+          ? ` · seed ${run.live.simulated_seed}`
+          : ""}
+      </span>
+    );
+  }
+
   return (
     <span
       className={`mono flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-widest ${
@@ -65,6 +91,14 @@ function Console() {
   // no run is active yet, so either kind of run can be started from here.
   const showReplayControls = !run || run.mode === "REPLAY";
   const showLiveControls = !run || run.mode === "LIVE";
+  // SimControls shares LiveControls' visibility (both are "mode LIVE" family
+  // controls, hidden only during an active REPLAY run): it shows the scenario
+  // picker/Start whenever no sim is currently driving - including while a
+  // hardware LIVE run is active, so an operator can switch to the lab the
+  // same way selecting a scenario switches out of LIVE - and shows the
+  // Advance/Step/Reset controls a simulated run supports (but hardware LIVE
+  // does not) once its own sim run is bound and active.
+  const showSimControls = showLiveControls;
   return (
     <div className="flex h-full min-h-[900px] min-w-[1440px] flex-col bg-console-bg text-console-text">
       <TopBar />
@@ -79,6 +113,7 @@ function Console() {
           </div>
           {showReplayControls ? <ReplayControls /> : null}
           {showLiveControls ? <LiveControls /> : null}
+          {showSimControls ? <SimControls /> : null}
           <Timeline />
           <div className="panel min-h-0 h-[260px]">
             <EventStream />

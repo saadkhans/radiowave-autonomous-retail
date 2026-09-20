@@ -46,6 +46,11 @@ export const api = {
   health: () => request<{ status: string; engine: string; version: string }>("/health"),
   listScenarios: () => request<ScenarioSummary[]>("/scenarios"),
   getScenario: (scenarioId: string) => request<ScenarioDetail>(`/scenarios/${scenarioId}`),
+  // Virtual store lab: the same scenario-summary shape as /scenarios, and a SIM run
+  // creation returns the initial snapshot exactly like createRun/createLiveRun.
+  simScenarios: () => request<ScenarioSummary[]>("/sim/scenarios"),
+  createSimRun: (scenarioId: string | null, seed?: number) =>
+    post<Snapshot>("/runs/sim", { scenario_id: scenarioId, seed: seed ?? null }),
   // Creation returns the initial snapshot so the client binds to the new run atomically.
   createRun: (scenarioId: string, seed?: number) =>
     post<Snapshot>("/runs", { scenario_id: scenarioId, seed: seed ?? null }),

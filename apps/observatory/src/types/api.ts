@@ -276,6 +276,18 @@ export interface LiveStatus {
   capture_path: string | null;
   /** Run start instant, ISO 8601 UTC (the live epoch). */
   started_at: string;
+  /**
+   * True when this feed is the virtual store lab rather than a physical sensor.
+   * Additive/defaulted so existing hardware LIVE runs are unaffected; a client
+   * MUST surface it distinctly - simulated and hardware runs render through the
+   * same panels, and mistaking one for the other would make a demo look like a
+   * measurement.
+   */
+  simulated?: boolean;
+  /** Lab scenario driving a simulated feed. */
+  simulated_scenario_id?: string | null;
+  /** Seed driving a simulated feed; the run is reproducible from it. */
+  simulated_seed?: number | null;
 }
 
 /** Whether this API process can start a LIVE run, and with which sensor. */

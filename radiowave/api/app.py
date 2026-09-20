@@ -21,8 +21,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from radiowave import __version__
 from radiowave.api.live import LiveRuntime
-from radiowave.api.routes import live, runs, scenarios
+from radiowave.api.routes import live, runs, scenarios, sim
 from radiowave.api.runs import RunManager
+from radiowave.api.sim import SimRuntime
 
 DEV_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
 LIVE_CONFIG_ENV = "RADIOWAVE_TI_CONFIG"
@@ -66,6 +67,9 @@ def create_app(live_runtime: LiveRuntime | None = None) -> FastAPI:
     )
     app.state.runs = RunManager()
     app.state.live = live_runtime
+    # The virtual store lab is always available: it needs no hardware, no config
+    # file and no serial port, so it is wired unconditionally.
+    app.state.sim = SimRuntime()
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
@@ -74,6 +78,7 @@ def create_app(live_runtime: LiveRuntime | None = None) -> FastAPI:
     app.include_router(scenarios.router, prefix="/api")
     app.include_router(runs.router, prefix="/api")
     app.include_router(live.router, prefix="/api")
+    app.include_router(sim.router, prefix="/api")
     return app
 
 
