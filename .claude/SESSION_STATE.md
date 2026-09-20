@@ -42,65 +42,53 @@ from git and `gh`.
 
 ---
 
-## Current state — 2026-09-17
+## Current state — 2026-09-20
 
-**Phase 4 — Virtual Store Lab v0.** Branch `claude/virtual-store-lab-v0` -> PR **#4**, stacked on
-PR #3. **Never merge either.**
+**Phase 4 (Virtual Store Lab) is complete and MERGED. Phase 3 is not.**
 
-- Phase-4 HEAD `c0b9587`; base is PR #3 HEAD `ab9b497` + 2 docs commits. PR #3 has NOT advanced,
-  so **no rebase is needed** (re-check with
-  `git merge-base --is-ancestor origin/claude/ti-mmwave-live-v0 HEAD`).
-- Gate at `c0b9587`: lint/typecheck/test/build/security all PASS, **617 Python tests**.
+- **PR #4 → `claude/ti-mmwave-live-v0`: MERGED.** Because #4 was stacked on #3's branch,
+  Phase 4 now lives in `claude/ti-mmwave-live-v0`.
+- **PR #3 → `dev`: STILL OPEN.** The owner instructed merging it; the auto-mode classifier
+  blocked `gh pr merge 3` and I stopped rather than routing around it. **Finish with
+  `gh pr merge 3 --merge`** (run by the user, or after a Bash permission rule is added).
+  Merging it carries BOTH phases into `dev`.
 
-### Phase 3 / PR #3 — parked, not finished
-Software gate is **PASS on checks** but `FINAL CODEX: PENDING`. A final review was requested
-once (comment `5712432606`, 2026-09-17T09:56Z) and **never arrived** — ~2h vs a 15-16 min norm,
-no review and no 👍 reaction, i.e. silently dropped. 31 threads, 0 unresolved. Do NOT infer a
-clean review from silence; either re-request (the user said exactly one request, so ask first)
-or report PENDING. **Do not merge PR #3.**
+### Two facts that must not get lost once this is on `dev`
+1. **PR #4 never ran CI.** `.github/workflows/ci.yml` only triggers on PRs targeting
+   `dev`/`main`; #4 targeted the stacked parent. Its only verification was the local gate.
+   The first real CI run of Phase 4 happens when PR #3 merges — watch it.
+2. **PR #3's final merge-readiness Codex review was never delivered** (requested once,
+   no review and no reaction, ~2h vs a 15-min norm). Silence was never a pass.
+   **Hardware acceptance is unrun** — no TI board has ever been connected; every measured
+   field in `docs/experiments/ti-iwr6843-single-person-baseline.md` is TBD.
 
-### Phase-4 architecture (decided, do not relitigate)
-- World -> virtual TI radar -> **real UART bytes** -> real `TiFrameParser` -> real
-  `TiTargetNormalizer` -> `PersonObservation`. No shortcut; `radiowave/` never imports `tests/`.
-- World -> virtual RFID -> `NativeRfidRead` -> **existing** adapter/`ObservationNormalizer` ->
-  `ItemObservation`. **`ItemObservation` and `NativeRfidRead` already existed — do not invent an
-  RFID contract.**
-- **Ground truth is a sink.** `GroundTruthLog` is imported only by the simulator + its tests.
-  Fusion must infer events or we are grading an answer key.
-- **The seed varies observation, not truth.** Scripted motion is seed-invariant unless `jitter()`
-  is applied; the seed drives sensor noise and faults. This is deliberate — it lets one physical
-  scenario be replayed against many noise realizations.
-- **Determinism oracle is the synchronous path** (bytes -> parser ->
-  `frame_to_observations(received_at=<sim time>)`), NOT the live session: the reader thread's
-  batching is not reproducible. The live path exists only for the Observatory acceptance gate.
-- **SIM runs stay `mode="LIVE"`** (reusing `LiveObservatoryRun` + a simulator `stream_factory`,
-  which is already an injectable hook) rather than adding a `"SIM"` RunMode that would ripple
-  through viewmodels/TS types/RunManager/routes. But simulated data MUST be unmistakably labelled
-  — plan is an additive `simulated: bool` on `ObservatoryLiveStatus` + a distinct badge.
-- Phase-4 store is a NEW builder (`lab/store.py`). **Never modify `build_lab_store()`** — 14
-  existing scenarios depend on it.
+### Phase 4 review outcome
+Codex round 1 on PR #4: **14 findings (7 P1 + 7 P2), all fixed** in `8c301bf`, every thread
+answered and resolved. Gate: lint/typecheck/build/secrets + **740 tests**.
 
-### Wave status
-- **Wave 1 DONE + pushed (`c0b9587`)**: `lab/store.py`, `world.py`, `actors.py`,
-  `interactions.py`, `ground_truth.py`, `sensors/ti_encoder.py`, `sensors/ti_radar.py` + 62 tests.
-  Round-trip verified independently: exact to ~5e-8 m across several poses AND a non-default
-  `TiCoordinateConvention`.
-- **Wave 2 IN FLIGHT (uncommitted if this session died)**: `sensors/rfid.py` + `test_rfid.py`;
-  `scenarios.py` + `test_scenarios.py` (catalog 01-13 plus `acceptance_60s`).
-- **Not started**: `lab/engine.py` (orchestrator owns this — wires world+sensors+pipeline),
-  `lab/metrics.py`, Observatory SIM controls, docs.
+Most of those findings were **simulator defects corrupting the lab's own measurements**, which
+is the failure mode to watch for in this codebase:
+- exit truth stamped on the EXIT instruction rather than at the boundary crossing;
+- handoff truth recording receiver-then-giver, reversing the RetailEvent contract;
+- RFID polling at the 20 Hz world tick while advertising 2 Hz — ten times the independent
+  position blurs, making simulated evidence *better than the hardware assumption it stands in
+  for*;
+- departed merchandise still answering in-store antennas.
 
-### Lesson worth keeping
-Workers report "tests pass" but do NOT run the repo gate. Wave 1 arrived with 18 ruff errors +
-1 mypy error. **Always run `pnpm run lint`/`typecheck` on the combined result before trusting a
-worker hand-back**, and spot-check headline claims: one worker's "different seed -> different
-evolution" test only passed because its helper called `jitter()`.
+**Lesson worth keeping:** I reported "fusion over-proposes PICK ~10x" from raw proposal counts.
+Fusion re-proposes a *waiting* episode every step by design; counted as distinct episodes there
+was no such over-proposal. Count episodes, not proposals.
 
-### Outstanding from the user
-The Phase-4 brief arrived **truncated** at scenario `14_co_w` (14+ missing, plus any section
-after 26). Scenarios 01-13 + `acceptance_60s` are being built from the explicit list; reconcile
-14+ against `docs/phases/phase-4-virtual-store-lab-v0.md`'s 18-scenario list or ask.
+### Known-open, non-blocking
+- `01_normal_purchase` declares expected exit truth at t=20 but the action is scheduled at
+  t=22 (crossing now lands at 22.8s) — declared expectation is inconsistent, left unadjusted
+  rather than silently fitted to the code.
+- PICK detection latency is +2.3s..+17.3s at honest reader cadence, mostly beyond the metrics'
+  2.0s match tolerance. **Do not widen the tolerance to improve the numbers** — that is tuning
+  the ruler. Report latency instead.
+- PUTBACK and HANDOFF are still genuinely never inferred. Attribution hardening is Phase 6.
 
 ## History
+- PR #4 — Virtual Store Lab v0 (merged into the Phase-3 branch 2026-09-20).
 - PR #1 — Foundation v0 (merged by owner).
 - PR #2 — Observatory v0 (merged by owner).
