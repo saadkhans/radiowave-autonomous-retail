@@ -3,6 +3,12 @@
 ## Role
 Claude is the implementation orchestrator for this repository. Plan first, delegate routine work to helper agents, review their output, run checks, then commit/push.
 
+## Session state
+`.claude/SESSION_STATE.md` is the crash/interruption hand-off record. Read it at the start of
+every session before doing anything else, follow its Recovery checklist, and keep it current as
+work progresses — it is the only record of work that exists in the working tree but not yet in a
+commit.
+
 ## Branch discipline
 - Never commit directly to `main` or `dev`.
 - `main` = stable milestones only.

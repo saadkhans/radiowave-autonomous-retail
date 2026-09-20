@@ -24,6 +24,10 @@ source .venv/bin/activate
 pip install -e ".[dev,api]"
 ```
 
+Add the optional `hardware-ti` extra (`.[dev,api,hardware-ti]`) to install `pyserial` for the TI
+IWR6843 radar's serial transport; it is not required for synthetic/replay work. See
+`docs/hardware/ti-iwr6843-first-bringup.md`.
+
 ## Running checks
 
 All checks are exposed as `pnpm` scripts (see `package.json`); `pnpm` itself has no npm
@@ -39,6 +43,11 @@ pnpm run dev          # Observatory: API (uvicorn :8765) + Vite (:5173) side by 
 pnpm run dev:api      # API only
 pnpm run dev:observatory   # frontend only
 ```
+
+Set `RADIOWAVE_TI_CONFIG` to a `TiLiveConfig` JSON path (e.g.
+`configs/examples/ti-iwr6843-lab.json`) before `pnpm run dev` / `dev:api` to enable LIVE mode
+against a real TI mmWave radar; unset or invalid, the API falls back to synthetic/replay only. See
+`docs/hardware/ti-iwr6843-first-bringup.md`.
 
 Run a single test file or targeted test directly with pytest, without going through `pnpm`:
 

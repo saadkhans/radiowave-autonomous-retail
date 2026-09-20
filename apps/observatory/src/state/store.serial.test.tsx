@@ -2,7 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ReplayControls } from "@/components/ReplayControls";
-import { ObservatoryProvider, TICK_MS, useActions, useObservatory } from "@/state/store";
+import { LIVE_POLL_MS, ObservatoryProvider, TICK_MS, useActions, useObservatory } from "@/state/store";
 import type { ObservatoryActions } from "@/state/store";
 import { installFakeApi } from "@/test/fixtures";
 
@@ -370,6 +370,76 @@ describe("serial executor", () => {
     releaseCreate();
     await waitFor(() => expect(screen.getByTestId("run-id")).toHaveTextContent("run-0002"));
     expect(screen.getByRole("button", { name: "Play" })).not.toBeDisabled();
+  });
+
+  it("invariant 17: a stale live snapshot cannot overwrite the replay after the transition", async () => {
+    const actionsRef = renderHarness();
+
+    // Scenario selected before LIVE starts, exactly like the "Run scenario"
+    // button surviving a live run in App.live.test.tsx.
+    await act(async () => {
+      await actionsRef.current!.selectScenario("01");
+    });
+
+    // Fake timers must be enabled before the LIVE run starts, so the poll
+    // effect's setInterval is created against the fake clock (matching the
+    // pattern used by the replay-tick tests above).
+    vi.useFakeTimers();
+    await act(async () => {
+      await actionsRef.current!.startLiveRun(false);
+    });
+    expect(screen.getByTestId("run-id")).toHaveTextContent("live-0001");
+
+    const LIVE_SNAPSHOT = "GET /api/runs/live-0001/snapshot";
+    const releasePoll = fake.hold(LIVE_SNAPSHOT);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LIVE_POLL_MS);
+    });
+    expect(callsTo(LIVE_SNAPSHOT)).toBe(1);
+    expect(screen.getByTestId("busy")).toHaveTextContent("true");
+
+    // The transition is refused outright while the poll holds the queue - the
+    // same mutual exclusion that protects every other run replacement, so the
+    // stale poll response can never overlap with the transition's own work.
+    let refused: Promise<void> | undefined;
+    act(() => {
+      refused = actionsRef.current!.startRun();
+    });
+    await refused;
+    expect(fake.calls).not.toContain("POST /api/runs/live-0001/stop");
+    expect(fake.calls).not.toContain(CREATE_RUN);
+
+    // Real timers (not fake ones) drive `waitFor`'s polling from here on.
+    releasePoll();
+    vi.useRealTimers();
+    await waitFor(() => expect(screen.getByTestId("busy")).toHaveTextContent("false"));
+
+    // Now the transition proceeds for real: stop the live run, then create the replay run.
+    act(() => {
+      void actionsRef.current!.startRun();
+    });
+    await waitFor(() => expect(fake.calls).toContain("POST /api/runs/live-0001/stop"));
+    await waitFor(() => expect(screen.getByTestId("run-id")).toHaveTextContent("run-0001"));
+
+    // The already-settled live poll response never lands on the replay run.
+    expect(screen.getByTestId("time")).toHaveTextContent("0.00");
+  });
+
+  it("LIVE -> LIVE: starting a new live run while one is already active stops the old one first", async () => {
+    const actionsRef = renderHarness();
+
+    await act(async () => {
+      await actionsRef.current!.startLiveRun(false);
+    });
+    await waitFor(() => expect(screen.getByTestId("run-id")).toHaveTextContent("live-0001"));
+
+    await act(async () => {
+      await actionsRef.current!.startLiveRun(false);
+    });
+    // The old sensor session is stopped explicitly, not left to a server 409.
+    expect(fake.calls).toContain("POST /api/runs/live-0001/stop");
+    await waitFor(() => expect(screen.getByTestId("run-id")).toHaveTextContent("live-0002"));
   });
 
   it("Pause button stays enabled while a tick is in flight during playback", async () => {

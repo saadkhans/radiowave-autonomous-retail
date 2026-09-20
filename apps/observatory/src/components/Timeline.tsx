@@ -7,6 +7,7 @@ import type { DecisionKind } from "@/types/api";
 export function Timeline() {
   const { run, timeline, busy, playing } = useObservatory();
   const { seek, pause } = useActions();
+  const isLive = run?.mode === "LIVE";
   const duration = run?.duration_s ?? 0;
   const [scrub, setScrub] = useState<number | null>(null);
 
@@ -45,43 +46,54 @@ export function Timeline() {
             ))
           : null}
       </div>
-      <input
-        type="range"
-        aria-label="Timeline"
-        className="w-full"
-        min={0}
-        max={duration}
-        step={run?.step_interval_s ?? 0.25}
-        value={value}
-        disabled={!run || busy}
-        onChange={(event) => {
-          if (playing) pause();
-          setScrub(Number(event.target.value));
-        }}
-        onMouseDown={() => {
-          if (playing) pause();
-        }}
-        onTouchStart={() => {
-          if (playing) pause();
-        }}
-        onKeyDown={() => {
-          if (playing) pause();
-        }}
-        onMouseUp={() => {
-          if (scrub !== null) void seek(scrub);
-        }}
-        onKeyUp={() => {
-          if (scrub !== null) void seek(scrub);
-        }}
-        onTouchEnd={() => {
-          if (scrub !== null) void seek(scrub);
-        }}
-      />
-      <div className="mono flex justify-between text-[10px] text-console-muted">
-        <span>0.0s</span>
-        <span>{scrub !== null ? `seek → ${scrub.toFixed(2)}s` : ""}</span>
-        <span>{duration.toFixed(1)}s</span>
-      </div>
+      {isLive ? (
+        // LIVE time is the wall clock owned by the sensor session: no scrub/seek,
+        // just the read-only elapsed time (the live edge keeps growing).
+        <div className="mono flex justify-between text-[10px] text-console-muted" data-testid="timeline-live-readout">
+          <span>0.0s</span>
+          <span>t = {duration.toFixed(2)}s (live)</span>
+        </div>
+      ) : (
+        <>
+          <input
+            type="range"
+            aria-label="Timeline"
+            className="w-full"
+            min={0}
+            max={duration}
+            step={run?.step_interval_s ?? 0.25}
+            value={value}
+            disabled={!run || busy}
+            onChange={(event) => {
+              if (playing) pause();
+              setScrub(Number(event.target.value));
+            }}
+            onMouseDown={() => {
+              if (playing) pause();
+            }}
+            onTouchStart={() => {
+              if (playing) pause();
+            }}
+            onKeyDown={() => {
+              if (playing) pause();
+            }}
+            onMouseUp={() => {
+              if (scrub !== null) void seek(scrub);
+            }}
+            onKeyUp={() => {
+              if (scrub !== null) void seek(scrub);
+            }}
+            onTouchEnd={() => {
+              if (scrub !== null) void seek(scrub);
+            }}
+          />
+          <div className="mono flex justify-between text-[10px] text-console-muted">
+            <span>0.0s</span>
+            <span>{scrub !== null ? `seek → ${scrub.toFixed(2)}s` : ""}</span>
+            <span>{duration.toFixed(1)}s</span>
+          </div>
+        </>
+      )}
     </div>
   );
 }
