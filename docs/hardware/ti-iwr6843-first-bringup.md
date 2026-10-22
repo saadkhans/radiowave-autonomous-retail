@@ -135,7 +135,8 @@ a wall of two large flat TV panels about 1.4 m to the sensor's right mirrored th
 track, and other ghosts sat behind the back wall or below the floor: 8 canonical tracks for one
 walker and one seated person. Setting all three boxes to the measured room (TI frame: x = lateral,
 positive to the sensor's right; y = forward; z = height above the floor, with ~0.1 m margin inside
-each wall) removed them. Example for a sensor 2.50 m from the left wall, 1.39 m from the right
+each wall) removed them in the first ~100 s inspected afterwards; a long-run ghost rate has not
+been measured yet. Example for a sensor 2.50 m from the left wall, 1.39 m from the right
 wall, 4.0 m from the back wall:
 
 ```

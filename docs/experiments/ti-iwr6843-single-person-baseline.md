@@ -83,11 +83,15 @@ disappearance on exit, and re-acquisition on re-entry — establishing baseline 
 metrics below before any multi-person or cross-modal work.
 
 ## Actual result
-All eight manual acceptance checks in `docs/hardware/ti-iwr6843-first-bringup.md` passed. Axis
-conventions are right: walking toward the right wall raised world x, walking left lowered it, and
-walking away raised y. With TI's default 8 m tracking boxes, multipath ghosts became canonical
-person tracks (8 tracks for one walker and one seated person in Walk 02). Limiting the firmware's
-boxes to the room removed them in the live run that followed.
+All eight manual acceptance checks in `docs/hardware/ti-iwr6843-first-bringup.md` passed; the
+Observatory display check was verified from the live map's drawn elements and is still to be
+confirmed by eye. Axis conventions are right: walking toward the right wall raised world x,
+walking left lowered it, and walking away raised y. With TI's default 8 m tracking boxes,
+multipath ghosts became canonical person tracks (8 tracks for one walker and one seated person in
+Walk 02). After limiting the firmware's boxes to the room, the first ~100 s of run-0004 that were
+inspected showed no ghosts (5 tracks, all plausibly real). The rest of run-0004 (35 min) and the
+earlier hour-long run-0001 (53 canonical tracks in a working office) have not been classified yet,
+so a long-run ghost rate is not established.
 
 ## Metrics
 - **Detection range (m):** walker tracked from y≈0.1 m to y≈4.4 m forward (Walk 01), i.e. to the
