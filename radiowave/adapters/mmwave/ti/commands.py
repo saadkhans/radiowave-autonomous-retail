@@ -140,6 +140,7 @@ def cmd_capture(args: argparse.Namespace, out: Printer = print) -> int:
     except KeyboardInterrupt:
         out("interrupted")
     finally:
+        frames_parsed = session.diagnostics().frames_parsed
         session.stop()
         # Final flush uses the same atomic primitive so the terminal advance is on
         # the same ordered clock as every advance during the loop.
@@ -154,6 +155,12 @@ def cmd_capture(args: argparse.Namespace, out: Printer = print) -> int:
     out(f"person tracks   : {[t.track_id for t in result.person_tracks]}")
     out(f"recording       : {path}")
     out(f"replay with     : python -m radiowave.cli replay {path}")
+    if frames_parsed == 0:
+        # Same contract as probe: a capture that never parsed a frame (radar not
+        # configured, wrong port, board unplugged) must not look like a success to a
+        # script or an operator who walked a test route for nothing.
+        out("no frames were parsed: the recording holds no radar data")
+        return 1
     return 0
 
 
