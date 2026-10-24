@@ -257,5 +257,7 @@ class TiLiveConfig(FrozenModel):
 
     @classmethod
     def load(cls, path: str | Path) -> TiLiveConfig:
-        with Path(path).open(encoding="utf-8") as handle:
+        # utf-8-sig: Windows tools (PowerShell 5's ``Set-Content -Encoding utf8``,
+        # older Notepad) prepend a BOM that plain utf-8 json.load rejects.
+        with Path(path).open(encoding="utf-8-sig") as handle:
             return cls.model_validate(json.load(handle))

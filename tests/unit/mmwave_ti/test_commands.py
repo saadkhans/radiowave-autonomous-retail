@@ -139,6 +139,41 @@ def test_capture_writes_a_replayable_recording(
     assert main(["replay", str(out_path)]) == 0
 
 
+def test_capture_reports_failure_when_no_frames_arrive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Found on hardware: a 75 s capture with the board unplugged exited 0.
+    _patch_session(monkeypatch, [b"\x00" * 64])
+    out_path = tmp_path / "captures" / "empty.jsonl"
+    lines: list[str] = []
+    code = commands.cmd_capture(
+        build_parser().parse_args(
+            [
+                "mmwave",
+                "ti",
+                "capture",
+                "--config",
+                str(_config_file(tmp_path)),
+                "--out",
+                str(out_path),
+                "--seconds",
+                "0.6",
+            ]
+        ),
+        out=lines.append,
+    )
+    assert code == 1
+    assert "no frames were parsed" in "\n".join(lines)
+    assert out_path.exists()  # still a valid, finalized (empty) recording
+
+
+def test_config_with_a_utf8_bom_loads(tmp_path: Path) -> None:
+    # Found on hardware: PowerShell 5 ``Set-Content -Encoding utf8`` writes a BOM.
+    path = tmp_path / "bom.json"
+    path.write_bytes(b"\xef\xbb\xbf" + EXAMPLE.read_bytes())
+    assert TiLiveConfig.load(path).adapter.sensor_id == "radar-ti-01"
+
+
 def test_capture_never_uses_the_plain_drain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
