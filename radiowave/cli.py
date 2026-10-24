@@ -7,6 +7,8 @@ Examples::
     python -m radiowave.cli simulate --scenario 05 --out data/synthetic/scenario-05.parquet
     python -m radiowave.cli replay data/synthetic/scenario-01.jsonl --rate 0
     python -m radiowave.cli replay data/synthetic/scenario-01.jsonl --step
+    python -m radiowave.cli mmwave ti probe --config configs/examples/ti-iwr6843-lab.json
+    python -m radiowave.cli mmwave ti capture --config ... --out data/captures/walk.jsonl
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
 
+from radiowave.adapters.mmwave.ti.commands import add_mmwave_commands
 from radiowave.contracts.recording import (
     EntryKind,
     RecordedEntry,
@@ -265,6 +268,8 @@ def build_parser() -> argparse.ArgumentParser:
     rep.add_argument("--store", help="path to a Store JSON twin to replay against")
     rep.add_argument("--config", help="path to a PipelineConfig JSON to replay with")
     rep.set_defaults(func=cmd_replay)
+
+    add_mmwave_commands(sub)
     return parser
 
 

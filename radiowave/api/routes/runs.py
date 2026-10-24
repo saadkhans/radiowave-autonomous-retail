@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from radiowave.api.runs import ObservatoryRun, RunManager, store_view
+from radiowave.api.runs import LiveModeError, ObservatoryRun, RunManager, store_view
 from radiowave.api.viewmodels import (
     AdvanceRequest,
     ObservatoryEventPage,
@@ -67,31 +69,39 @@ def get_snapshot(request: Request, run_id: str) -> ObservatorySnapshot:
 
 @router.get("/runs/{run_id}/store", response_model=ObservatoryStore)
 def get_store(request: Request, run_id: str) -> ObservatoryStore:
-    return store_view(_run(request, run_id).scenario.store)
+    return store_view(_run(request, run_id).store)
+
+
+def _replay_control(run: ObservatoryRun, operation: Callable[[], None]) -> ObservatorySnapshot:
+    """Apply a replay-only control; a LIVE run refuses it with 409 instead of mutating."""
+    try:
+        return run.apply(operation)
+    except LiveModeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/runs/{run_id}/reset", response_model=ObservatorySnapshot)
 def reset_run(request: Request, run_id: str) -> ObservatorySnapshot:
     run = _run(request, run_id)
-    return run.apply(run.reset)
+    return _replay_control(run, run.reset)
 
 
 @router.post("/runs/{run_id}/step", response_model=ObservatorySnapshot)
 def step_run(request: Request, run_id: str) -> ObservatorySnapshot:
     run = _run(request, run_id)
-    return run.apply(run.step)
+    return _replay_control(run, run.step)
 
 
 @router.post("/runs/{run_id}/advance", response_model=ObservatorySnapshot)
 def advance_run(request: Request, run_id: str, body: AdvanceRequest) -> ObservatorySnapshot:
     run = _run(request, run_id)
-    return run.apply(lambda: run.advance(body.seconds))
+    return _replay_control(run, lambda: run.advance(body.seconds))
 
 
 @router.post("/runs/{run_id}/seek", response_model=ObservatorySnapshot)
 def seek_run(request: Request, run_id: str, body: SeekRequest) -> ObservatorySnapshot:
     run = _run(request, run_id)
-    return run.apply(lambda: run.seek(body.time_s))
+    return _replay_control(run, lambda: run.seek(body.time_s))
 
 
 @router.get("/runs/{run_id}/events", response_model=ObservatoryEventPage)

@@ -392,11 +392,14 @@ export function StoreMapView({
 }
 
 export function StoreMap() {
-  const { scenario, run, layers, selection } = useObservatory();
+  const { scenario, run, layers, selection, liveStore } = useObservatory();
   const { select } = useActions();
   const containerRef = useRef<HTMLDivElement>(null);
   const size = useSize(containerRef);
-  const store = scenario?.store;
+  // A LIVE run's twin comes from its own /store fetch (fetched once at start),
+  // not the scenario library used by REPLAY - a live twin may have no
+  // fixtures/products/items beyond its one sensor.
+  const store = run?.mode === "LIVE" ? liveStore : scenario?.store;
 
   return (
     <div ref={containerRef} className="h-full w-full" data-testid="store-map-container">
