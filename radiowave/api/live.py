@@ -29,17 +29,21 @@ from typing import Any
 from radiowave.adapters.mmwave.ti.config import TiLiveConfig
 from radiowave.adapters.mmwave.ti.health import TiAdapterDiagnostics
 from radiowave.adapters.mmwave.ti.session import SessionTiming, StreamFactory, TiLiveSession
-from radiowave.api.runs import LiveModeError, ObservatoryRun
+from radiowave.api.live_rfid import OperatorRfidBench
+from radiowave.api.runs import LiveModeError, ObservatoryRun, short_epc
 from radiowave.api.viewmodels import (
     ObservatoryGroundTruth,
     ObservatoryLiveStatus,
     ObservatoryRunState,
     RunMode,
+    SimRfidBench,
+    SimRfidItem,
 )
 from radiowave.contracts.observations import SensorObservation
 from radiowave.contracts.recording import RecordedEntry
 from radiowave.fusion.interfaces import Recorder
-from radiowave.pipeline import FoundationPipeline, PipelineConfig
+from radiowave.ingestion.normalization import ObservationNormalizer
+from radiowave.pipeline import FoundationPipeline, PipelineConfig, merge_streams
 from radiowave.replay.recorder import JsonlRecorder
 
 log = logging.getLogger(__name__)
@@ -185,6 +189,10 @@ class LiveObservatoryRun(ObservatoryRun):
         self.pipeline = FoundationPipeline(
             self.registry, runtime.pipeline_config, scenario_id=None, recorder=recorder
         )
+        # Operator-driven simulated RFID; inert unless the twin declares a simulated
+        # RFID read point and items with home fixtures (see ``live_rfid``).
+        self.rfid_bench = OperatorRfidBench(self.registry)
+        self._rfid_normalizer = ObservationNormalizer(self.registry)
         self.ingest_errors = 0
         # Set once the run can no longer be trusted to keep ingesting (today: the
         # capture recorder failed mid-ingest). Distinct from ``finished``: the run has
@@ -319,7 +327,17 @@ class LiveObservatoryRun(ObservatoryRun):
         # advance below can never run ahead of an observation still being enqueued.
         # Both come from the session's one ordered clock (invariant 9): the pipeline
         # never advances on a clock different from the one that stamped the samples.
-        observations, now = self.session.drain_with_clock()
+        radar, now = self.session.drain_with_clock()
+        # Simulated RFID reads are stamped with this same ``now`` (never later), so the
+        # advance below can't run ahead of them either. Merged by the pipeline's own
+        # order key; the radar batch keeps its arrival order within the merge.
+        rfid = [
+            self._rfid_normalizer.item(read)
+            for read in self.rfid_bench.reads(now, self.pipeline.fusion.person_tracks())
+        ]
+        observations: list[SensorObservation] = (
+            list(merge_streams(radar, rfid)) if rfid else list(radar)
+        )
         ingested = 0
         for observation in observations:
             try:
@@ -468,6 +486,59 @@ class LiveObservatoryRun(ObservatoryRun):
 
     def close(self) -> None:
         self.stop()
+
+    # ------------------------------------------------- simulated RFID (operator)
+    def _require_bench(self) -> OperatorRfidBench:
+        if not self.rfid_bench.enabled:
+            msg = (
+                "this store has no simulated RFID: add an RFID sensor with "
+                'vendor_metadata {"simulated": "true"} and items with home fixtures'
+            )
+            raise LiveModeError(msg)
+        if self.finished:
+            msg = "live run is stopped; start a new run"
+            raise LiveModeError(msg)
+        return self.rfid_bench
+
+    def rfid_pick(self, epc: str) -> str:
+        """Operator: the item was picked up. Returns the track it now follows."""
+        with self._lock:
+            track_id = self._require_bench().pick(epc, self.pipeline.fusion.person_tracks())
+            self.revision += 1
+            return track_id
+
+    def rfid_put_back(self, epc: str) -> None:
+        """Operator: the item is back on its home shelf."""
+        with self._lock:
+            self._require_bench().put_back(epc)
+            self.revision += 1
+
+    def rfid_view(self) -> SimRfidBench:
+        with self._lock:
+            bench = self.rfid_bench
+            if not bench.enabled:
+                return SimRfidBench(
+                    run_id=self.run_id,
+                    enabled=False,
+                    reason="this store has no simulated RFID read point or no items "
+                    "with home fixtures",
+                )
+            items = []
+            for view in bench.items():
+                product = self._products.get(view.gtin)
+                items.append(
+                    SimRfidItem(
+                        epc=view.epc,
+                        short_epc=short_epc(view.epc),
+                        gtin=view.gtin,
+                        product_name=product.name if product else None,
+                        home_fixture_id=view.home_fixture_id,
+                        home_fixture_name=self.registry.fixture(view.home_fixture_id).name,
+                        state=view.state.value,
+                        carrier_track_id=view.carrier_track_id,
+                    )
+                )
+            return SimRfidBench(run_id=self.run_id, enabled=True, items=items)
 
     # ------------------------------------------------- replay-only controls
     def reset(self) -> None:

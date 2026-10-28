@@ -1,0 +1,240 @@
+{
+  "store": {
+    "store_id": "lab-ti-01",
+    "name": "Radiowave lab, one TI radar + simulated RFID bench",
+    "frame": {
+      "frame_id": "store",
+      "description": "Store floor plan frame: origin at a documented corner, x east, y north",
+      "units": "m"
+    },
+    "floor_bounds": {
+      "min_x": 0.0,
+      "min_y": 0.0,
+      "max_x": 8.0,
+      "max_y": 6.0
+    },
+    "zones": [
+      {
+        "zone_id": "floor",
+        "name": "Sales floor",
+        "kind": "SALES_FLOOR",
+        "bounds": {
+          "min_x": 0.0,
+          "min_y": 0.0,
+          "max_x": 8.0,
+          "max_y": 6.0
+        }
+      },
+      {
+        "zone_id": "shelf-a-zone",
+        "name": "Shelf A zone",
+        "kind": "FIXTURE",
+        "bounds": {
+          "min_x": 2.3,
+          "min_y": 0.4,
+          "max_x": 4.2,
+          "max_y": 2.2
+        }
+      },
+      {
+        "zone_id": "shelf-b-zone",
+        "name": "Shelf B zone",
+        "kind": "FIXTURE",
+        "bounds": {
+          "min_x": 0.3,
+          "min_y": 0.4,
+          "max_x": 2.2,
+          "max_y": 2.2
+        }
+      },
+      {
+        "zone_id": "exit-zone",
+        "name": "Doorway",
+        "kind": "EXIT",
+        "bounds": {
+          "min_x": 7.0,
+          "min_y": 0.0,
+          "max_x": 8.0,
+          "max_y": 1.5
+        }
+      }
+    ],
+    "fixtures": [
+      {
+        "fixture_id": "shelf-a",
+        "zone_id": "shelf-a-zone",
+        "name": "Shelf A",
+        "bounds": {
+          "min_x": 2.9,
+          "min_y": 1.0,
+          "max_x": 3.6,
+          "max_y": 1.6
+        }
+      },
+      {
+        "fixture_id": "shelf-b",
+        "zone_id": "shelf-b-zone",
+        "name": "Shelf B",
+        "bounds": {
+          "min_x": 0.9,
+          "min_y": 1.0,
+          "max_x": 1.6,
+          "max_y": 1.6
+        }
+      }
+    ],
+    "boundaries": [
+      {
+        "boundary_id": "door",
+        "kind": "EXIT",
+        "bounds": {
+          "min_x": 7.0,
+          "min_y": 0.0,
+          "max_x": 8.0,
+          "max_y": 1.5
+        }
+      }
+    ],
+    "sensors": [
+      {
+        "sensor_id": "radar-ti-01",
+        "modality": "MMWAVE",
+        "pose": {
+          "position": {
+            "x": 4.0,
+            "y": 0.0,
+            "z": 2.0,
+            "frame_id": "store"
+          },
+          "yaw": 1.5707963267948966,
+          "pitch": 0.0,
+          "roll": 0.0
+        },
+        "name": "TI IWR6843ISK on the south wall, facing north",
+        "vendor_metadata": {
+          "board": "IWR6843ISK",
+          "firmware": "3D people counting demo (Industrial Toolbox)",
+          "note": "example values; measure and replace"
+        }
+      },
+      {
+        "sensor_id": "rfid-sim-01",
+        "modality": "RFID",
+        "pose": {
+          "position": {
+            "x": 4.0,
+            "y": 3.0,
+            "z": 2.7,
+            "frame_id": "store"
+          },
+          "yaw": 0.0,
+          "pitch": 0.0,
+          "roll": 0.0
+        },
+        "name": "Simulated RFID (operator bench)",
+        "vendor_metadata": {
+          "simulated": "true",
+          "max_range_m": "6.0",
+          "note": "virtual reader; no hardware"
+        }
+      }
+    ],
+    "products": [
+      {
+        "gtin": "2000000000015",
+        "name": "Folded shirt",
+        "sku": "SHIRT-M",
+        "home_fixture_id": "shelf-a"
+      },
+      {
+        "gtin": "2000000000022",
+        "name": "Jeans",
+        "sku": "JEANS-32",
+        "home_fixture_id": "shelf-a"
+      },
+      {
+        "gtin": "2000000000039",
+        "name": "Cap",
+        "sku": "CAP-1",
+        "home_fixture_id": "shelf-b"
+      },
+      {
+        "gtin": "2000000000046",
+        "name": "Socks",
+        "sku": "SOCKS-3P",
+        "home_fixture_id": "shelf-b"
+      }
+    ],
+    "items": [
+      {
+        "epc": {
+          "value": "E28011606000020000000001"
+        },
+        "gtin": "2000000000015"
+      },
+      {
+        "epc": {
+          "value": "E28011606000020000000002"
+        },
+        "gtin": "2000000000022"
+      },
+      {
+        "epc": {
+          "value": "E28011606000020000000003"
+        },
+        "gtin": "2000000000039"
+      },
+      {
+        "epc": {
+          "value": "E28011606000020000000004"
+        },
+        "gtin": "2000000000046"
+      }
+    ]
+  },
+  "serial": {
+    "data_port": "COM6",
+    "data_baud_rate": 921600,
+    "cli_port": "COM5",
+    "cli_baud_rate": 115200,
+    "read_timeout_s": 0.5,
+    "read_chunk_bytes": 4096
+  },
+  "adapter": {
+    "sensor_id": "radar-ti-01",
+    "firmware_profile": "ti-3d-people-counting",
+    "target_record_layout": "3d_v2",
+    "coordinates": {
+      "forward_axis": "y",
+      "lateral_positive": "right",
+      "z_origin": "floor",
+      "units": "m"
+    },
+    "observation": {
+      "baseline_sigma_m": 0.35,
+      "baseline_confidence": 0.6,
+      "use_firmware_confidence": true,
+      "confidence_ceiling": 0.9,
+      "max_range_m": 15.0,
+      "max_abs_height_m": 4.0,
+      "stale_after_s": 2.0
+    },
+    "reconnect": {
+      "enabled": true,
+      "initial_delay_s": 1.0,
+      "max_delay_s": 10.0,
+      "max_attempts": 20
+    },
+    "raw_capture": {
+      "path": null,
+      "max_bytes": 67108864
+    },
+    "parser_limits": {
+      "max_packet_bytes": 65536,
+      "max_tlvs": 32,
+      "max_targets": 64,
+      "max_points": 4096,
+      "max_buffer_bytes": 262144
+    }
+  }
+}

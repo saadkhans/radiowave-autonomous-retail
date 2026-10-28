@@ -5,6 +5,7 @@ import type {
   RunState,
   ScenarioDetail,
   ScenarioSummary,
+  SimRfidBench,
   Snapshot,
   Timeline,
 } from "@/types/api";
@@ -75,6 +76,10 @@ export const api = {
   createLiveRun: (capture: boolean) => post<Snapshot>("/runs/live", { capture }),
   stopRun: (runId: string) => post<Snapshot>(`/runs/${runId}/stop`),
   reconnectRun: (runId: string) => post<Snapshot>(`/runs/${runId}/reconnect`),
+  // Simulated RFID on a hardware LIVE run (operator buttons, virtual reader).
+  simRfid: (runId: string) => request<SimRfidBench>(`/runs/${runId}/sim-rfid`),
+  simRfidAction: (runId: string, action: "pick" | "put_back", epc: string) =>
+    post<SimRfidBench>(`/runs/${runId}/sim-rfid`, { action, epc }),
 };
 
 export type Api = typeof api;

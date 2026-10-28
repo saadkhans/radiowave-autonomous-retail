@@ -9,11 +9,14 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 
 from radiowave.api.live import LiveObservatoryRun, LiveRuntime, serial_support_available
+from radiowave.api.live_rfid import OperatorRfidError
 from radiowave.api.runs import LiveModeError, LiveRunBusyError, RunManager, StoppableRun
 from radiowave.api.viewmodels import (
     LiveRunCreateRequest,
     ObservatoryLiveAvailability,
     ObservatorySnapshot,
+    SimRfidActionRequest,
+    SimRfidBench,
 )
 
 router = APIRouter(tags=["live"])
@@ -152,3 +155,26 @@ def reconnect_live_run(request: Request, run_id: str) -> ObservatorySnapshot:
         return run.apply(run.reconnect)
     except LiveModeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/sim-rfid", response_model=SimRfidBench)
+def sim_rfid_bench(request: Request, run_id: str) -> SimRfidBench:
+    """The operator's simulated RFID items for a hardware LIVE run."""
+    return _live_run(request, run_id).rfid_view()
+
+
+@router.post("/runs/{run_id}/sim-rfid", response_model=SimRfidBench)
+def sim_rfid_action(request: Request, run_id: str, body: SimRfidActionRequest) -> SimRfidBench:
+    """Declare that an item was picked up (by the radar person nearest its shelf) or put
+    back. The resulting reads come from a virtual reader, never real hardware."""
+    run = _live_run(request, run_id)
+    try:
+        if body.action == "pick":
+            run.rfid_pick(body.epc)
+        else:
+            run.rfid_put_back(body.epc)
+    except LiveModeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OperatorRfidError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return run.rfid_view()
