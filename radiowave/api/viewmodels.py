@@ -417,6 +417,37 @@ class ObservatoryLiveAvailability(ViewModel):
     reason: str | None = Field(default=None, description="Why a live run cannot start")
 
 
+class SimRfidItem(ViewModel):
+    """One item on the operator's simulated RFID bench (LIVE runs only)."""
+
+    epc: str
+    short_epc: str
+    gtin: str
+    product_name: str | None
+    home_fixture_id: str
+    home_fixture_name: str
+    state: Literal["ON_SHELF", "CARRIED", "GONE"]
+    carrier_track_id: str | None = None
+
+
+class SimRfidBench(ViewModel):
+    """Simulated RFID for a LIVE run: operator-declared item states, virtual reads.
+
+    ``attribution_simulated`` is always true: after a pick the item follows the radar
+    person the bench chose, so this exercises the pipeline, not who-took-what."""
+
+    run_id: str
+    enabled: bool
+    reason: str | None = None
+    attribution_simulated: bool = True
+    items: list[SimRfidItem] = Field(default_factory=list)
+
+
+class SimRfidActionRequest(ViewModel):
+    action: Literal["pick", "put_back"]
+    epc: str = Field(min_length=8)
+
+
 class AdvanceRequest(ViewModel):
     seconds: float = Field(gt=0.0, le=3600.0)
 

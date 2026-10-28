@@ -6,6 +6,7 @@ import { LiveControls } from "@/components/LiveControls";
 import { ReplayControls } from "@/components/ReplayControls";
 import { ScenarioSelector } from "@/components/ScenarioSelector";
 import { SimControls } from "@/components/SimControls";
+import { SimRfidPanel } from "@/components/SimRfidPanel";
 import { StoreMap } from "@/components/StoreMap";
 import { Timeline } from "@/components/Timeline";
 import { ObservatoryProvider, useObservatory } from "@/state/store";
@@ -113,6 +114,7 @@ function Console() {
           </div>
           {showReplayControls ? <ReplayControls /> : null}
           {showLiveControls ? <LiveControls /> : null}
+          {showLiveControls ? <SimRfidPanel /> : null}
           {showSimControls ? <SimControls /> : null}
           <Timeline />
           <div className="panel min-h-0 h-[260px]">

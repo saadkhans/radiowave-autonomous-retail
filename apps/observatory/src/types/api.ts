@@ -304,6 +304,31 @@ export interface LiveAvailability {
   reason: string | null;
 }
 
+/** One item on a LIVE run's simulated RFID bench. */
+export interface SimRfidItem {
+  epc: string;
+  short_epc: string;
+  gtin: string;
+  product_name: string | null;
+  home_fixture_id: string;
+  home_fixture_name: string;
+  state: "ON_SHELF" | "CARRIED" | "GONE";
+  carrier_track_id: string | null;
+}
+
+/**
+ * Operator-driven simulated RFID for a hardware LIVE run. Reads come from a
+ * virtual reader; after a pick the item follows the radar person the bench
+ * chose, so `attribution_simulated` is always true.
+ */
+export interface SimRfidBench {
+  run_id: string;
+  enabled: boolean;
+  reason: string | null;
+  attribution_simulated: boolean;
+  items: SimRfidItem[];
+}
+
 export interface RunState {
   run_id: string;
   /** Incremented by every mutation; equal across one atomic snapshot. */
