@@ -29,7 +29,11 @@ from typing import Any
 from radiowave.adapters.mmwave.ti.config import TiLiveConfig
 from radiowave.adapters.mmwave.ti.health import TiAdapterDiagnostics
 from radiowave.adapters.mmwave.ti.session import SessionTiming, StreamFactory, TiLiveSession
-from radiowave.api.live_rfid import OperatorRfidBench
+from radiowave.api.live_rfid import (
+    SIMULATED_METADATA_KEY,
+    SIMULATED_METADATA_VALUE,
+    OperatorRfidBench,
+)
 from radiowave.api.runs import LiveModeError, ObservatoryRun, short_epc
 from radiowave.api.viewmodels import (
     ObservatoryGroundTruth,
@@ -39,7 +43,7 @@ from radiowave.api.viewmodels import (
     SimRfidBench,
     SimRfidItem,
 )
-from radiowave.contracts.observations import SensorObservation
+from radiowave.contracts.observations import ItemObservation, SensorObservation
 from radiowave.contracts.recording import RecordedEntry
 from radiowave.fusion.interfaces import Recorder
 from radiowave.ingestion.normalization import ObservationNormalizer
@@ -330,11 +334,18 @@ class LiveObservatoryRun(ObservatoryRun):
         radar, now = self.session.drain_with_clock()
         # Simulated RFID reads are stamped with this same ``now`` (never later), so the
         # advance below can't run ahead of them either. Merged by the pipeline's own
-        # order key; the radar batch keeps its arrival order within the merge.
-        rfid = [
-            self._rfid_normalizer.item(read)
-            for read in self.rfid_bench.reads(now, self.pipeline.fusion.person_tracks())
-        ]
+        # order key; the radar batch keeps its arrival order within the merge. A bench
+        # failure costs this tick's simulated reads, never the radar batch drained above.
+        rfid: list[ItemObservation] = []
+        try:
+            for read in self.rfid_bench.reads(now, self.pipeline.fusion.person_tracks()):
+                item_observation = self._rfid_normalizer.item(read)
+                item_observation.metadata[SIMULATED_METADATA_KEY] = SIMULATED_METADATA_VALUE
+                rfid.append(item_observation)
+        except Exception:
+            rfid = []
+            self.ingest_errors += 1
+            log.exception("simulated RFID bench failed for %s", self.run_id)
         observations: list[SensorObservation] = (
             list(merge_streams(radar, rfid)) if rfid else list(radar)
         )

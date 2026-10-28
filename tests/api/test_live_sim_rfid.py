@@ -223,6 +223,7 @@ def test_pick_and_exit_come_out_of_the_production_pipeline() -> None:
     assert picked_by == "P0001"
     events = {(e.event_type, e.shopper_track_id) for e in result.committed_events}
     assert (RetailEventType.PICK, "P0001") in events
+    assert (RetailEventType.CARRY, "P0001") in events
     assert (RetailEventType.EXIT_WITH_ITEM, "P0001") in events
 
 
@@ -305,3 +306,54 @@ def test_routes_explain_a_store_without_simulated_rfid(tmp_path: Path) -> None:
             f"/api/runs/{run_id}/sim-rfid", json={"action": "pick", "epc": SHIRT}
         )
         assert response.status_code == 409
+
+
+def test_live_tick_ingests_marked_bench_reads_and_the_capture_replays(tmp_path: Path) -> None:
+    """Through the real LiveObservatoryRun.tick: bench reads are ingested, every one is
+    marked simulated in the recording, and the capture replays the same way twice."""
+    from radiowave.api.live import LiveObservatoryRun
+    from radiowave.api.live_rfid import SIMULATED_METADATA_KEY, SIMULATED_METADATA_VALUE
+    from radiowave.replay.reader import JsonlReplaySource
+    from tests.unit.mmwave_ti.support import wait_until
+
+    frames = [
+        build_target_frame(n, [{"tid": 1, "x": -2.0, "y": 2.2, "z": 1.0}]) for n in range(1, 13)
+    ]
+    runtime = LiveRuntime(
+        config=live_config(lab_store()),
+        stream_factory=lambda: HoldOpenStream(frames),
+        timing=FakeTiming().timing(),
+        capture_dir=tmp_path,
+        autonomous=False,
+    )
+    run = LiveObservatoryRun("live-test", runtime, capture=True)
+    assert wait_until(lambda: run.session.queued == 12)
+    with run.lock:
+        run.tick()
+    assert run.rfid_pick(SHIRT) == "P0001"
+    for _ in range(20):
+        with run.lock:
+            run.tick()
+    run.stop()
+    assert run.capture_path is not None
+
+    entries = list(JsonlReplaySource(run.capture_path).entries())
+    rfid = [
+        e for e in entries if e.kind.value == "OBSERVATION" and e.source_type == SourceType.RFID
+    ]
+    assert rfid, "no simulated RFID reads were ingested by the live tick"
+    assert all(
+        e.payload["metadata"][SIMULATED_METADATA_KEY] == SIMULATED_METADATA_VALUE for e in rfid
+    )
+
+    def replay() -> str:
+        from radiowave.contracts.recording import validate_recording
+
+        twin = next(e for e in entries if e.kind.value == "STORE_TWIN")
+        pipeline = FoundationPipeline(StoreRegistry(Store.model_validate(twin.payload)))
+        source = JsonlReplaySource(run.capture_path)  # type: ignore[arg-type]
+        result = pipeline.replay(validate_recording(source.entries()))
+        assert result.observations_accepted > len(rfid) - 1
+        return result.model_dump_json()
+
+    assert replay() == replay()

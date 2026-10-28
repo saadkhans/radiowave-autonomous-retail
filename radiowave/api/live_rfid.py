@@ -40,6 +40,10 @@ from radiowave.simulator.lab.sensors.rfid import (
 )
 
 SIMULATED_FLAG = "simulated"
+#: Stamped on every observation the bench produces, so a recording stays
+#: distinguishable from real RFID even if replayed against another twin.
+SIMULATED_METADATA_KEY = "simulated_source"
+SIMULATED_METADATA_VALUE = "operator-rfid-bench"
 #: A pick is refused unless someone is at least this close to the item (metres).
 PICK_RADIUS_M = 2.5
 #: How long a carried item keeps answering at its carrier's last position after the
@@ -139,9 +143,13 @@ class OperatorRfidBench:
         if self.enabled:
             # Localization ON, with the lab's honest 0.5 m blur: fusion's state machine
             # only moves an item off its shelf on localized reads (see module docstring).
+            # Delayed delivery is forced off: a held-back read would carry an earlier
+            # ``now`` than the advance that already happened and be dropped as
+            # out-of-order by the pipeline.
             noise_cfg = replace(
                 noise or RfidReadNoiseConfig(read_rate_hz=1.0 / poll_interval_s),
                 localization_enabled=True,
+                delayed_delivery_probability=0.0,
             )
             self._emulator = RfidReaderEmulator(
                 RfidReaderEmulatorConfig(antennas=antennas, noise=noise_cfg, seed=seed)
